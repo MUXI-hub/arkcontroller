@@ -52,22 +52,42 @@
   "choice_6_top_zone": {
     "name": "choice_6_top",
     "count": 3,
-    "start_u": 0.2727,
-    "start_v": 0.3174,
-    "end_u": 0.7531,
-    "end_v": 0.3174,
-    "slot_w": 0.2016,
-    "slot_h": 0.3020
+    "start_u": 0.2473,
+    "start_v": 0.2931,
+    "end_u": 0.7816,
+    "end_v": 0.2931,
+    "slot_w": 0.2180,
+    "slot_h": 0.3306
   },
   "choice_6_bottom_zone": {
     "name": "choice_6_bottom",
     "count": 3,
-    "start_u": 0.2727,
-    "start_v": 0.6931,
-    "end_u": 0.7531,
-    "end_v": 0.6931,
-    "slot_w": 0.2016,
-    "slot_h": 0.3020
+    "start_u": 0.2473,
+    "start_v": 0.7083,
+    "end_u": 0.7816,
+    "end_v": 0.7083,
+    "slot_w": 0.2180,
+    "slot_h": 0.3306
+  },
+  "emote_top_zone": {
+    "name": "emote_top",
+    "count": 3,
+    "start_u": 0.0582,
+    "start_v": 0.6771,
+    "end_u": 0.1996,
+    "end_v": 0.6771,
+    "slot_w": 0.0640,
+    "slot_h": 0.1120
+  },
+  "emote_bottom_zone": {
+    "name": "emote_bottom",
+    "count": 3,
+    "start_u": 0.0582,
+    "start_v": 0.8016,
+    "end_u": 0.1996,
+    "end_v": 0.8016,
+    "slot_w": 0.0640,
+    "slot_h": 0.1120
   },
   "covenant_zone": {
     "center_u": 0.500,
@@ -95,10 +115,11 @@
     "covenant_panel": { "u": 0.265, "v": 0.047, "anchor": "center_16_9" },
     "covenant_close": { "u": 0.940, "v": 0.061, "anchor": "right_edge" },
     "enemy_preview": { "u": 0.738, "v": 0.048, "anchor": "center_16_9" },
-    "emote_wheel": { "u": 0.0723, "v": 0.9174, "anchor": "left_edge" },
+    "emote_wheel": { "u": 0.0684, "v": 0.9181, "anchor": "left_edge" },
+    "emote_panel_center": { "u": 0.1290, "v": 0.7400, "anchor": "left_edge" },
     "pause_menu": { "u": 0.046, "v": 0.062, "anchor": "left_edge" },
     "choice_toggle_eye": { "u": 0.968, "v": 0.500, "anchor": "right_edge" },
-    "choice_toggle_eye_6": { "u": 0.922, "v": 0.500, "anchor": "right_edge" },
+    "choice_toggle_eye_6": { "u": 0.968, "v": 0.500, "anchor": "right_edge" },
     "sell_dropzone": { "u": 0.925, "v": 0.850, "anchor": "right_edge" },
     "safe_blank": { "u": 0.955, "v": 0.445, "anchor": "right_edge" },
     "strategy_avatar": { "u": 0.9605, "v": 0.3243, "anchor": "right_edge" },

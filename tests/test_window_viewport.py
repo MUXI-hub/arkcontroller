@@ -372,7 +372,7 @@ class TestConfigSystem:
             "sell_bench": "x",
             "retreat_unit": "q",
             "covenant_panel": "",
-            "emote_wheel": "z",
+            "emote_wheel": "",
             "back": "esc",
             "pause_menu": "esc",
         }
@@ -408,12 +408,15 @@ class TestConfigSystem:
             assert not hasattr(layout, removed_attr)
             assert removed_attr not in layout.to_dict()
 
-        # 验证新增策略头像与回合确认弹窗实测按钮锚点
+        # 验证新增策略头像、交流面板与回合确认弹窗实测按钮锚点
         assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
         assert layout.buttons["strategy_inspect"] == NormalizedPoint(0.9047, 0.3236, "right_edge")
         assert layout.buttons["confirm_no"] == NormalizedPoint(0.2496, 0.6729, "center_16_9")
         assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
         assert layout.buttons["confirm_dont_ask"] == NormalizedPoint(0.4992, 0.5597, "center_16_9")
+        assert layout.buttons["emote_wheel"] == NormalizedPoint(0.0684, 0.9181, "left_edge")
+        assert layout.buttons["emote_panel_center"] == NormalizedPoint(0.1290, 0.7400, "left_edge")
+        assert layout.buttons["choice_toggle_eye_6"] == NormalizedPoint(0.968, 0.500, "right_edge")
 
         assert "shop_toggle" in layout.buttons
         assert "safe_blank" in layout.buttons
@@ -448,13 +451,40 @@ class TestConfigSystem:
         c3_confirm = layout.resolve_choice_confirm_point(0, 3)
         assert c3_confirm[0] == pytest.approx(c3_center[0])
         assert c3_confirm[1] == pytest.approx(0.674, abs=0.006)
+        # 官方 PC 16:9 六选一三列对齐与上下排白条确认点
+        assert layout.resolve_choice_card_center(0, 6) == pytest.approx((0.2473, 0.2931))
+        assert layout.resolve_choice_card_center(2, 6) == pytest.approx((0.7816, 0.2931))
+        assert layout.resolve_choice_card_center(3, 6) == pytest.approx((0.2473, 0.7083))
+        assert layout.resolve_choice_card_center(5, 6) == pytest.approx((0.7816, 0.7083))
+        assert layout.resolve_choice_card_size(0, 6) == pytest.approx((0.2180, 0.3306))
         c6_top_confirm = layout.resolve_choice_confirm_point(1, 6)
         c6_bot_confirm = layout.resolve_choice_confirm_point(4, 6)
         assert c6_top_confirm[0] == pytest.approx(c6_bot_confirm[0])
-        assert c6_top_confirm[1] == pytest.approx(0.470, abs=0.006)
-        assert c6_bot_confirm[1] == pytest.approx(0.846, abs=0.006)
+        assert c6_top_confirm[1] == pytest.approx(0.4601, abs=0.003)
+        assert c6_bot_confirm[1] == pytest.approx(0.8753, abs=0.003)
         assert layout.resolve_choice_toggle_point(3) == layout.buttons["choice_toggle_eye"]
         assert layout.resolve_choice_toggle_point(6) == layout.buttons["choice_toggle_eye_6"]
+
+        # 验证左下 2x3 表情面板几何解析 (0..5) 与序列化
+        assert layout.emote_top_zone.count == 3
+        assert layout.emote_bottom_zone.count == 3
+        assert "emote_top_zone" in layout.to_dict()
+        assert "emote_bottom_zone" in layout.to_dict()
+        expected_emote_centers = [
+            (0.0582, 0.6771),
+            (0.1289, 0.6771),
+            (0.1996, 0.6771),
+            (0.0582, 0.8016),
+            (0.1289, 0.8016),
+            (0.1996, 0.8016),
+        ]
+        for idx, exp in enumerate(expected_emote_centers):
+            cu, cv = layout.resolve_emote_slot_center(idx)
+            assert (cu, cv) == pytest.approx(exp, abs=1e-4)
+            poly = layout.resolve_emote_slot_polygon(idx)
+            assert len(poly) == 4
+            assert poly[0] == pytest.approx((cu - 0.032, cv - 0.056), abs=1e-4)
+            assert poly[2] == pytest.approx((cu + 0.032, cv + 0.056), abs=1e-4)
         # 验证顶部下方居中对称羁绊坐标解算（奇数与偶数）
         assert isinstance(layout.covenant_zone, SymmetricCovenantZone)
         assert layout.covenant_zone.slot_center(0, count=1)[0] == pytest.approx(0.50)
@@ -514,12 +544,15 @@ class TestConfigSystem:
         raw_layout["squad_edit_nodes"] = {}
         raw_layout["settlement_nodes"] = {}
         raw_layout.pop("choice_2_zone", None)
+        raw_layout.pop("emote_top_zone", None)
+        raw_layout.pop("emote_bottom_zone", None)
         for new_key in (
             "strategy_avatar",
             "strategy_inspect",
             "confirm_no",
             "confirm_yes",
             "confirm_dont_ask",
+            "emote_panel_center",
         ):
             raw_layout["buttons"].pop(new_key, None)
 
@@ -528,6 +561,9 @@ class TestConfigSystem:
         assert layout.choice_2_zone.end_u == pytest.approx(0.6477)
         assert layout.resolve_choice_card_center(0, 2) == pytest.approx((0.3809, 0.5000))
         assert layout.resolve_choice_card_center(1, 2) == pytest.approx((0.6477, 0.5000))
+        assert layout.resolve_emote_slot_center(0) == pytest.approx((0.0582, 0.6771))
+        assert layout.resolve_emote_slot_center(5) == pytest.approx((0.1996, 0.8016))
+        assert layout.buttons["emote_panel_center"] == NormalizedPoint(0.1290, 0.7400, "left_edge")
         assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
         assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
 

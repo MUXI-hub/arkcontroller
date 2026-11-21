@@ -78,7 +78,7 @@ def _default_keyboard_shortcuts() -> dict[str, str]:
         "sell_bench": "x",
         "retreat_unit": "q",
         "covenant_panel": "",
-        "emote_wheel": "z",
+        "emote_wheel": "",
         "back": "esc",
         "pause_menu": "esc",
     }
@@ -483,12 +483,12 @@ def _default_choice_6_top_zone() -> LinearZone:
     return LinearZone(
         name="choice_6_top",
         count=3,
-        start_u=0.2727,
-        start_v=0.3174,
-        end_u=0.7531,
-        end_v=0.3174,
-        slot_w=0.2016,
-        slot_h=0.3020,
+        start_u=0.2473,
+        start_v=0.2931,
+        end_u=0.7816,
+        end_v=0.2931,
+        slot_w=0.2180,
+        slot_h=0.3306,
     )
 
 
@@ -496,23 +496,50 @@ def _default_choice_6_bottom_zone() -> LinearZone:
     return LinearZone(
         name="choice_6_bottom",
         count=3,
-        start_u=0.2727,
-        start_v=0.6931,
-        end_u=0.7531,
-        end_v=0.6931,
-        slot_w=0.2016,
-        slot_h=0.3020,
+        start_u=0.2473,
+        start_v=0.7083,
+        end_u=0.7816,
+        end_v=0.7083,
+        slot_w=0.2180,
+        slot_h=0.3306,
+    )
+
+
+def _default_emote_top_zone() -> LinearZone:
+    return LinearZone(
+        name="emote_top",
+        count=3,
+        start_u=0.0582,
+        start_v=0.6771,
+        end_u=0.1996,
+        end_v=0.6771,
+        slot_w=0.0640,
+        slot_h=0.1120,
+    )
+
+
+def _default_emote_bottom_zone() -> LinearZone:
+    return LinearZone(
+        name="emote_bottom",
+        count=3,
+        start_u=0.0582,
+        start_v=0.8016,
+        end_u=0.1996,
+        end_v=0.8016,
+        slot_w=0.0640,
+        slot_h=0.1120,
     )
 
 
 def _default_fallback_buttons() -> dict[str, NormalizedPoint]:
-    """返回回合确认弹窗与策略头像的默认实测按钮锚点（兼容精简配置字典）。"""
+    """返回回合确认弹窗、策略头像与交流面板的默认实测按钮锚点（兼容精简配置字典）。"""
     return {
         "strategy_avatar": NormalizedPoint(u=0.9605, v=0.3243, anchor="right_edge"),
         "strategy_inspect": NormalizedPoint(u=0.9047, v=0.3236, anchor="right_edge"),
         "confirm_no": NormalizedPoint(u=0.2496, v=0.6729, anchor="center_16_9"),
         "confirm_yes": NormalizedPoint(u=0.7496, v=0.6729, anchor="center_16_9"),
         "confirm_dont_ask": NormalizedPoint(u=0.4992, v=0.5597, anchor="center_16_9"),
+        "emote_panel_center": NormalizedPoint(u=0.1290, v=0.7400, anchor="left_edge"),
     }
 
 
@@ -693,6 +720,8 @@ class LayoutProfile:
     choice_2_zone: LinearZone = field(default_factory=_default_choice_2_zone)
     choice_6_top_zone: LinearZone = field(default_factory=_default_choice_6_top_zone)
     choice_6_bottom_zone: LinearZone = field(default_factory=_default_choice_6_bottom_zone)
+    emote_top_zone: LinearZone = field(default_factory=_default_emote_top_zone)
+    emote_bottom_zone: LinearZone = field(default_factory=_default_emote_bottom_zone)
     covenant_zone: SymmetricCovenantZone = field(default_factory=SymmetricCovenantZone)
 
     def __post_init__(self) -> None:
@@ -916,6 +945,27 @@ class LayoutProfile:
             return self.buttons["choice_toggle_eye_6"]
         return self.buttons.get("choice_toggle_eye")
 
+    def resolve_emote_slot_center(self, index: int) -> tuple[float, float]:
+        """解析左下 2x3 表情面板第 index (0..5) 个表情槽位的归一化中心坐标 (u, v)。"""
+        idx = max(0, min(5, int(index)))
+        if idx < 3:
+            return self._linear_slot_center(self.emote_top_zone, idx, 3)
+        return self._linear_slot_center(self.emote_bottom_zone, idx - 3, 3)
+
+    def resolve_emote_slot_polygon(self, index: int) -> list[tuple[float, float]]:
+        """返回左下 2x3 表情面板第 index (0..5) 个表情槽位的顺时针 4 顶点归一化矩形。"""
+        idx = max(0, min(5, int(index)))
+        cu, cv = self.resolve_emote_slot_center(idx)
+        zone = self.emote_top_zone if idx < 3 else self.emote_bottom_zone
+        hw = zone.slot_w * 0.5
+        hh = zone.slot_h * 0.5
+        return [
+            (max(0.0, cu - hw), max(0.0, cv - hh)),
+            (min(1.0, cu + hw), max(0.0, cv - hh)),
+            (min(1.0, cu + hw), min(1.0, cv + hh)),
+            (max(0.0, cu - hw), min(1.0, cv + hh)),
+        ]
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为完整 JSON 字典。"""
         data: dict[str, Any] = {
@@ -926,6 +976,8 @@ class LayoutProfile:
             "choice_2_zone": self.choice_2_zone.to_dict(),
             "choice_6_top_zone": self.choice_6_top_zone.to_dict(),
             "choice_6_bottom_zone": self.choice_6_bottom_zone.to_dict(),
+            "emote_top_zone": self.emote_top_zone.to_dict(),
+            "emote_bottom_zone": self.emote_bottom_zone.to_dict(),
             "covenant_zone": self.covenant_zone.to_dict(),
             "board_quad": self.board_quad.to_dict(),
             "buttons": {k: v.to_dict() for k, v in self.buttons.items()},
@@ -950,6 +1002,8 @@ class LayoutProfile:
         raw_c2 = data.get("choice_2_zone")
         raw_c6_top = data.get("choice_6_top_zone")
         raw_c6_bot = data.get("choice_6_bottom_zone")
+        raw_em_top = data.get("emote_top_zone")
+        raw_em_bot = data.get("emote_bottom_zone")
         raw_cov = data.get("covenant_zone")
         return cls(
             shop_zone=(
@@ -1004,6 +1058,24 @@ class LayoutProfile:
                     LinearZone.from_dict(raw_c6_bot)
                     if isinstance(raw_c6_bot, Mapping)
                     else _default_choice_6_bottom_zone()
+                )
+            ),
+            emote_top_zone=(
+                raw_em_top
+                if isinstance(raw_em_top, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_em_top)
+                    if isinstance(raw_em_top, Mapping)
+                    else _default_emote_top_zone()
+                )
+            ),
+            emote_bottom_zone=(
+                raw_em_bot
+                if isinstance(raw_em_bot, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_em_bot)
+                    if isinstance(raw_em_bot, Mapping)
+                    else _default_emote_bottom_zone()
                 )
             ),
             covenant_zone=(
