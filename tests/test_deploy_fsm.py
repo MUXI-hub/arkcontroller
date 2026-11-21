@@ -35,14 +35,20 @@ from arkcontroller.vision.scene_detector import GameScene, SceneDetectionResult
 class MockVirtualHID:
     """记录全部键鼠模拟调用序列的测试替身。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, cursor_pos: tuple[int, int] | None = None) -> None:
         self.calls: list[tuple[Any, ...]] = []
+        self.cursor_pos: tuple[int, int] | None = cursor_pos
 
     def clear(self) -> None:
         self.calls.clear()
 
+    def get_cursor_pos(self) -> tuple[int, int] | None:
+        return self.cursor_pos
+
     def move_cursor(self, screen_x: int, screen_y: int) -> None:
         self.calls.append(("move_cursor", screen_x, screen_y))
+        if self.cursor_pos is not None:
+            self.cursor_pos = (screen_x, screen_y)
 
     def click(
         self,
@@ -52,6 +58,8 @@ class MockVirtualHID:
         hold_ms: int = 30,
     ) -> None:
         self.calls.append(("click", screen_x, screen_y, button))
+        if self.cursor_pos is not None:
+            self.cursor_pos = (screen_x, screen_y)
 
     def double_click(
         self,
@@ -60,6 +68,8 @@ class MockVirtualHID:
         interval_ms: int = 55,
     ) -> None:
         self.calls.append(("double_click", screen_x, screen_y))
+        if self.cursor_pos is not None:
+            self.cursor_pos = (screen_x, screen_y)
 
     def smooth_drag(
         self,
@@ -256,7 +266,7 @@ class TestForegroundAndGlobalControls:
         assert snap_stay.free_cursor_active is False
         assert hid.calls == []
 
-        # 按 LS 切入自由光标模式，随后左摇杆平滑移动鼠标并按 A 点击
+        # 按 LS 切入自由光标模式（立即将真实光标落到当前吸附槽位），随后左摇杆平滑移动鼠标并按 A 点击
         snap = dispatcher.process_tick(
             vp,
             prep,
@@ -270,8 +280,9 @@ class TestForegroundAndGlobalControls:
         assert snap.focus_zone == FocusZone.FREE_CURSOR
         assert snap.focus_polygon_norm is None
         assert hid.calls[0][0] == "move_cursor"
-        assert hid.calls[1][0] == "click"
-        assert hid.calls[1][1:3] == hid.calls[0][1:3]
+        assert hid.calls[1][0] == "move_cursor"
+        assert hid.calls[2][0] == "click"
+        assert hid.calls[2][1:3] == hid.calls[1][1:3]
 
         # 右摇杆触发垂直与水平滚轮
         hid.clear()
@@ -1902,3 +1913,152 @@ class TestPhase2InplaceTurnConfirmStrategyAndLockSync:
         )
         assert snap_hold.scene == GameScene.BATTLE_PREP
         assert snap_hold.scene_locked_manual is True
+
+    def test_modal_2_choice_navigation_labels_white_bar_and_lt_peek(self) -> None:
+        """v0.2.1：二选一（1x2）文案、choice_2_zone 精准落点、初始白条吸附、两段 A / RT+A / B 重选与按住 LT 看场。"""
+        dispatcher, hid, _, _, layout, vp = _make_env()
+
+        # 1. 无预选中进入二选一：默认聚焦左卡（索引 0），标签显示「二选一 [1/2]」，坐标对齐 choice_2_zone
+        modal2 = SceneDetectionResult(GameScene.MODAL_CHOICE, 0.94, choice_count=2)
+        snap0 = dispatcher.process_tick(vp, modal2, [])
+        assert snap0.scene == GameScene.MODAL_CHOICE
+        assert snap0.focus_zone == FocusZone.CHOICE_CARDS
+        assert snap0.focus_label == "二选一 [1/2]"
+        assert snap0.cursor_norm == pytest.approx(layout.resolve_choice_card_center(0, 2))
+        assert snap0.cursor_norm == pytest.approx((0.3809, 0.5000), abs=1e-3)
+
+        # 左右 / LB / RB 在两张卡之间循环切换
+        snap_r = dispatcher.process_tick(vp, modal2, [ButtonTap(GamepadButton.DPAD_RIGHT)])
+        assert snap_r.focus_label == "二选一 [2/2]"
+        assert snap_r.cursor_norm == pytest.approx(layout.resolve_choice_card_center(1, 2))
+        snap_wrap = dispatcher.process_tick(vp, modal2, [ButtonTap(GamepadButton.RB)])
+        assert snap_wrap.focus_label == "二选一 [1/2]"
+        snap_lb = dispatcher.process_tick(vp, modal2, [ButtonTap(GamepadButton.LB)])
+        assert snap_lb.focus_label == "二选一 [2/2]"
+
+        # 两段式按 A：首次点击右卡主体进入待确认态（吸附右卡白条），按 B 取消待确认重选，再次两段 A 确认
+        card1_xy = vp.norm_to_screen(*layout.resolve_choice_card_center(1, 2))
+        confirm1_xy = vp.norm_to_screen(*layout.resolve_choice_confirm_point(1, 2))
+        hid.clear()
+        snap_sel = dispatcher.process_tick(vp, modal2, [ButtonTap(GamepadButton.A)])
+        assert snap_sel.focus_label == "二选一 [2/2] · 待确认"
+        assert snap_sel.cursor_norm == pytest.approx(layout.resolve_choice_confirm_point(1, 2))
+        assert hid.calls == [("click", card1_xy[0], card1_xy[1], "left")]
+
+        snap_reselect = dispatcher.process_tick(vp, modal2, [ButtonTap(GamepadButton.B)])
+        assert dispatcher.selected_choice_index is None
+        assert snap_reselect.focus_label == "二选一 [2/2]"
+
+        hid.clear()
+        dispatcher.process_tick(
+            vp, modal2, [ButtonTap(GamepadButton.A), ButtonTap(GamepadButton.A)]
+        )
+        assert hid.calls == [
+            ("click", card1_xy[0], card1_xy[1], "left"),
+            ("click", confirm1_xy[0], confirm1_xy[1], "left"),
+        ]
+
+        # 左移到第 1 卡，RT + A 一键选中并点击底部白条确认
+        card0_xy = vp.norm_to_screen(*layout.resolve_choice_card_center(0, 2))
+        confirm0_xy = vp.norm_to_screen(*layout.resolve_choice_confirm_point(0, 2))
+        hid.clear()
+        dispatcher.process_tick(
+            vp,
+            modal2,
+            [
+                ButtonTap(GamepadButton.DPAD_LEFT),
+                ChordTriggered(GamepadButton.RT, GamepadButton.A),
+            ],
+        )
+        assert hid.calls == [
+            ("click", card0_xy[0], card0_xy[1], "left"),
+            ("click", confirm0_xy[0], confirm0_xy[1], "left"),
+        ]
+
+        # 按住 LT 收起看场、松开 LT 恢复（复用 choice_toggle_eye）
+        eye_pt = layout.resolve_choice_toggle_point(2)
+        assert eye_pt is not None
+        eye_xy = vp.norm_to_screen(eye_pt.u, eye_pt.v, eye_pt.anchor)
+        hid.clear()
+        snap_hide = dispatcher.process_tick(
+            vp, modal2, [ModifierStateChanged(GamepadButton.LT, active=True)]
+        )
+        assert snap_hide.focus_polygon_norm is None
+        snap_show = dispatcher.process_tick(
+            vp, modal2, [ModifierStateChanged(GamepadButton.LT, active=False)]
+        )
+        assert snap_show.focus_polygon_norm is not None
+        assert hid.calls == [
+            ("click", eye_xy[0], eye_xy[1], "left"),
+            ("click", eye_xy[0], eye_xy[1], "left"),
+        ]
+
+        # 2. 初始已由视觉识别出右卡白条（selected_choice_index=1）：进入即吸附白条，单按 A 直接确认
+        dispatcher2, hid2, _, _, _, _ = _make_env()
+        modal2_presel = SceneDetectionResult(
+            GameScene.MODAL_CHOICE, 0.95, choice_count=2, selected_choice_index=1
+        )
+        snap_pre = dispatcher2.process_tick(vp, modal2_presel, [])
+        assert snap_pre.focus_label == "二选一 [2/2] · 待确认"
+        assert snap_pre.cursor_norm == pytest.approx(layout.resolve_choice_confirm_point(1, 2))
+        hid2.clear()
+        dispatcher2.process_tick(vp, modal2_presel, [ButtonTap(GamepadButton.A)])
+        assert hid2.calls == [("click", confirm1_xy[0], confirm1_xy[1], "left")]
+
+    def test_startup_free_cursor_physical_sync_and_subpixel_micro_push(self) -> None:
+        """v0.2.1：启动与自由鼠标态同步物理光标、慢速微推摇杆亚像素不锁死、手动移鼠跟手与 LS 切入防拉回。"""
+        keymap, layout = ConfigLoader(use_user_override=False).load()
+        hid = MockVirtualHID(cursor_pos=(480, 270))
+        dispatcher = ControlDispatcher(keymap=keymap, layout=layout, hid=hid)  # type: ignore[arg-type]
+        vp = _make_viewport(is_foreground=True)
+        unknown = SceneDetectionResult(GameScene.UNKNOWN_FREE_CURSOR, 0.0)
+
+        # 1. 启动首帧同步当前物理光标 (480, 270) -> (0.25, 0.25)
+        snap0 = dispatcher.process_tick(vp, unknown, [])
+        assert snap0.scene == GameScene.UNKNOWN_FREE_CURSOR
+        assert snap0.free_cursor_active is True
+        assert snap0.cursor_norm == pytest.approx((480 / 1920, 270 / 1080))
+        assert hid.calls == []
+
+        # 2. 连续 10 帧极慢速微推摇杆（每帧 0.3px, 0.2px < 0.5px）：浮点亚像素累加不被整数读回抹零
+        for _ in range(10):
+            dispatcher.process_tick(
+                vp, unknown, [StickMotion("left", 0.20, -0.15, 0.3, 0.2)]
+            )
+        assert hid.cursor_pos == (483, 272)
+        assert hid.calls[-1] == ("move_cursor", 483, 272)
+
+        # 3. 用户用物理鼠标移动 >= 2px 到 (1200, 600)：下一帧立刻无损同步 HUD 准星
+        hid.cursor_pos = (1200, 600)
+        snap_hand = dispatcher.process_tick(vp, unknown, [])
+        assert snap_hand.cursor_norm == pytest.approx((1200 / 1920, 600 / 1080))
+
+        # 4. 物理鼠标移到游戏窗口客户区外（例如副屏 -100, 300）：忽略不污染准星
+        hid.cursor_pos = (-100, 300)
+        snap_out = dispatcher.process_tick(vp, unknown, [])
+        assert snap_out.cursor_norm == pytest.approx((1200 / 1920, 600 / 1080))
+
+        # 5. 游戏切到后台再回前台：重置 _last_cmd_cursor_px 并在回前台首帧重同步
+        bg_vp = _make_viewport(is_foreground=False)
+        dispatcher.process_tick(bg_vp, unknown, [])
+        hid.cursor_pos = (1201, 601)  # 即使只偏移 1px，重回前台也必须同步
+        snap_refocus = dispatcher.process_tick(vp, unknown, [])
+        assert snap_refocus.cursor_norm == pytest.approx((1201 / 1920, 601 / 1080))
+
+        # 6. 局内按 LS 切至自由光标：立刻将真实鼠标移到吸附槽位，且下一帧不被旧物理光标拉走
+        prep = SceneDetectionResult(GameScene.BATTLE_PREP, 0.96, shop_open=False)
+        snap_prep = dispatcher.process_tick(vp, prep, [])
+        assert snap_prep.focus_zone == FocusZone.BENCH
+        bench0_xy = vp.norm_to_screen(*LinearZoneMapper(layout.bench_zone).slot_center(0))
+        hid.cursor_pos = (100, 100)  # 模拟局内操作前物理鼠标停在左上角
+        hid.clear()
+        snap_ls = dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.LS)])
+        assert snap_ls.free_cursor_active is True
+        assert hid.calls == [("move_cursor", bench0_xy[0], bench0_xy[1])]
+        assert hid.cursor_pos == bench0_xy
+
+        # 下一帧无新输入时准星与物理光标稳停在 bench0，不会被拉回旧位置
+        snap_stay = dispatcher.process_tick(vp, prep, [])
+        assert snap_stay.cursor_norm == pytest.approx(
+            LinearZoneMapper(layout.bench_zone).slot_center(0)
+        )

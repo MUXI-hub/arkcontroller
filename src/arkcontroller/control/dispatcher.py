@@ -249,6 +249,7 @@ class ControlDispatcher:
         # 自由光标与滚轮积分器
         self._free_cursor_active: bool = True
         self._cursor_norm: tuple[float, float] = (0.5, 0.5)
+        self._last_cmd_cursor_px: tuple[int, int] | None = None
         self._scroll_v_accum: float = 0.0
         self._scroll_h_accum: float = 0.0
 
@@ -380,6 +381,7 @@ class ControlDispatcher:
         # 最高优先级安全护栏：游戏窗口未找到或处于后台时，严禁向 HID 发送任何输入
         if viewport is None or not viewport.is_foreground:
             self._ready_hold_progress = 0.0
+            self._last_cmd_cursor_px = None
             if self._choice_eye_hidden:
                 self._choice_eye_hidden = False
             return self._build_snapshot(visible=False)
@@ -387,11 +389,38 @@ class ControlDispatcher:
         # 同步自动识别场景（手动锁层或部署拖拽态下不强行打断）
         self._sync_scene(scene_result)
 
+        # 自由鼠标态下同步真实物理光标位置（仅在首次入前台或物理鼠标实际移动 >=2px 时同步，避免微推摇杆亚像素累加被抹零）
+        if self._free_cursor_active or self._current_scene == GameScene.UNKNOWN_FREE_CURSOR:
+            self._sync_physical_cursor(viewport)
+
         # 逐条处理本帧手势事件
         for event in events:
             self._handle_event(event, viewport)
 
         return self._build_snapshot(visible=True)
+
+    def _sync_physical_cursor(self, viewport: ViewportRect) -> None:
+        """无损同步系统物理光标位置到自由鼠标归一化坐标（保护摇杆浮点亚像素累加不被取整锁死）。"""
+        get_pos = getattr(self.hid, "get_cursor_pos", None)
+        if not callable(get_pos):
+            return
+        pos = get_pos()
+        if pos is None or len(pos) != 2:
+            return
+        px, py = int(pos[0]), int(pos[1])
+        if not (
+            viewport.client_left <= px < viewport.client_left + viewport.client_width
+            and viewport.client_top <= py < viewport.client_top + viewport.client_height
+        ):
+            return
+        if (
+            self._last_cmd_cursor_px is None
+            or abs(px - self._last_cmd_cursor_px[0]) >= 2
+            or abs(py - self._last_cmd_cursor_px[1]) >= 2
+        ):
+            nu, nv = viewport.screen_to_norm(px, py)
+            self._cursor_norm = (_clamp01(nu), _clamp01(nv))
+            self._last_cmd_cursor_px = (px, py)
 
     # ------------------------------------------------------------------
     # 内部初始化与工具方法
@@ -939,6 +968,7 @@ class ControlDispatcher:
         else:
             self._focus_zone = FocusZone.FREE_CURSOR
             self._free_cursor_active = True
+            self._last_cmd_cursor_px = None
 
         self._refresh_view_state()
 
@@ -1117,7 +1147,7 @@ class ControlDispatcher:
                 and self.deploy_fsm.state != DeployState.AIMING_DIRECTION
                 and self._current_scene != GameScene.UNKNOWN_FREE_CURSOR
             ):
-                self._toggle_free_cursor()
+                self._toggle_free_cursor(viewport)
                 return
 
         # 3. 修饰键按下/松开状态变化（用于三选一按住 LT 查看战场、松开恢复）
@@ -1183,14 +1213,19 @@ class ControlDispatcher:
             self._choice_eye_hidden = False
             self._set_toast("已恢复决策弹窗")
 
-    def _toggle_free_cursor(self) -> None:
+    def _toggle_free_cursor(self, viewport: ViewportRect | None = None) -> None:
         """LS 按下：一键切换槽位吸附导航与自由虚拟光标模式。"""
         if not self._free_cursor_active:
             self._cursor_norm = self._current_snap_center()
             self._free_cursor_active = True
+            if viewport is not None:
+                sx, sy = viewport.norm_to_screen(*self._cursor_norm)
+                self.hid.move_cursor(sx, sy)
+                self._last_cmd_cursor_px = (sx, sy)
             self._set_toast("已切至自由光标（再按 LS 或十字键恢复吸附）")
         else:
             self._free_cursor_active = False
+            self._last_cmd_cursor_px = None
             self._set_toast("已恢复槽位吸附导航（左摇杆 / 十字键）")
         self._emit_rumble(0.16, 0.22, 35)
 
@@ -1251,6 +1286,7 @@ class ControlDispatcher:
             )
             sx, sy = viewport.norm_to_screen(*self._cursor_norm)
             self.hid.move_cursor(sx, sy)
+            self._last_cmd_cursor_px = (sx, sy)
             return
 
         # 右摇杆模拟垂直/水平滚轮滚动（严格使用 GestureEngine 亚像素积分后的像素增量）
@@ -1329,6 +1365,7 @@ class ControlDispatcher:
         if self._free_cursor_active or self._current_scene == GameScene.UNKNOWN_FREE_CURSOR:
             sx, sy = viewport.norm_to_screen(*self._cursor_norm)
             self.hid.double_click(sx, sy)
+            self._last_cmd_cursor_px = (sx, sy)
             self._emit_rumble(0.22, 0.30, 40)
             return
 
@@ -1500,6 +1537,7 @@ class ControlDispatcher:
             and (button in _DPAD_TO_DIR or button in (GamepadButton.LB, GamepadButton.RB))
         ):
             self._free_cursor_active = False
+            self._last_cmd_cursor_px = None
 
         # 纯自由光标模式处理（含局外未知界面）
         if self._free_cursor_active or self._current_scene == GameScene.UNKNOWN_FREE_CURSOR:
@@ -1531,7 +1569,9 @@ class ControlDispatcher:
         if is_repeat:
             return
         if button == GamepadButton.A:
-            self._click_norm(self._cursor_norm[0], self._cursor_norm[1], viewport)
+            sx, sy = viewport.norm_to_screen(*self._cursor_norm)
+            self.hid.click(sx, sy, button="left")
+            self._last_cmd_cursor_px = (sx, sy)
         elif button == GamepadButton.B:
             if not self._close_info_overlay_if_open(viewport):
                 self._trigger_action("back", "back", "esc", viewport)
@@ -2405,7 +2445,14 @@ class ControlDispatcher:
         if self._focus_zone == FocusZone.CHOICE_CARDS:
             if self._choice_eye_hidden:
                 return "查看战场"
-            prefix = "六选一" if self._choice_count >= 5 else "三选一"
+            if self._choice_count >= 5:
+                prefix = "六选一"
+            elif self._choice_count == 2:
+                prefix = "二选一"
+            elif self._choice_count == 3:
+                prefix = "三选一"
+            else:
+                prefix = f"{self._choice_count}选一"
             suffix = " · 待确认" if self._selected_choice_idx == self._choice_idx else ""
             return f"{prefix} [{self._choice_idx + 1}/{self._choice_count}]{suffix}"
         if self._focus_zone == FocusZone.CONFIRM_DIALOG:
