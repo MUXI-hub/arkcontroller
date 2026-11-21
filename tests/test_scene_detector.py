@@ -73,11 +73,25 @@ def _draw_distinctive_badge(
     return patch
 
 
+def _draw_stronghold_in_game_chrome(frame: np.ndarray) -> None:
+    """绘制卫戍协议局内双身份锚点：左上角深红退出门按钮 + 顶部中央深黑状态栏。"""
+    # 左上角深红退出门（BGR (28, 30, 145) -> HSV H≈1, S≈205, V=145）
+    cv2.rectangle(frame, (18, 14), (94, 74), (28, 30, 145), -1)
+    # 顶部中央深黑回合/状态信息栏（V=28 <= 70）
+    cv2.rectangle(frame, (410, 6), (870, 66), (22, 24, 28), -1)
+
+
+def _draw_modal_cyan_chrome(frame: np.ndarray) -> None:
+    """绘制卫戍协议决策弹窗左上角青蓝色标题带（BGR (220, 215, 25) -> HSV H≈91）。"""
+    cv2.rectangle(frame, (160, 26), (380, 76), (220, 215, 25), -1)
+
+
 def _make_modal_choice_frame(choice_count: int = 3) -> np.ndarray:
-    """构造带四周半透明暗化遮罩与中央横向等距高亮卡片的合成弹窗帧。"""
+    """构造带卫戍青色标题、四周半透明暗化遮罩与中央横向等距高亮卡片的合成弹窗帧。"""
     frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 24, dtype=np.uint8)
     # 模拟暗化后的微弱背景噪声
     frame[100:600, 140:1140] = 32
+    _draw_modal_cyan_chrome(frame)
 
     if choice_count == 3:
         card_boxes = [
@@ -102,8 +116,9 @@ def _make_modal_choice_frame(choice_count: int = 3) -> np.ndarray:
 
 
 def _make_battle_prep_frame(shop_open: bool = True) -> np.ndarray:
-    """构造具备底部 10 格整备槽条纹与右下角高亮准备按钮的局内休整期合成帧。"""
+    """构造具备局内双锚点、底部 10 格整备槽条纹与右下角高亮准备按钮的局内休整期合成帧。"""
     frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 48, dtype=np.uint8)
+    _draw_stronghold_in_game_chrome(frame)
     # 中部棋盘区域背景纹理
     cv2.rectangle(frame, (180, 110), (1080, 410), (75, 82, 92), -1)
     for gx in range(220, 1060, 90):
@@ -434,8 +449,9 @@ def test_heuristic_real_pc_stronghold_prep_shop_and_unit_selected(tmp_path: Path
     """验证实机标定的零模板 HSV 强特征：右上粉红准备按钮、刷冻双色块与左侧角色血条（排除拖拽金框）。"""
     detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
 
-    # 1. 默认休整期（右上角粉红准备按钮，无商店双按钮、无角色青蓝血条）
+    # 1. 默认休整期（局内双锚点 + 右上角粉红准备按钮，无商店双按钮、无角色青蓝血条）
     base = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 45, dtype=np.uint8)
+    _draw_stronghold_in_game_chrome(base)
     # 铺一点灰阶方差避免纯色帧守卫
     cv2.rectangle(base, (200, 120), (1040, 500), (88, 92, 98), -1)
     # 右上角粉红准备按钮（BGR: (110, 70, 235) -> HSV H≈172, S≈179, V≈235）
@@ -490,6 +506,7 @@ def test_heuristic_dynamic_shop_slot_count_4_5_6_and_max_level(tmp_path: Path) -
     detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
 
     base_shop = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 38, dtype=np.uint8)
+    _draw_stronghold_in_game_chrome(base_shop)
     cv2.rectangle(base_shop, (200, 120), (1040, 480), (88, 92, 98), -1)
     # 右上角粉红准备按钮 + 右侧黄刷新与蓝冻结双按钮
     cv2.rectangle(base_shop, (1120, 100), (1255, 140), (110, 70, 235), -1)
@@ -550,6 +567,9 @@ def _make_real_style_modal_frame(
         boxes = [(xl, 120, xr, 337) for xl, xr in cols] + [
             (xl, 387, xr, 608) for xl, xr in cols
         ]
+    elif choice_count == 2:
+        cols = [(348, 627), (689, 969)]
+        boxes = [(xl, 241, xr, 479) for xl, xr in cols]
     else:
         cols = [(171, 460), (515, 801), (857, 1144)]
         boxes = [(xl, 242, xr, 483) for xl, xr in cols]
@@ -638,6 +658,7 @@ def test_symmetric_covenant_count_and_teammate_detection_in_prep(tmp_path: Path)
     detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
 
     base = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 46, dtype=np.uint8)
+    _draw_stronghold_in_game_chrome(base)
     cv2.rectangle(base, (200, 150), (1040, 500), (88, 92, 98), -1)
     cv2.rectangle(base, (1120, 100), (1255, 140), (110, 70, 235), -1)
 
@@ -905,8 +926,9 @@ def test_real_viewport_and_config_loader_integration(tmp_path: Path) -> None:
 
 
 def _make_modal_confirm_frame(*, with_top_ready_pink: bool = True) -> np.ndarray:
-    """构造回合结束未用完资金/策略确认弹窗合成帧（含右上模糊粉红按钮残留）。"""
+    """构造回合结束未用完资金/策略确认弹窗合成帧（含右上模糊粉红按钮残留与局内双锚点）。"""
     frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 55, dtype=np.uint8)
+    _draw_stronghold_in_game_chrome(frame)
     if with_top_ready_pink:
         # 模拟弹窗后方模糊残留的右上角粉红「准备就绪」按钮，检验不会被误判为 BATTLE_PREP
         cv2.rectangle(frame, (1120, 100), (1255, 140), (110, 70, 235), -1)
@@ -951,8 +973,9 @@ def test_heuristic_modal_confirm_detection_and_priority_over_prep(tmp_path: Path
 
 
 def _make_base_shop_frame() -> np.ndarray:
-    """构造带实机右上角粉红准备按钮与右侧黄刷新/蓝冻结双按钮的商店展开基础帧。"""
+    """构造带局内双锚点、实机右上角粉红准备按钮与右侧黄刷新/蓝冻结双按钮的商店展开基础帧。"""
     frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 38, dtype=np.uint8)
+    _draw_stronghold_in_game_chrome(frame)
     # 模拟左侧空白商店托盘的暗蓝底部渐变背景（V≈68，无垂直卡片边框）
     frame[690:712, 0:1090] = (68, 32, 22)
     cv2.rectangle(frame, (200, 120), (1040, 480), (88, 92, 98), -1)
@@ -1236,14 +1259,15 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
         r"C:\Users\MUXI\.gemini\antigravity\brain\26ef9845-6d52-4d6e-925c-cbef8d7a9ccc\scratch"
     )
 
-    cases: list[tuple[Path, GameScene, bool | None, int | None, int | None]] = [
-        (a7_up / "media_1795255173277_9cab756a.jpg", GameScene.MODAL_CONFIRM, False, None, None),
-        (a7_up / "media_1795255107638_886a641d.jpg", GameScene.UNKNOWN_FREE_CURSOR, None, None, None),
-        (a7_up / "media_1795249195269_5c024fc5.jpg", GameScene.MODAL_CHOICE, False, None, 3),
-        (a7_up / "media_1795250588564_ad5eab9e.jpg", GameScene.MODAL_CHOICE, False, None, 6),
-        (old_sc / "state1_normal.png", GameScene.BATTLE_PREP, False, None, None),
-        (old_sc / "state2_shop_open.png", GameScene.BATTLE_PREP, True, 4, None),
-        (a7_dir / "shop_6slot_verify.png", GameScene.BATTLE_PREP, True, 6, None),
+    cases: list[tuple[Path, GameScene, bool | None, int | None, int | None, int | None]] = [
+        (a7_up / "media_1795255173277_9cab756a.jpg", GameScene.MODAL_CONFIRM, False, None, None, None),
+        (a7_up / "media_1795255107638_886a641d.jpg", GameScene.UNKNOWN_FREE_CURSOR, None, None, None, None),
+        (a7_up / "media_1795249195269_5c024fc5.jpg", GameScene.MODAL_CHOICE, False, None, 3, 0),
+        (a7_up / "media_1795250588564_ad5eab9e.jpg", GameScene.MODAL_CHOICE, False, None, 6, 4),
+        (a7_up / "media_1795263414030_b12d9638.jpg", GameScene.MODAL_CHOICE, False, None, 2, 1),
+        (old_sc / "state1_normal.png", GameScene.BATTLE_PREP, False, None, None, None),
+        (old_sc / "state2_shop_open.png", GameScene.BATTLE_PREP, True, 4, None, None),
+        (a7_dir / "shop_6slot_verify.png", GameScene.BATTLE_PREP, True, 6, None, None),
     ]
 
     available = [c for c in cases if c[0].exists()]
@@ -1251,7 +1275,7 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
         pytest.skip("本机无可选实机标定截图，跳过实机回归校验")
 
     detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
-    for img_path, exp_scene, exp_shop_open, exp_slots, exp_choices in available:
+    for img_path, exp_scene, exp_shop_open, exp_slots, exp_choices, exp_sel_choice in available:
         raw = np.fromfile(str(img_path), dtype=np.uint8)
         frame = cv2.imdecode(raw, cv2.IMREAD_COLOR)
         assert frame is not None, f"无法读取实机截图: {img_path}"
@@ -1263,6 +1287,10 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
             assert res.shop_slot_count == exp_slots, f"{img_path.name}: shop_slot_count mismatch {res}"
         if exp_choices is not None:
             assert res.choice_count == exp_choices, f"{img_path.name}: choice_count mismatch {res}"
+        if exp_sel_choice is not None:
+            assert res.selected_choice_index == exp_sel_choice, (
+                f"{img_path.name}: selected_choice_index mismatch {res}"
+            )
 
     # 额外可选校验：桌面实机截图 media_0.png 中带蓝紫底部发光的真实紫红 [G] 升级卡
     media0_path = a7_dir / ".system_generated" / "steps" / "291" / "media_0.png"
@@ -1278,5 +1306,106 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
             assert SceneDetector._has_shop_upgrade_card(hsv_m0, 332, 441) is True
             assert SceneDetector._has_shop_item_card(hsv_m0, 288, 442) is False
             assert SceneDetector._has_shop_item_card(hsv_m0, 450, 604) is True
+
+
+# =====================================================================
+# 7. v0.2.1 专项：实机 1x2 二选一弹窗识别 & 局外界面 100% 防误判负例测试
+# =====================================================================
+
+
+def test_real_style_2choice_modal_and_white_bar(tmp_path: Path) -> None:
+    """验证实机暗底亮框 1x2 二选一弹窗识别、左右白条索引判定与实机截图直测。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 1. 合成 1x2 二选一：未选中
+    f2_idle = _make_real_style_modal_frame(choice_count=2, selected_index=None)
+    r2_idle = detector.detect(f2_idle)
+    assert r2_idle.scene == GameScene.MODAL_CHOICE
+    assert r2_idle.choice_count == 2
+    assert r2_idle.selected_choice_index is None
+    assert r2_idle.shop_open is False
+
+    # 2. 合成 1x2 二选一：选中左卡(0) 与 选中右卡(1) 弹出底部白条
+    f2_sel0 = _make_real_style_modal_frame(choice_count=2, selected_index=0)
+    r2_sel0 = detector.detect(f2_sel0)
+    assert r2_sel0.scene == GameScene.MODAL_CHOICE
+    assert r2_sel0.choice_count == 2
+    assert r2_sel0.selected_choice_index == 0
+
+    f2_sel1 = _make_real_style_modal_frame(choice_count=2, selected_index=1)
+    r2_sel1 = detector.detect(f2_sel1)
+    assert r2_sel1.scene == GameScene.MODAL_CHOICE
+    assert r2_sel1.choice_count == 2
+    assert r2_sel1.selected_choice_index == 1
+
+    # 2b. 二选一两翼外侧叠加高对比压暗地图斜边与交错砖块纹理（模拟雪山冰面背景），绝不误杀
+    f2_textured_wings = _make_real_style_modal_frame(choice_count=2, selected_index=1)
+    for row in range(260, 460, 20):
+        offset = (row // 20 % 2) * 18
+        cv2.line(f2_textured_wings, (150 + offset, row), (305, row + 18), (165, 175, 185), 2)
+        cv2.line(f2_textured_wings, (995 + offset, row), (1135, row + 18), (165, 175, 185), 2)
+        cv2.line(f2_textured_wings, (305 - offset, row), (155, row + 18), (22, 26, 30), 2)
+        cv2.line(f2_textured_wings, (1135 - offset, row), (995, row + 18), (22, 26, 30), 2)
+    r2_wings = detector.detect(f2_textured_wings)
+    assert r2_wings.scene == GameScene.MODAL_CHOICE
+    assert r2_wings.choice_count == 2
+    assert r2_wings.selected_choice_index == 1
+
+    # 3. 若本机存在实机二选一截图（更换指令），直接实机验证
+    real_2choice = Path(
+        r"C:\Users\MUXI\.gemini\antigravity\brain\a7e72e90-d260-48de-94e8-debc493ed124\.user_uploaded\media_1795263414030_b12d9638.jpg"
+    )
+    if real_2choice.exists():
+        raw = np.fromfile(str(real_2choice), dtype=np.uint8)
+        img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        assert img is not None
+        r_real = detector.detect(img)
+        assert r_real.scene == GameScene.MODAL_CHOICE
+        assert r_real.choice_count == 2
+        assert r_real.selected_choice_index == 1
+        assert r_real.shop_open is False
+
+
+def test_out_of_game_screens_never_misclassified(tmp_path: Path) -> None:
+    """验证 4 组典型局外界面（编队/干员列表基建/主界面橙红横幅/无青色标题双三卡页）严守 UNKNOWN_FREE_CURSOR。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 负例 1：战前编队界面（底部 10 格干员槽条纹 + 右下角亮色「开始行动」大按钮，但无左上深红退出门）
+    squad_edit = _make_battle_prep_frame(shop_open=False)
+    # 清除卫戍局内双锚点，替换为明日方舟局外常见白色返回箭头与亮色顶部导航栏
+    squad_edit[0:85, 0:1280] = (195, 198, 202)
+    cv2.rectangle(squad_edit, (20, 18), (95, 62), (240, 240, 240), -1)
+    assert detector.detect(squad_edit).scene == GameScene.UNKNOWN_FREE_CURSOR
+
+    # 负例 2：干员列表 / 基建界面（底部规则卡栅 + 顶部明亮理智/龙门币资源栏 + 右下角暗色，无左上深红退出门）
+    operator_list = _make_battle_combat_frame()
+    operator_list[0:85, 0:140] = (70, 75, 82)
+    cv2.rectangle(operator_list, (18, 16), (92, 64), (235, 235, 235), -1)
+    assert detector.detect(operator_list).scene == GameScene.UNKNOWN_FREE_CURSOR
+
+    # 负例 3：主界面 / 活动大厅右上角橙红活动横幅（H≈7，即使带顶部暗栏也因色相与缺少深红门免疫误判）
+    home_orange_banner = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 52, dtype=np.uint8)
+    cv2.rectangle(home_orange_banner, (180, 160), (960, 560), (96, 102, 110), -1)
+    # 橙红活动横幅（BGR (20, 75, 240) -> HSV H≈7, S≈234, V=240）
+    cv2.rectangle(home_orange_banner, (1115, 95), (1260, 145), (20, 75, 240), -1)
+    # 即使故意补上局内双锚点，H=7 橙红横幅也应被收窄后的粉红准备按钮阈值拦截
+    home_orange_with_chrome = home_orange_banner.copy()
+    _draw_stronghold_in_game_chrome(home_orange_with_chrome)
+    assert detector.detect(home_orange_banner).scene == GameScene.UNKNOWN_FREE_CURSOR
+    assert detector.detect(home_orange_with_chrome).scene == GameScene.UNKNOWN_FREE_CURSOR
+
+    # 负例 4：无卫戍青色标题与右侧方形收起按钮的局外双卡 / 三卡选择页（亮卡回退 & 暗底亮框均拦截）
+    for count in (2, 3):
+        ext_bright_cards = _make_modal_choice_frame(choice_count=count)
+        # 移除左上角青色标题带，模拟局外分队/难度选择弹窗
+        ext_bright_cards[18:95, 140:580] = (24, 24, 24)
+        assert detector.detect(ext_bright_cards).scene == GameScene.UNKNOWN_FREE_CURSOR
+
+        ext_dark_cards = _make_real_style_modal_frame(choice_count=count, selected_index=0)
+        # 移除左上青色标题带与右侧方形「收起」按钮
+        ext_dark_cards[18:95, 140:580] = (58, 58, 58)
+        ext_dark_cards[310:410, 1135:1280] = (58, 58, 58)
+        assert detector.detect(ext_dark_cards).scene == GameScene.UNKNOWN_FREE_CURSOR
+
 
 

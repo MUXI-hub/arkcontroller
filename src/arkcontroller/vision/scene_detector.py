@@ -509,11 +509,37 @@ class SceneDetector:
         return self._detect_shop_open_heuristic(frame)
 
     @staticmethod
+    def _has_stronghold_in_game_chrome(hsv: np.ndarray) -> bool:
+        """校验卫戍协议局内双身份锚点，100% 拦截主界面/编队/干员列表等局外误判。
+
+        局内休整/作战/出怪预览画面稳定共现两项标志性 HUD 锚点：
+        1. 左上角深红色退出门按钮 ``hsv[12:76, 16:96]``（占比 >= 0.22，兼容联机弹幕局部遮挡）；
+        2. 顶部中央深黑回合/状态信息栏 ``hsv[6:66, 410:870]``（``V <= 70`` 占比 >= 0.42）。
+        """
+        esc_roi = hsv[12:76, 16:96]
+        esc_red = float(
+            (
+                ((esc_roi[:, :, 0] <= 8) | (esc_roi[:, :, 0] >= 170))
+                & (esc_roi[:, :, 1] >= 100)
+                & (esc_roi[:, :, 2] >= 55)
+                & (esc_roi[:, :, 2] <= 195)
+            ).mean()
+        )
+        if esc_red < 0.22:
+            return False
+
+        top_dk = float((hsv[6:66, 410:870, 2] <= 70).mean())
+        return top_dk >= 0.42
+
+    @staticmethod
     def _measure_top_right_ready_pink_ratio(hsv: np.ndarray) -> float:
-        """测量官方 PC 端卫戍协议右上角粉红色「准备就绪」按钮像素占比（1280x720 实机标定）。"""
+        """测量官方 PC 端卫戍协议右上角粉红色「准备就绪」按钮像素占比（1280x720 实机标定）。
+
+        色相严格收窄至 ``H >= 158 | H <= 4``，避免主界面/活动页 ``H=5..10`` 橙红横幅误触发。
+        """
         roi = hsv[95:145, 1115:1260]
         pink_mask = (
-            ((roi[:, :, 0] >= 155) | (roi[:, :, 0] <= 10))
+            ((roi[:, :, 0] >= 158) | (roi[:, :, 0] <= 4))
             & (roi[:, :, 1] >= 110)
             & (roi[:, :, 2] >= 130)
         )
@@ -909,14 +935,17 @@ class SceneDetector:
         if confirm_result is not None:
             return confirm_result
 
-        # 1. 检测三选一/多人六选一策略与悬赏决策弹窗（优先实机暗底亮框检测，再兼容亮底合成卡片）
+        # 1. 检测二选一/三选一/多人六选一策略与悬赏决策弹窗（优先实机暗底亮框检测，再兼容亮底合成卡片）
         modal_result = self._detect_modal_choice_heuristic(gray, hsv)
         if modal_result is not None:
             return modal_result
 
-        # 2a. 实机官方 PC 端卫戍协议休整期强特征：右上角粉红「准备就绪」按钮（~0.52）
+        # 局内身份门禁：2a 与 2b 均强制共现卫戍协议局内双锚点，局外界面严守 UNKNOWN_FREE_CURSOR
+        in_game_chrome = self._has_stronghold_in_game_chrome(hsv)
+
+        # 2a. 实机官方 PC 端卫戍协议休整期强特征：局内锚点 + 右上角粉红「准备就绪」按钮（~0.52）
         top_ready_pink = self._measure_top_right_ready_pink_ratio(hsv)
-        if top_ready_pink >= 0.28:
+        if in_game_chrome and top_ready_pink >= 0.28:
             shop_open = self._detect_shop_open(frame, shop_template)
             unit_selected = self._detect_unit_selected(frame, unit_template)
             shop_slot_count = (
@@ -938,47 +967,51 @@ class SceneDetector:
                 has_teammates=has_teammates,
             )
 
-        # 2b. 通用底部整备槽位条纹特征（兼容旧主题与合成测试帧）
-        bench_score = self._measure_bench_slots_score(gray)
-        if bench_score >= 0.60:
-            # 右下角准备就绪按钮区饱和高亮色块特征
-            ready_vivid_ratio = self._measure_ready_button_ratio(hsv)
-            if 0.10 <= ready_vivid_ratio <= 0.88:
-                confidence = min(0.80, 0.64 + 0.12 * bench_score + 0.08 * min(ready_vivid_ratio / 0.35, 1.0))
-                shop_open = self._detect_shop_open(frame, shop_template)
-                unit_selected = self._detect_unit_selected(frame, unit_template)
-                covenant_count = self._detect_covenant_count_heuristic(hsv, gray)
-                has_teammates = self._detect_teammates_heuristic(
-                    gray, unit_selected=unit_selected
-                )
-                return SceneDetectionResult(
-                    scene=GameScene.BATTLE_PREP,
-                    confidence=round(confidence, 4),
-                    shop_open=shop_open,
-                    choice_count=3,
-                    unit_selected=unit_selected,
-                    covenant_count=covenant_count,
-                    has_teammates=has_teammates,
-                )
+        # 2b. 通用底部整备槽位条纹特征（需先通过局内身份门禁，彻底免疫战前编队/干员列表/基建误判）
+        if in_game_chrome:
+            bench_score = self._measure_bench_slots_score(gray)
+            if bench_score >= 0.60:
+                # 右下角准备就绪按钮区饱和高亮色块特征
+                ready_vivid_ratio = self._measure_ready_button_ratio(hsv)
+                if 0.10 <= ready_vivid_ratio <= 0.88:
+                    confidence = min(
+                        0.80,
+                        0.64 + 0.12 * bench_score + 0.08 * min(ready_vivid_ratio / 0.35, 1.0),
+                    )
+                    shop_open = self._detect_shop_open(frame, shop_template)
+                    unit_selected = self._detect_unit_selected(frame, unit_template)
+                    covenant_count = self._detect_covenant_count_heuristic(hsv, gray)
+                    has_teammates = self._detect_teammates_heuristic(
+                        gray, unit_selected=unit_selected
+                    )
+                    return SceneDetectionResult(
+                        scene=GameScene.BATTLE_PREP,
+                        confidence=round(confidence, 4),
+                        shop_open=shop_open,
+                        choice_count=3,
+                        unit_selected=unit_selected,
+                        covenant_count=covenant_count,
+                        has_teammates=has_teammates,
+                    )
 
-            # 右下角无准备按钮高亮块，且顶部中央存在作战波次 HUD 面板 -> 作战期
-            combat_hud_score = self._measure_combat_top_hud_score(gray, hsv)
-            if ready_vivid_ratio < 0.08 and combat_hud_score >= 0.60:
-                confidence = min(0.76, 0.62 + 0.08 * bench_score + 0.08 * combat_hud_score)
-                unit_selected = self._detect_unit_selected(frame, unit_template)
-                covenant_count = self._detect_covenant_count_heuristic(hsv, gray)
-                has_teammates = self._detect_teammates_heuristic(
-                    gray, unit_selected=unit_selected
-                )
-                return SceneDetectionResult(
-                    scene=GameScene.BATTLE_COMBAT,
-                    confidence=round(confidence, 4),
-                    shop_open=False,
-                    choice_count=3,
-                    unit_selected=unit_selected,
-                    covenant_count=covenant_count,
-                    has_teammates=has_teammates,
-                )
+                # 右下角无准备按钮高亮块，且顶部中央存在作战波次 HUD 面板 -> 作战期
+                combat_hud_score = self._measure_combat_top_hud_score(gray, hsv)
+                if ready_vivid_ratio < 0.08 and combat_hud_score >= 0.60:
+                    confidence = min(0.76, 0.62 + 0.08 * bench_score + 0.08 * combat_hud_score)
+                    unit_selected = self._detect_unit_selected(frame, unit_template)
+                    covenant_count = self._detect_covenant_count_heuristic(hsv, gray)
+                    has_teammates = self._detect_teammates_heuristic(
+                        gray, unit_selected=unit_selected
+                    )
+                    return SceneDetectionResult(
+                        scene=GameScene.BATTLE_COMBAT,
+                        confidence=round(confidence, 4),
+                        shop_open=False,
+                        choice_count=3,
+                        unit_selected=unit_selected,
+                        covenant_count=covenant_count,
+                        has_teammates=has_teammates,
+                    )
 
         # 置信度不足时一律安全返回未知自由光标模式
         return SceneDetectionResult(
@@ -1056,13 +1089,16 @@ class SceneDetector:
     def _detect_real_modal_choice(
         cls, gray: np.ndarray, hsv: np.ndarray
     ) -> SceneDetectionResult | None:
-        """识别《明日方舟》卫戍协议实机暗底亮框的三选一（1x3）与多人六选一（2x3）决策界面。"""
+        """识别《明日方舟》卫戍协议实机暗底亮框的六选一（2x3）、三选一（1x3）与二选一（1x2）决策界面。"""
         # 休整期正常亮场右上角粉红准备按钮 ~0.52；弹窗遮罩激活后会压暗至 <0.05
         if cls._measure_top_right_ready_pink_ratio(hsv) >= 0.22:
             return None
 
+        # 2/3/6 选一统一强制要求卫戍协议弹窗外围特征（左上青色标题带或右侧方形收起按钮），免疫局外弹窗
+        if not cls._has_modal_chrome(gray, hsv):
+            return None
+
         gx = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
-        has_chrome = cls._has_modal_chrome(gray, hsv)
 
         # (A) 多人模式 2x3 六选一网格检测（列边界 x=[220,478], [528,785], [835,1093]）
         cols_6 = ((220, 478), (528, 785), (835, 1093))
@@ -1079,7 +1115,7 @@ class SceneDetector:
                 and float(gray[405:565, xl + 16 : xr - 16].mean()) < 115.0
                 for xl, xr in cols_6
             )
-            if interiors_ok and (has_chrome or float(np.mean(top_edges + bot_edges)) >= 340.0):
+            if interiors_ok:
                 confirm_boxes_6 = [
                     (xl + 14, 310, xr - 14, 362) for xl, xr in cols_6
                 ] + [
@@ -1107,7 +1143,7 @@ class SceneDetector:
                 float(gray[260:445, xl + 16 : xr - 16].mean()) < 115.0
                 for xl, xr in cols_3
             )
-            if interiors_ok and (has_chrome or float(np.mean(mid_edges)) >= 340.0):
+            if interiors_ok:
                 confirm_boxes_3 = [
                     (xl + 14, 458, xr - 14, 514) for xl, xr in cols_3
                 ]
@@ -1124,16 +1160,49 @@ class SceneDetector:
                     has_teammates=has_mates,
                 )
 
+        # (C) 更换指令等 1x2 二选一横排检测（列边界 x=[348,627], [689,969]，左右外围无第 3 卡）
+        cols_2 = ((348, 627), (689, 969))
+        xs_2 = [x for pair in cols_2 for x in pair]
+        edges_2 = cls._v_border_strength(gx, xs_2, 255, 465)
+        if float(np.mean(edges_2)) >= 230.0 and min(edges_2) >= 135.0:
+            interiors_ok = all(
+                float(gray[260:445, xl + 16 : xr - 16].mean()) < 115.0
+                for xl, xr in cols_2
+            )
+            # 按列求垂直均值再取列峰值：仅响应贯穿卡高的竖直第 3 卡边框，对两翼压暗雪山/砖块斜边免疫
+            outer_left = float(gx[265:455, 150:310].mean(axis=0).max())
+            outer_right = float(gx[265:455, 990:1140].mean(axis=0).max())
+            if interiors_ok and outer_left < 180.0 and outer_right < 180.0:
+                confirm_boxes_2 = [
+                    (xl + 14, 458, xr - 14, 514) for xl, xr in cols_2
+                ]
+                selected_idx = cls._detect_white_confirm_bar_index(hsv, confirm_boxes_2)
+                has_mates = cls._detect_teammates_heuristic(gray, unit_selected=False)
+                edge_mean = float(np.mean(edges_2))
+                conf = min(0.93, 0.76 + 0.17 * min(edge_mean / 520.0, 1.0))
+                return SceneDetectionResult(
+                    scene=GameScene.MODAL_CHOICE,
+                    confidence=round(conf, 4),
+                    shop_open=False,
+                    choice_count=2,
+                    selected_choice_index=selected_idx,
+                    has_teammates=has_mates,
+                )
+
         return None
 
     def _detect_modal_choice_heuristic(
         self, gray: np.ndarray, hsv: np.ndarray | None = None
     ) -> SceneDetectionResult | None:
-        """检测三选一/多人六选一弹窗（兼容实机暗底亮框卡片与合成亮面卡片）。"""
+        """检测二选一/三选一/多人六选一弹窗（兼容实机暗底亮框卡片与带弹窗标识的合成亮面卡片）。"""
         if hsv is not None:
             real_modal = self._detect_real_modal_choice(gray, hsv)
             if real_modal is not None:
                 return real_modal
+
+        # 亮卡回退同样要求具备卫戍协议决策弹窗外围标识，彻底免疫局外分队/活动双卡三卡页误判
+        if hsv is None or not self._has_modal_chrome(gray, hsv):
+            return None
 
         border_top = gray[14:94, 60:1220]
         border_bottom = gray[615:706, 60:1220]
