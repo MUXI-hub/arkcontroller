@@ -39,6 +39,16 @@
     "slot_w": 0.2242,
     "slot_h": 0.3347
   },
+  "choice_2_zone": {
+    "name": "choice_2",
+    "count": 2,
+    "start_u": 0.3809,
+    "start_v": 0.5000,
+    "end_u": 0.6477,
+    "end_v": 0.5000,
+    "slot_w": 0.2188,
+    "slot_h": 0.3306
+  },
   "choice_6_top_zone": {
     "name": "choice_6_top",
     "count": 3,

@@ -466,6 +466,19 @@ class SymmetricCovenantZone:
         )
 
 
+def _default_choice_2_zone() -> LinearZone:
+    return LinearZone(
+        name="choice_2",
+        count=2,
+        start_u=0.3809,
+        start_v=0.5000,
+        end_u=0.6477,
+        end_v=0.5000,
+        slot_w=0.2188,
+        slot_h=0.3306,
+    )
+
+
 def _default_choice_6_top_zone() -> LinearZone:
     return LinearZone(
         name="choice_6_top",
@@ -677,6 +690,7 @@ class LayoutProfile:
     board_quad: PerspectiveQuad
     buttons: dict[str, NormalizedPoint]
     view_overrides: dict[str, ViewLayoutOverride] = field(default_factory=dict)
+    choice_2_zone: LinearZone = field(default_factory=_default_choice_2_zone)
     choice_6_top_zone: LinearZone = field(default_factory=_default_choice_6_top_zone)
     choice_6_bottom_zone: LinearZone = field(default_factory=_default_choice_6_bottom_zone)
     covenant_zone: SymmetricCovenantZone = field(default_factory=SymmetricCovenantZone)
@@ -825,9 +839,11 @@ class LayoutProfile:
     def resolve_choice_card_center(
         self, index: int, choice_count: int = 3
     ) -> tuple[float, float]:
-        """解析三选一（1x3）或多人六选一（2x3）第 index 张卡片的归一化中心坐标。"""
+        """解析二选一（1x2）、三选一（1x3）或多人六选一（2x3）第 index 张卡片的归一化中心坐标。"""
         total = max(1, int(choice_count))
         idx = max(0, min(total - 1, int(index)))
+        if total == 2:
+            return self._linear_slot_center(self.choice_2_zone, idx, 2)
         if total >= 5:
             top_cols = max(1, (total + 1) // 2)
             if idx < top_cols:
@@ -841,9 +857,11 @@ class LayoutProfile:
     def resolve_choice_card_size(
         self, index: int, choice_count: int = 3
     ) -> tuple[float, float]:
-        """解析三选一或六选一指定卡片的归一化宽高 (slot_w, slot_h)。"""
+        """解析二选一、三选一或六选一指定卡片的归一化宽高 (slot_w, slot_h)。"""
         total = max(1, int(choice_count))
         idx = max(0, min(total - 1, int(index)))
+        if total == 2:
+            return (self.choice_2_zone.slot_w, self.choice_2_zone.slot_h)
         if total >= 5:
             top_cols = max(1, (total + 1) // 2)
             zone = (
@@ -893,7 +911,7 @@ class LayoutProfile:
     def resolve_choice_toggle_point(
         self, choice_count: int = 3
     ) -> NormalizedPoint | None:
-        """解析右侧「收起/展开」查看战场按钮坐标（兼容单人三选一与多人六选一）。"""
+        """解析右侧「收起/展开」查看战场按钮坐标（兼容二选一、三选一与多人六选一）。"""
         if int(choice_count) >= 5 and "choice_toggle_eye_6" in self.buttons:
             return self.buttons["choice_toggle_eye_6"]
         return self.buttons.get("choice_toggle_eye")
@@ -905,6 +923,7 @@ class LayoutProfile:
             "bench_zone": self.bench_zone.to_dict(),
             "equip_zone": self.equip_zone.to_dict(),
             "choice_zone": self.choice_zone.to_dict(),
+            "choice_2_zone": self.choice_2_zone.to_dict(),
             "choice_6_top_zone": self.choice_6_top_zone.to_dict(),
             "choice_6_bottom_zone": self.choice_6_bottom_zone.to_dict(),
             "covenant_zone": self.covenant_zone.to_dict(),
@@ -928,6 +947,7 @@ class LayoutProfile:
         }
         for key, default_pt in _default_fallback_buttons().items():
             buttons.setdefault(key, default_pt)
+        raw_c2 = data.get("choice_2_zone")
         raw_c6_top = data.get("choice_6_top_zone")
         raw_c6_bot = data.get("choice_6_bottom_zone")
         raw_cov = data.get("covenant_zone")
@@ -959,6 +979,15 @@ class LayoutProfile:
             ),
             buttons=buttons,
             view_overrides=_parse_view_overrides(data.get("view_overrides")),
+            choice_2_zone=(
+                raw_c2
+                if isinstance(raw_c2, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_c2)
+                    if isinstance(raw_c2, Mapping)
+                    else _default_choice_2_zone()
+                )
+            ),
             choice_6_top_zone=(
                 raw_c6_top
                 if isinstance(raw_c6_top, LinearZone)

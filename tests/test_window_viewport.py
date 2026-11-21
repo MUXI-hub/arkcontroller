@@ -421,7 +421,29 @@ class TestConfigSystem:
         # 验证安全空白区已移至右侧策略头像正下方安全带，绝不落入底部商店卡牌区
         assert layout.buttons["safe_blank"].u >= 0.90
         assert 0.39 <= layout.buttons["safe_blank"].v <= 0.50
-        # 验证单人三选一与多人六选一卡片及底部白色确认条几何关系
+        # 验证二选一、三选一与多人六选一卡片及底部白色确认条几何关系
+        assert layout.choice_2_zone.count == 2
+        assert "choice_2_zone" in layout.to_dict()
+        c2_left = layout.resolve_choice_card_center(0, 2)
+        c2_right = layout.resolve_choice_card_center(1, 2)
+        assert c2_left == pytest.approx((0.3809, 0.5000))
+        assert c2_right == pytest.approx((0.6477, 0.5000))
+        assert layout.resolve_choice_card_size(0, 2) == pytest.approx((0.2188, 0.3306))
+        c2_confirm_right = layout.resolve_choice_confirm_point(1, 2)
+        assert c2_confirm_right[0] == pytest.approx(0.6477)
+        assert c2_confirm_right[1] == pytest.approx(0.666953, abs=1e-4)
+        c2_poly = layout.resolve_choice_card_polygon(0, 2)
+        assert len(c2_poly) == 4
+        assert c2_poly[0] == pytest.approx((0.3809 - 0.1094, 0.5000 - 0.1653))
+        assert c2_poly[2] == pytest.approx((0.3809 + 0.1094, 0.5000 + 0.1653))
+        c2_confirm_poly = layout.resolve_choice_confirm_polygon(1, 2)
+        assert len(c2_confirm_poly) == 4
+        assert (c2_confirm_poly[0][0] + c2_confirm_poly[2][0]) * 0.5 == pytest.approx(0.6477)
+        assert (c2_confirm_poly[0][1] + c2_confirm_poly[2][1]) * 0.5 == pytest.approx(
+            c2_confirm_right[1]
+        )
+        assert layout.resolve_choice_toggle_point(2) == layout.buttons["choice_toggle_eye"]
+
         c3_center = layout.resolve_choice_card_center(0, 3)
         c3_confirm = layout.resolve_choice_confirm_point(0, 3)
         assert c3_confirm[0] == pytest.approx(c3_center[0])
@@ -484,13 +506,14 @@ class TestConfigSystem:
         raw_layout = json.loads(
             (repo_configs / "stronghold_layout_16_9.json").read_text(encoding="utf-8")
         )
-        # 模拟旧配置字典：残留局外节点键且缺少新增的 5 个策略/确认弹窗按钮
+        # 模拟旧配置字典：残留局外节点键且缺少 choice_2_zone 与新增的 5 个策略/确认弹窗按钮
         raw_layout["activity_hub_nodes"] = {
             "back": {"id": "back", "label": "返回", "u": 0.05, "v": 0.06}
         }
         raw_layout["pre_match_nodes"] = {}
         raw_layout["squad_edit_nodes"] = {}
         raw_layout["settlement_nodes"] = {}
+        raw_layout.pop("choice_2_zone", None)
         for new_key in (
             "strategy_avatar",
             "strategy_inspect",
@@ -501,6 +524,10 @@ class TestConfigSystem:
             raw_layout["buttons"].pop(new_key, None)
 
         layout = LayoutProfile.from_dict(raw_layout)
+        assert layout.choice_2_zone.start_u == pytest.approx(0.3809)
+        assert layout.choice_2_zone.end_u == pytest.approx(0.6477)
+        assert layout.resolve_choice_card_center(0, 2) == pytest.approx((0.3809, 0.5000))
+        assert layout.resolve_choice_card_center(1, 2) == pytest.approx((0.6477, 0.5000))
         assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
         assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
 
