@@ -523,6 +523,133 @@ def test_heuristic_dynamic_shop_slot_count_4_5_6_and_max_level(tmp_path: Path) -
     assert res6_max.shop_slot_count == 6
 
 
+def _make_real_style_modal_frame(
+    *,
+    choice_count: int = 3,
+    selected_index: int | None = None,
+    teammate_count: int = 0,
+) -> np.ndarray:
+    """构造贴合《明日方舟》卫戍协议实机的暗底亮灰框三选一(1x3)/六选一(2x3)与白色确认条合成帧。"""
+    frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 58, dtype=np.uint8)
+    # 模拟半透明压暗后的冰面地板与左上角青色「悬赏决策」标题色带
+    cv2.rectangle(frame, (80, 520), (1180, 705), (95, 92, 86), -1)
+    cv2.rectangle(frame, (160, 26), (380, 76), (220, 215, 25), -1)
+    # 右侧方形「收起」按钮
+    btn_x = 1203 if choice_count <= 3 else 1147
+    cv2.rectangle(frame, (btn_x, 325), (btn_x + 70, 395), (120, 120, 120), -1)
+    cv2.rectangle(frame, (btn_x, 325), (btn_x + 70, 395), (235, 235, 235), 2)
+
+    if choice_count == 6:
+        cols = [(220, 478), (528, 785), (835, 1093)]
+        boxes = [(xl, 120, xr, 337) for xl, xr in cols] + [
+            (xl, 387, xr, 608) for xl, xr in cols
+        ]
+    else:
+        cols = [(171, 460), (515, 801), (857, 1144)]
+        boxes = [(xl, 242, xr, 483) for xl, xr in cols]
+
+    for idx, (x1, y1, x2, y2) in enumerate(boxes):
+        if selected_index == idx:
+            top_y, bot_y = y1 - 20, y2 + 26
+            cv2.rectangle(frame, (x1, top_y), (x2, bot_y), (34, 38, 30), -1)
+            cv2.rectangle(frame, (x1, bot_y - 50), (x2, bot_y), (242, 244, 242), -1)
+            cv2.rectangle(frame, (x1, top_y), (x2, bot_y), (245, 248, 245), 3)
+        else:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (24, 26, 26), -1)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (215, 218, 218), 3)
+
+    avatar_boxes = [
+        (19, 160, 67, 66),
+        (19, 235, 67, 67),
+        (19, 311, 67, 66),
+        (19, 387, 67, 66),
+    ]
+    for mx, my, mw, mh in avatar_boxes[: max(0, min(4, teammate_count))]:
+        cv2.rectangle(frame, (mx, my), (mx + mw, my + mh), (95, 85, 80), -1)
+        cv2.rectangle(frame, (mx, my), (mx + mw, my + mh), (235, 240, 240), 2)
+
+    return frame
+
+
+def _draw_covenant_badge(
+    frame: np.ndarray, cx: float, *, activated: bool = True
+) -> None:
+    """在 1280x720 帧顶部栏下方 (cx, 85) 绘制已激活或未激活的圆形羁绊徽章及底部文字。"""
+    ix = int(round(cx))
+    if activated:
+        cv2.circle(frame, (ix, 85), 24, (185, 230, 35), -1)
+        cv2.circle(frame, (ix, 85), 24, (220, 250, 160), 2)
+    else:
+        cv2.circle(frame, (ix, 85), 24, (32, 34, 38), -1)
+        cv2.ellipse(frame, (ix, 85), (22, 22), 0, 90, 260, (235, 95, 35), 3)
+        cv2.circle(frame, (ix, 85), 22, (115, 120, 125), 1)
+    # 底部层数与盟约名高对比暗影白字模拟
+    cv2.rectangle(frame, (ix - 18, 96), (ix + 18, 122), (16, 18, 20), -1)
+    cv2.line(frame, (ix - 12, 104), (ix + 12, 104), (225, 228, 230), 2)
+    cv2.line(frame, (ix - 14, 114), (ix + 14, 114), (205, 210, 215), 2)
+
+
+def test_real_style_3choice_and_6choice_modal_and_white_bar(tmp_path: Path) -> None:
+    """验证实机暗底亮框三选一(1x3)与多人六选一(2x3)自动识别、白色确认条索引检测及左侧队友检测。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 1. 单人三选一：未选中任何卡片 vs 选中第 1 张弹出白色确认条
+    f3_idle = _make_real_style_modal_frame(choice_count=3, selected_index=None)
+    r3_idle = detector.detect(f3_idle)
+    assert r3_idle.scene == GameScene.MODAL_CHOICE
+    assert r3_idle.choice_count == 3
+    assert r3_idle.selected_choice_index is None
+    assert r3_idle.has_teammates is False
+
+    f3_sel0 = _make_real_style_modal_frame(choice_count=3, selected_index=0)
+    r3_sel0 = detector.detect(f3_sel0)
+    assert r3_sel0.scene == GameScene.MODAL_CHOICE
+    assert r3_sel0.choice_count == 3
+    assert r3_sel0.selected_choice_index == 0
+
+    # 2. 多人六选一（2x3）：上排选中(idx=1)与下排选中(idx=4)，且识别左侧 4 名联机队友头像
+    f6_top = _make_real_style_modal_frame(
+        choice_count=6, selected_index=1, teammate_count=4
+    )
+    r6_top = detector.detect(f6_top)
+    assert r6_top.scene == GameScene.MODAL_CHOICE
+    assert r6_top.choice_count == 6
+    assert r6_top.selected_choice_index == 1
+    assert r6_top.has_teammates is True
+
+    f6_bot = _make_real_style_modal_frame(
+        choice_count=6, selected_index=4, teammate_count=2
+    )
+    r6_bot = detector.detect(f6_bot)
+    assert r6_bot.scene == GameScene.MODAL_CHOICE
+    assert r6_bot.choice_count == 6
+    assert r6_bot.selected_choice_index == 4
+    assert r6_bot.has_teammates is True
+
+
+def test_symmetric_covenant_count_and_teammate_detection_in_prep(tmp_path: Path) -> None:
+    """验证休整期顶部下方居中对称羁绊图标数量（0~4，奇偶混合激活/未激活）与联机队友检测。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    base = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 46, dtype=np.uint8)
+    cv2.rectangle(base, (200, 150), (1040, 500), (88, 92, 98), -1)
+    cv2.rectangle(base, (1120, 100), (1255, 140), (110, 70, 235), -1)
+
+    res0 = detector.detect(base)
+    assert res0.scene == GameScene.BATTLE_PREP
+    assert res0.covenant_count == 0
+    assert res0.has_teammates is False
+
+    for expected_n in (1, 2, 3, 4):
+        fn = base.copy()
+        for i in range(expected_n):
+            cx = 640.0 + (i - (expected_n - 1) * 0.5) * 66.5
+            _draw_covenant_badge(fn, cx, activated=(i % 2 == 0))
+        rn = detector.detect(fn)
+        assert rn.scene == GameScene.BATTLE_PREP
+        assert rn.covenant_count == expected_n
+
+
 # =====================================================================
 # 4. 连续帧防抖测试
 # =====================================================================

@@ -78,6 +78,9 @@ class SceneDetectionResult:
     choice_count: int = 3
     unit_selected: bool = False
     shop_slot_count: int | None = None
+    selected_choice_index: int | None = None
+    covenant_count: int | None = None
+    has_teammates: bool = False
 
 
 @dataclass(frozen=True)
@@ -419,17 +422,40 @@ class SceneDetector:
             choice_count = 3
             unit_selected = False
             shop_slot_count: int | None = None
+            selected_choice_index: int | None = None
+            covenant_count: int | None = None
+            has_teammates = False
+            gray_lazy: np.ndarray | None = None
+            hsv_lazy: np.ndarray | None = None
+
             if best_scene == GameScene.BATTLE_PREP:
                 shop_open = self._detect_shop_open(frame, shop_template)
                 unit_selected = self._detect_unit_selected(frame, unit_template)
                 if shop_open:
                     shop_slot_count = self._detect_shop_slot_count_heuristic(frame)
+                gray_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                hsv_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                covenant_count = self._detect_covenant_count_heuristic(hsv_lazy, gray_lazy)
+                has_teammates = self._detect_teammates_heuristic(
+                    gray_lazy, unit_selected=unit_selected
+                )
             elif best_scene == GameScene.MODAL_CHOICE:
                 shop_open = False
-                choice_count = self._estimate_choice_count(frame)
+                gray_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                hsv_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                choice_count, selected_choice_index = self._analyze_modal_choice_details(
+                    gray_lazy, hsv_lazy
+                )
+                has_teammates = self._detect_teammates_heuristic(gray_lazy, unit_selected=False)
             elif best_scene == GameScene.BATTLE_COMBAT:
                 shop_open = False
                 unit_selected = self._detect_unit_selected(frame, unit_template)
+                gray_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                hsv_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                covenant_count = self._detect_covenant_count_heuristic(hsv_lazy, gray_lazy)
+                has_teammates = self._detect_teammates_heuristic(
+                    gray_lazy, unit_selected=unit_selected
+                )
             return SceneDetectionResult(
                 scene=best_scene,
                 confidence=round(best_score, 4),
@@ -437,6 +463,9 @@ class SceneDetector:
                 choice_count=choice_count,
                 unit_selected=unit_selected,
                 shop_slot_count=shop_slot_count,
+                selected_choice_index=selected_choice_index,
+                covenant_count=covenant_count,
+                has_teammates=has_teammates,
             )
 
         # (b) 第二层：启发式视觉特征回退
@@ -659,12 +688,12 @@ class SceneDetector:
                 choice_count=3,
             )
 
-        # 1. 检测三选一/策略事件弹窗（四周暗化遮罩 + 中央横向等距高亮卡片）
-        modal_result = self._detect_modal_choice_heuristic(gray)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # 1. 检测三选一/多人六选一策略与悬赏决策弹窗（优先实机暗底亮框检测，再兼容亮底合成卡片）
+        modal_result = self._detect_modal_choice_heuristic(gray, hsv)
         if modal_result is not None:
             return modal_result
-
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         # 2a. 实机官方 PC 端卫戍协议休整期强特征：右上角粉红「准备就绪」按钮（~0.52）
         top_ready_pink = self._measure_top_right_ready_pink_ratio(hsv)
@@ -674,6 +703,10 @@ class SceneDetector:
             shop_slot_count = (
                 self._detect_shop_slot_count_heuristic(frame) if shop_open else None
             )
+            covenant_count = self._detect_covenant_count_heuristic(hsv, gray)
+            has_teammates = self._detect_teammates_heuristic(
+                gray, unit_selected=unit_selected
+            )
             confidence = min(0.90, 0.72 + 0.30 * min(top_ready_pink, 0.60))
             return SceneDetectionResult(
                 scene=GameScene.BATTLE_PREP,
@@ -682,6 +715,8 @@ class SceneDetector:
                 choice_count=3,
                 unit_selected=unit_selected,
                 shop_slot_count=shop_slot_count,
+                covenant_count=covenant_count,
+                has_teammates=has_teammates,
             )
 
         # 2b. 通用底部整备槽位条纹特征（兼容旧主题与合成测试帧）
@@ -693,12 +728,18 @@ class SceneDetector:
                 confidence = min(0.80, 0.64 + 0.12 * bench_score + 0.08 * min(ready_vivid_ratio / 0.35, 1.0))
                 shop_open = self._detect_shop_open(frame, shop_template)
                 unit_selected = self._detect_unit_selected(frame, unit_template)
+                covenant_count = self._detect_covenant_count_heuristic(hsv, gray)
+                has_teammates = self._detect_teammates_heuristic(
+                    gray, unit_selected=unit_selected
+                )
                 return SceneDetectionResult(
                     scene=GameScene.BATTLE_PREP,
                     confidence=round(confidence, 4),
                     shop_open=shop_open,
                     choice_count=3,
                     unit_selected=unit_selected,
+                    covenant_count=covenant_count,
+                    has_teammates=has_teammates,
                 )
 
             # 右下角无准备按钮高亮块，且顶部中央存在作战波次 HUD 面板 -> 作战期
@@ -706,12 +747,18 @@ class SceneDetector:
             if ready_vivid_ratio < 0.08 and combat_hud_score >= 0.60:
                 confidence = min(0.76, 0.62 + 0.08 * bench_score + 0.08 * combat_hud_score)
                 unit_selected = self._detect_unit_selected(frame, unit_template)
+                covenant_count = self._detect_covenant_count_heuristic(hsv, gray)
+                has_teammates = self._detect_teammates_heuristic(
+                    gray, unit_selected=unit_selected
+                )
                 return SceneDetectionResult(
                     scene=GameScene.BATTLE_COMBAT,
                     confidence=round(confidence, 4),
                     shop_open=False,
                     choice_count=3,
                     unit_selected=unit_selected,
+                    covenant_count=covenant_count,
+                    has_teammates=has_teammates,
                 )
 
         # 置信度不足时一律安全返回未知自由光标模式
@@ -722,10 +769,153 @@ class SceneDetector:
             choice_count=3,
         )
 
-    def _detect_modal_choice_heuristic(
-        self, gray: np.ndarray
+    @staticmethod
+    def _v_border_strength(
+        gx: np.ndarray,
+        x_positions: list[int] | tuple[int, ...],
+        y1: int,
+        y2: int,
+        half_win: int = 6,
+    ) -> list[float]:
+        """测量 1280x720 图像在一组 x 坐标带内的垂直边框 Sobel 峰值均值。"""
+        width = gx.shape[1]
+        scores: list[float] = []
+        for x in x_positions:
+            xs = max(0, x - half_win)
+            xe = min(width, x + half_win + 1)
+            if xe <= xs or y2 <= y1:
+                scores.append(0.0)
+            else:
+                scores.append(float(gx[y1:y2, xs:xe].max(axis=1).mean()))
+        return scores
+
+    @staticmethod
+    def _has_modal_chrome(gray: np.ndarray, hsv: np.ndarray) -> bool:
+        """检查弹窗标志性外围特征：左上角青蓝色决策标题带或右侧方形「收起」按钮边框。"""
+        roi_tl = hsv[18:95, 140:580]
+        cyan_tl = float(
+            (
+                (roi_tl[:, :, 0] >= 82)
+                & (roi_tl[:, :, 0] <= 105)
+                & (roi_tl[:, :, 1] >= 115)
+                & (roi_tl[:, :, 2] >= 125)
+            ).mean()
+        )
+        if cyan_tl >= 0.045:
+            return True
+
+        sub_btn = gray[310:410, 1135:1280]
+        edges_btn = cv2.Canny(sub_btn, 60, 150)
+        cnts, _ = cv2.findContours(
+            edges_btn, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        for cnt in cnts:
+            _, _, w, h = cv2.boundingRect(cnt)
+            if 52 <= w <= 88 and 52 <= h <= 88 and 0.78 <= (w / h) <= 1.28:
+                return True
+        return False
+
+    @staticmethod
+    def _detect_white_confirm_bar_index(
+        hsv: np.ndarray,
+        card_boxes: list[tuple[int, int, int, int]],
+    ) -> int | None:
+        """检测哪张决策卡底部弹出了高亮度低饱和度的白色「确认选择」横条。"""
+        best_idx: int | None = None
+        best_ratio: float = 0.0
+        for idx, (x1, y1, x2, y2) in enumerate(card_boxes):
+            roi = hsv[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            white_ratio = float(((roi[:, :, 2] >= 198) & (roi[:, :, 1] <= 48)).mean())
+            if white_ratio >= 0.42 and white_ratio > best_ratio:
+                best_ratio = white_ratio
+                best_idx = idx
+        return best_idx
+
+    @classmethod
+    def _detect_real_modal_choice(
+        cls, gray: np.ndarray, hsv: np.ndarray
     ) -> SceneDetectionResult | None:
-        """检测中央横向等距高亮卡片与四周半透明暗化遮罩的弹窗特征。"""
+        """识别《明日方舟》卫戍协议实机暗底亮框的三选一（1x3）与多人六选一（2x3）决策界面。"""
+        # 休整期正常亮场右上角粉红准备按钮 ~0.52；弹窗遮罩激活后会压暗至 <0.05
+        if cls._measure_top_right_ready_pink_ratio(hsv) >= 0.22:
+            return None
+
+        gx = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
+        has_chrome = cls._has_modal_chrome(gray, hsv)
+
+        # (A) 多人模式 2x3 六选一网格检测（列边界 x=[220,478], [528,785], [835,1093]）
+        cols_6 = ((220, 478), (528, 785), (835, 1093))
+        xs_6 = [x for pair in cols_6 for x in pair]
+        top_edges = cls._v_border_strength(gx, xs_6, 130, 325)
+        bot_edges = cls._v_border_strength(gx, xs_6, 395, 595)
+        if (
+            float(np.mean(top_edges)) >= 230.0
+            and float(np.mean(bot_edges)) >= 230.0
+            and min(top_edges + bot_edges) >= 135.0
+        ):
+            interiors_ok = all(
+                float(gray[135:295, xl + 16 : xr - 16].mean()) < 115.0
+                and float(gray[405:565, xl + 16 : xr - 16].mean()) < 115.0
+                for xl, xr in cols_6
+            )
+            if interiors_ok and (has_chrome or float(np.mean(top_edges + bot_edges)) >= 340.0):
+                confirm_boxes_6 = [
+                    (xl + 14, 310, xr - 14, 362) for xl, xr in cols_6
+                ] + [
+                    (xl + 14, 582, xr - 14, 636) for xl, xr in cols_6
+                ]
+                selected_idx = cls._detect_white_confirm_bar_index(hsv, confirm_boxes_6)
+                has_mates = cls._detect_teammates_heuristic(gray, unit_selected=False)
+                edge_mean = float(np.mean(top_edges + bot_edges))
+                conf = min(0.94, 0.78 + 0.16 * min(edge_mean / 550.0, 1.0))
+                return SceneDetectionResult(
+                    scene=GameScene.MODAL_CHOICE,
+                    confidence=round(conf, 4),
+                    shop_open=False,
+                    choice_count=6,
+                    selected_choice_index=selected_idx,
+                    has_teammates=has_mates,
+                )
+
+        # (B) 单人/常规 1x3 三选一横排检测（列边界 x=[171,460], [515,801], [857,1144]）
+        cols_3 = ((171, 460), (515, 801), (857, 1144))
+        xs_3 = [x for pair in cols_3 for x in pair]
+        mid_edges = cls._v_border_strength(gx, xs_3, 255, 465)
+        if float(np.mean(mid_edges)) >= 230.0 and min(mid_edges) >= 135.0:
+            interiors_ok = all(
+                float(gray[260:445, xl + 16 : xr - 16].mean()) < 115.0
+                for xl, xr in cols_3
+            )
+            if interiors_ok and (has_chrome or float(np.mean(mid_edges)) >= 340.0):
+                confirm_boxes_3 = [
+                    (xl + 14, 458, xr - 14, 514) for xl, xr in cols_3
+                ]
+                selected_idx = cls._detect_white_confirm_bar_index(hsv, confirm_boxes_3)
+                has_mates = cls._detect_teammates_heuristic(gray, unit_selected=False)
+                edge_mean = float(np.mean(mid_edges))
+                conf = min(0.93, 0.76 + 0.17 * min(edge_mean / 520.0, 1.0))
+                return SceneDetectionResult(
+                    scene=GameScene.MODAL_CHOICE,
+                    confidence=round(conf, 4),
+                    shop_open=False,
+                    choice_count=3,
+                    selected_choice_index=selected_idx,
+                    has_teammates=has_mates,
+                )
+
+        return None
+
+    def _detect_modal_choice_heuristic(
+        self, gray: np.ndarray, hsv: np.ndarray | None = None
+    ) -> SceneDetectionResult | None:
+        """检测三选一/多人六选一弹窗（兼容实机暗底亮框卡片与合成亮面卡片）。"""
+        if hsv is not None:
+            real_modal = self._detect_real_modal_choice(gray, hsv)
+            if real_modal is not None:
+                return real_modal
+
         border_top = gray[14:94, 60:1220]
         border_bottom = gray[615:706, 60:1220]
         border_left = gray[100:610, 16:130]
@@ -833,14 +1023,187 @@ class SceneDetector:
                 valid_cards.append((s, e))
         return valid_cards
 
-    def _estimate_choice_count(self, frame: np.ndarray) -> int:
-        """在已判定为 ``MODAL_CHOICE`` 时估算可选卡片数量（默认 3）。"""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    def _analyze_modal_choice_details(
+        self, gray: np.ndarray, hsv: np.ndarray
+    ) -> tuple[int, int | None]:
+        """在已判定为 ``MODAL_CHOICE`` 时分析可选卡片数（3/6/2）与已选中待确认卡片索引。"""
+        real_modal = self._detect_real_modal_choice(gray, hsv)
+        if real_modal is not None:
+            return (real_modal.choice_count, real_modal.selected_choice_index)
         border_mean = float(gray[14:94, 60:1220].mean())
         cards = self._find_modal_card_spans(gray, border_mean)
         if len(cards) in (2, 3, 4):
-            return len(cards)
-        return 3
+            return (len(cards), None)
+        return (3, None)
+
+    def _estimate_choice_count(self, frame: np.ndarray) -> int:
+        """在已判定为 ``MODAL_CHOICE`` 时估算可选卡片数量（默认 3，多人 6）。"""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        count, _ = self._analyze_modal_choice_details(gray, hsv)
+        return count
+
+    @staticmethod
+    def _score_covenant_badge_at(
+        hsv: np.ndarray, gray: np.ndarray, cx: float
+    ) -> float:
+        """评估 1280x720 顶部栏下方 (cx, cy=85) 是否存在已激活或未激活的圆形羁绊徽章。"""
+        ix = int(round(cx))
+        if ix < 290 or ix > 990:
+            return 0.0
+
+        patch_g = gray[58:112, ix - 26 : ix + 27].astype(np.float32)
+        patch_h = hsv[58:112, ix - 26 : ix + 27]
+        if patch_g.shape != (54, 53):
+            return 0.0
+
+        yy, xx = np.ogrid[:54, :53]
+        dist = np.hypot(xx - 26.0, yy - 27.0)
+        inner_mask = dist <= 17.0
+        ring_mask = (dist >= 19.5) & (dist <= 25.5)
+
+        inner_v = float(patch_h[:, :, 2][inner_mask].mean())
+        ring_v = float(patch_h[:, :, 2][ring_mask].mean())
+
+        # 已激活盟约（青绿发光徽章 H in 70..108, S>=90, V>=130，且圆心核与左右半圆对称命中）
+        act_mask = (
+            (patch_h[:, :, 0] >= 70)
+            & (patch_h[:, :, 0] <= 108)
+            & (patch_h[:, :, 1] >= 90)
+            & (patch_h[:, :, 2] >= 130)
+        )
+        act_ratio = float(act_mask[dist <= 24.0].mean())
+        act_core = float(act_mask[dist <= 9.0].mean())
+        act_left = float(act_mask[(dist <= 24.0) & (xx < 26)].mean())
+        act_right = float(act_mask[(dist <= 24.0) & (xx > 26)].mean())
+
+        # 未激活盟约进度蓝弧（H in 98..132, S>=95, V>=105）
+        blue_ring_ratio = float(
+            (
+                (patch_h[:, :, 0] >= 98)
+                & (patch_h[:, :, 0] <= 132)
+                & (patch_h[:, :, 1] >= 95)
+                & (patch_h[:, :, 2] >= 105)
+            )[ring_mask].mean()
+        )
+
+        gx = cv2.Sobel(patch_g, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(patch_g, cv2.CV_32F, 0, 1, ksize=3)
+        nx = (xx - 26.0) / np.maximum(dist, 1e-3)
+        ny = (yy - 27.0) / np.maximum(dist, 1e-3)
+        radial_grad = float(np.abs(gx * nx + gy * ny)[ring_mask].mean())
+        radial_left = float(np.abs(gx * nx + gy * ny)[ring_mask & (xx < 26)].mean())
+        radial_right = float(np.abs(gx * nx + gy * ny)[ring_mask & (xx > 26)].mean())
+
+        # 底部层数与盟约名必须正对圆心下方 [ix-11 .. ix+12]
+        lbl_h = hsv[94:126, ix - 11 : ix + 12]
+        if lbl_h.size == 0:
+            return 0.0
+        lbl_p95 = float(np.percentile(lbl_h[:, :, 2], 95))
+        lbl_contrast = lbl_p95 - float(lbl_h[:, :, 2].min())
+        if lbl_contrast < 95.0 or lbl_p95 < 130.0:
+            return 0.0
+
+        if act_ratio >= 0.35 and act_core >= 0.30 and min(act_left, act_right) >= 0.25:
+            return 0.85 + min(0.15, act_ratio * 0.2)
+        if (
+            blue_ring_ratio >= 0.08
+            and inner_v < 95.0
+            and radial_grad >= 22.0
+            and min(radial_left, radial_right) >= 12.0
+        ):
+            return 0.80 + min(0.15, blue_ring_ratio)
+        if (
+            inner_v < 75.0
+            and ring_v > inner_v + 12.0
+            and radial_grad >= 28.0
+            and min(radial_left, radial_right) >= 15.0
+            and lbl_contrast >= 125.0
+        ):
+            return 0.72
+        return 0.0
+
+    @classmethod
+    def _detect_covenant_count_heuristic(
+        cls, hsv: np.ndarray, gray: np.ndarray
+    ) -> int:
+        """检测顶部栏正下方居中对称分布的已激活/未激活羁绊图标数量（0~9）。"""
+        center_score = cls._score_covenant_badge_at(hsv, gray, 640.0)
+        best_n = 0
+        best_score = 0.0
+        for n in range(1, 10):
+            # 偶数个图标居中对称时 x=640 必为间隔缝隙；奇数个时 x=640 必有中心图标
+            if n % 2 == 0 and center_score >= 0.55:
+                continue
+            if n % 2 == 1 and center_score < 0.65:
+                continue
+            steps = (66.0,) if n == 1 else (58.0, 64.0, 66.5, 72.0)
+            for step_px in steps:
+                centers = [640.0 + (i - (n - 1) * 0.5) * step_px for i in range(n)]
+                scores = [cls._score_covenant_badge_at(hsv, gray, cx) for cx in centers]
+                if not all(s >= 0.65 for s in scores):
+                    continue
+                if n >= 2:
+                    gap_mid = (centers[0] + centers[1]) * 0.5
+                    if cls._score_covenant_badge_at(hsv, gray, gap_mid) >= 0.55:
+                        continue
+                total = float(sum(scores))
+                if n > best_n or (n == best_n and total > best_score):
+                    best_n = n
+                    best_score = total
+        return best_n
+
+    @staticmethod
+    def _detect_teammates_heuristic(
+        gray: np.ndarray, *, unit_selected: bool = False
+    ) -> bool:
+        """检测左侧边缘是否存在多人联机队友纵向头像框（支持 2~4 人联机）。"""
+        if unit_selected:
+            return False
+        avatar_boxes = (
+            (19, 160, 67, 66),
+            (19, 235, 67, 67),
+            (19, 311, 67, 66),
+            (19, 387, 67, 66),
+        )
+        hits: list[bool] = []
+        for mx, my, mw, mh in avatar_boxes:
+            top_e = float(
+                np.abs(
+                    np.diff(gray[my - 3 : my + 4, mx : mx + mw].astype(np.float32), axis=0)
+                )
+                .max(axis=0)
+                .mean()
+            )
+            bot_e = float(
+                np.abs(
+                    np.diff(
+                        gray[my + mh - 3 : my + mh + 4, mx : mx + mw].astype(np.float32),
+                        axis=0,
+                    )
+                )
+                .max(axis=0)
+                .mean()
+            )
+            left_e = float(
+                np.abs(
+                    np.diff(gray[my : my + mh, mx - 3 : mx + 4].astype(np.float32), axis=1)
+                )
+                .max(axis=1)
+                .mean()
+            )
+            right_e = float(
+                np.abs(
+                    np.diff(
+                        gray[my : my + mh, mx + mw - 3 : mx + mw + 4].astype(np.float32),
+                        axis=1,
+                    )
+                )
+                .max(axis=1)
+                .mean()
+            )
+            hits.append(min(top_e, bot_e, left_e, right_e) >= 18.0)
+        return (hits[0] and hits[1]) or sum(hits) >= 3
 
     @staticmethod
     def _measure_bench_slots_score(gray: np.ndarray) -> float:
