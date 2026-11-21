@@ -2,6 +2,29 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-11-21
+
+### 新增、变更与修复 (Added, Changed & Fixed)
+- **棋盘干员原地设置转向（回环拖拽状态机）(`arkcontroller.input.virtual_hid` & `arkcontroller.control`)**：
+  - `VirtualHID` 新增 `smooth_drag_loopback(origin, offset, ...)` 往返平滑拖拽原语：在原格悬停按下左键 → 平滑拖离跨越 Unity `pixelDragThreshold` → 平滑拖回原格松开，稳定呼出游戏四向定朝向盘。
+  - `DeployFSM.place_on_board()` 在源格与目标格为同一棋盘格时不再直接取消，而是执行自动方向回环拖拽（最右列向左偏防越界）并转入 `AIMING_DIRECTION` 态，支持推摇杆/十字键原地重置干员朝向或按 **`B`** 取消。
+- **回合结束未用完资金 / 策略确认弹窗全自动识别与交互 (`arkcontroller.vision` & `arkcontroller.config` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 新增 `GameScene.MODAL_CONFIRM` 与 `FocusZone.CONFIRM_DIALOG`，零模板精准识别全宽暗底 + 左下灰「取消」栏 + 右下暗红「确认」栏，且优先级高于右上角准备按钮检测。
+  - 实机标定 `confirm_no (0.2496, 0.6729)`、`confirm_yes (0.7496, 0.6729)`、`confirm_dont_ask (0.4992, 0.5597)` 三处锚点；进入弹窗默认聚焦「确认」，支持方向键 / `LB`/`RB` 在三项间切换、**`A`** 确认（点击「本局不再提示」后自动回移聚焦「确认」便于连按开战）、**`B`** 直点取消、**`START`/`RT+A`** 直点确认、**`X`** 快捷勾选「本局不再提示」。
+- **官方原生 `G` 键升本防误触 (`arkcontroller.config` & `arkcontroller.control`)**：
+  - 在 `configs/default_bindings.json` 与 `KeymapConfig` 中补齐官方原生快捷键 `"shop_upgrade": "g"`（完整涵盖 `A/S/D/G/C/W/X/Q/Z/Esc`）。
+  - 局内按 **`Y`** 升本在原生快捷键模式下直接发送 `G` 键，彻底避免因商店栏位或界面微偏导致的鼠标坐标误买商品卡（纯鼠标模拟器模式下仍保留同步左移坐标点击）。
+- **彻底清理游戏外菜单配置，局外统一纯模拟自由鼠标 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 从 `configs/stronghold_layout_16_9.json`、`LayoutProfile`、`ConfigLoader` 及 `default_bindings.json` 中彻底删除 4 套局外菜单节点表（`activity_hub_nodes`、`pre_match_nodes`、`squad_edit_nodes`、`settlement_nodes`）、5 个局外按钮与 `"menu"` 键位段（`LayoutProfile.from_dict` 向后兼容静默忽略旧 `user_override.json` 残留字段）。
+  - 精简 `GameScene` 枚举为 5 项局内核心状态（`BATTLE_PREP`、`MODAL_CHOICE`、`MODAL_CONFIRM`、`BATTLE_COMBAT`、`UNKNOWN_FREE_CURSOR`），移除局外菜单路由；`ControlDispatcher` 默认初始化为 `UNKNOWN_FREE_CURSOR`（HUD 显示「自由鼠标」），局外与设置界面左摇杆始终直接驱动模拟鼠标光标（不受局内 `left_stick_mode="dpad"` 限制），搭配 `A` 单击、`RT+A` 双击、`B` 返回 `Esc`、`RS` 滚轮滚动。
+- **右侧策略头像拖拽与点击使用 (`arkcontroller.config` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 实机标定固定 `right_edge` 锚点 `strategy_avatar (0.9605, 0.3243)` 与 `strategy_inspect (0.9047, 0.3236)`（不受 `shop_open` 缩放矩阵污染）。
+  - 新增 `FocusZone.STRATEGY` 与 `DeployState.HOLDING_STRATEGY`（HUD 渲染琥珀色 `策略源` 虚线框与轨迹）：从棋盘最右列按右跨入策略头像区，支持 **`RT+A`** 一键直接点击使用、**`X`** 查看策略说明、**`A`** 锁定策略源后再按 **`A`** 原地点击使用，或移至棋盘/整备干员与商店卡槽（未展开商店自动先展开）按 **`A`** 平滑拖拽释放、**`B`** 安全取消。
+- **修复商店 4/5/6 槽位识别失灵与 UAC 后台截屏自愈 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - 修复 UAC 提权切回安全桌面瞬间 `ScreenCapture._capture_loop` 后台 `mss.mss()` 初始化异常后永久为 `None` 导致视觉识别失明的严重缺陷：改为每轮惰性重建自愈并在采集异常时立即销毁旧实例；同时拦截 Unity DX11 `PrintWindow` 返回的全黑伪帧。
+  - 加固 `SceneDetector._detect_shop_slot_count_heuristic`：垂直边框搜索窗放宽至 `±12px` 取局部峰，升级卡检测兼容灰态与自带蓝紫底部发光渐层的紫红高亮 `[G]` 升级卡，商品卡检测对左专属非重叠区与右主区施加双段约束并兼容已售空 `NO INFO` 暗蓝槽，彻底消除亮地图背景下 4 误判 5 / 5 误判 6 问题。
+  - 修复 `ControlDispatcher._sync_scene` 在 `手动锁层` 下屏蔽局内视觉同步的问题：当手动锁定 `BATTLE_PREP` 且视觉同为 `BATTLE_PREP` 时，继续实时同步 `shop_open`、`shop_slot_count`、`unit_selected`、`covenant_count` 与 `has_teammates`。
+
 ## [0.1.3] - 2026-11-21
 
 ### 新增与修复 (Added & Fixed)

@@ -28,15 +28,15 @@ flowchart TD
     end
 
     subgraph VisionLayer["异步视觉感知层"]
-        CAP["ScreenCapture (5Hz 守护线程 mss + PrintWindow 回退)"]
-        SD["SceneDetector (ROI 模板匹配 + 启发式回退 + 2帧防抖)"]
-        CAL["VisionCalibrator (ROI 模板裁剪保存器)"]
+        CAP["ScreenCapture (5Hz 守护线程 mss 自愈 + PrintWindow 过滤)"]
+        SD["SceneDetector (5 项局内场景 / 确认弹窗 / 4-6 槽商店识别)"]
+        CAL["VisionCalibrator (局内 ROI 模板裁剪保存器)"]
     end
 
     subgraph ControlLayer["核心调度与状态机层"]
-        GM["GridMapper (线性槽位 / 节点图 / 4点单应性棋盘)"]
-        DFSM["DeployFSM (抓人 / 换位 / 穿装 / 两段式定朝向)"]
-        DISP["ControlDispatcher (焦点路由 / 吸附与自由光标混合)"]
+        GM["GridMapper (线性槽位 / 对称羁绊 / 4点单应性棋盘)"]
+        DFSM["DeployFSM (抓人 / 原地回环转向 / 穿装 / 策略拖拽)"]
+        DISP["ControlDispatcher (局外自由鼠标 / 局内焦点路由)"]
     end
 
     subgraph OverlayLayer["PySide6 悬浮与托盘层"]
@@ -77,7 +77,7 @@ flowchart TD
 
 | 调度单元 | 运行载体 | 周期 / 频率 | 核心职责 |
 | :--- | :--- | :--- | :--- |
-| `ScreenCapture` 采图线程 | 独立后台守护线程 | `~200ms` (5Hz) | 使用线程独占 `mss` 实例截取 16:9 视口并下采样至 `1280x720` BGR |
+| `ScreenCapture` 采图线程 | 独立后台守护线程 | `~200ms` (5Hz) | 线程独占 `mss` 截取 16:9 视口下采样至 `1280x720` BGR，支持 UAC 切换后惰性重建自愈并拦截全黑伪帧 |
 | `_vision_timer` | Qt 主线程 `QTimer` | `200ms` (5Hz) | 读取最新帧并执行 `SceneDetector.detect()` 更新稳定场景 |
 | `_window_timer` | Qt 主线程 `QTimer` | `250ms` (4Hz) | 追踪游戏窗口句柄、位置尺寸及前后台切换，刷新托盘状态 |
 | `_input_timer` | Qt 主线程 `QTimer` | `8ms` (~125Hz) | 轮询 XInput、驱动 `GestureEngine` 与 `ControlDispatcher`、刷新 HUD |
@@ -144,39 +144,55 @@ flowchart TD
 
 ---
 
-## 5. 双层场景识别与防抖流水线
+## 5. 异步采图自愈、双层场景识别与防抖流水线
 
-`SceneDetector` 采用**“模板优先 + 启发式安全回退 + 连续帧防抖”**三级架构：
+### 5.1 后台截屏 UAC 自愈与黑帧防护（`ScreenCapture`）
+
+Windows UAC 提权切回安全桌面瞬间可能导致后台线程首次初始化 `mss.mss()` 失败或已有 GDI 句柄失效，而 Unity DX11 渲染窗口下 `PrintWindow` 常返回全黑帧。`ScreenCapture` 为此建立双重防护：
+- **惰性自愈**：后台 `_capture_loop` 每轮检测到 `sct is None` 时自动重试 `mss.mss()`；运行中若截屏抛异常，立即释放并置空失效 `sct`，由下一周期自动重建全新实例；
+- **全黑伪帧拒绝**：当 `PrintWindow` 回退返回全黑帧（`max() == 0`）且 `mss` 也不可用时安全返回 `None`，绝不向识别器喂入假黑屏画面。
+
+### 5.2 精简五场景双层判别器（`SceneDetector`）
+
+自 `v0.2.0` 起，系统彻底移除易受版本改版影响的局外菜单场景与静态节点配置，`GameScene` 严格精简为 5 项局内核心状态：**`BATTLE_PREP`**、**`MODAL_CHOICE`**、**`MODAL_CONFIRM`**、**`BATTLE_COMBAT`**、**`UNKNOWN_FREE_CURSOR`**（所有局外与设置页均归入 `UNKNOWN_FREE_CURSOR`，自动由左摇杆平滑驱动自由模拟鼠标）。
+
+`SceneDetector` 采用**“模板优先 + 零模板强特征启发式 + 连续帧防抖”**三级流水线：
 
 1. **局部 ROI 模板匹配层**：扫描 `assets/templates/` 中的 `<scene>.png` 与配套 `.json`（含 `roi_norm`、`threshold`、`search_padding`），在限定局部窗口内运行 `cv2.matchTemplate(..., cv2.TM_CCOEFF_NORMED)`（默认阈值 `0.82`），并过滤零方差纯色图像避免伪高分。
-2. **零模板 HSV 强特征与启发式视觉回退层**：在用户尚未采集本机模板时自动接管——通过官方 PC 端右上角粉红准备按钮、展开商店右侧黄色刷新 + 深蓝冻结/青绿解冻双态色块、左侧角色详情青蓝血条（排除拖拽售出金黄框）精准判别 `BATTLE_PREP`、`shop_open`、`unit_selected`，实时检测展开商店 `4 / 5 / 6` 槽、顶部栏正下方居中对称分布的已激活/未激活羁绊图标数量（`0~9`）及多人联机左侧纵向队友头像；同时基于 Sobel 垂直卡片边框梯度与白底确认横条检测自动识别单人 `1x3` 三选一与多人 `2x3` 六选一决策界面（`MODAL_CHOICE`）；特征置信度不足时一律保守返回 `UNKNOWN_FREE_CURSOR`，绝不误锁玩家操作。
-3. **连续帧防抖层**：连续 `debounce_frames = 2` 帧判定一致后才切换稳定场景，有效消除转场动画与加载黑屏引起的闪烁。
-4. **不打断操作保护**：若玩家正处于干员抓取/定朝向状态，或通过 `Back` 键开启了手动锁层，调度器不会因视觉波动强行中断当前操作。
+2. **零模板 HSV 强特征与几何启发式层**：
+   - **回合结束确认弹窗（`MODAL_CONFIRM`）**：优先于右上角准备按钮检测，联合判定中央全宽黑底左右边缘（`gray < 34` 且低方差）、左下灰色「取消」栏与右下暗红「确认」栏三特征，精准捕获未用完资金/策略确认窗；
+   - **决策弹窗（`MODAL_CHOICE`）**：基于 Sobel 垂直卡片边框梯度与白色「确认选择」底条检测，零模板区分单人 `1x3` 三选一与多人 `2x3` 六选一并追踪已选中索引；
+   - **休整运营与 4/5/6 槽鲁棒识别（`BATTLE_PREP`）**：通过右上角粉红准备按钮、展开商店右侧黄色刷新 + 蓝/青冻结双态色块、左侧角色详情青蓝血条判别 `shop_open` 与 `unit_selected`；商店栏位检测采用 `±12px` 垂直边框峰值搜索，兼容灰态与自带蓝紫底部发光渐层的紫红高亮 `[G]` 升级卡，并对商品卡左专属非重叠区与右主区施加独立分段约束（兼容已售空 `NO INFO` 暗蓝空槽），杜绝亮地图背景下 4 误判 5 / 5 误判 6；同时实时检测顶部居中对称羁绊图标数量（`0~9`）及多人左侧队友头像。
+3. **连续帧防抖与不打断保护**：连续 `debounce_frames = 2` 帧一致后切换稳定场景；干员/装备/策略抓取与定朝向期间不强行切层。即便用户通过 `Back` 键处于**手动锁层（`BATTLE_PREP`）**，只要视觉同为 `BATTLE_PREP`，`ControlDispatcher` 依然持续同步 `shop_open`、`shop_slot_count`、`unit_selected`、`covenant_count` 与 `has_teammates`。
 
 ---
 
 ## 6. 核心交互状态机详解
 
-### 6.1 干员/装备抓取与两段式定朝向状态机（`DeployFSM`）
+### 6.1 干员/装备/策略抓取、原地回环转向与两段式定朝向（`DeployFSM`）
 
 ```mermaid
 stateDiagram-v2
-    [*] --> IDLE: 休整期浏览槽位 (商店 / 整备区 / 棋盘 / 装备栏)
+    [*] --> IDLE: 休整期浏览槽位 (商店 / 整备区 / 棋盘 / 装备栏 / 策略头像)
 
     IDLE --> HOLDING_UNIT: 在整备区或棋盘干员格按 A 锁定抓取源
     IDLE --> HOLDING_EQUIP: 在装备栏槽位按 A 锁定装备源
+    IDLE --> HOLDING_STRATEGY: 在右侧策略头像按 A 锁定策略源
 
     HOLDING_UNIT --> IDLE: 按 B 取消抓取
     HOLDING_UNIT --> IDLE: 移至另一整备格按 A (平滑拖拽互换)
     HOLDING_UNIT --> IDLE: 按 X 快速出售 (原生快捷键 X 或拖至右下售出区)
     HOLDING_UNIT --> IDLE: 按 Y 拖拽赠予联机队友头像
-    HOLDING_UNIT --> AIMING_DIRECTION: 移至棋盘格按 A (第一段平滑拖拽落位)
+    HOLDING_UNIT --> AIMING_DIRECTION: 移至棋盘新格按 A (平滑拖拽落位) 或棋盘同格再按 A (smooth_drag_loopback 原地回环拖拽)
 
     AIMING_DIRECTION --> IDLE: 推摇杆或十字键四向滑动定朝向并微震动
     AIMING_DIRECTION --> IDLE: 按 B 左键点击菱形左上角取消按钮撤回
 
-    HOLDING_EQUIP --> IDLE: 移至干员格按 A (平滑拖拽穿戴装备/释放)
+    HOLDING_EQUIP --> IDLE: 移至装备他槽(挪动) 或干员格(穿戴) 按 A
     HOLDING_EQUIP --> IDLE: 按 B 取消或按 X 出售装备
+
+    HOLDING_STRATEGY --> IDLE: 原地再按 A 点击释放 或移至棋盘/整备干员/商店卡槽按 A 平滑拖拽释放
+    HOLDING_STRATEGY --> IDLE: 按 B 无点击安全取消
 ```
 
 ### 6.2 组合键抑制与防误触机制（`GestureEngine`）
@@ -194,7 +210,7 @@ stateDiagram-v2
 arkcontroller/
 ├── configs/
 │   ├── default_bindings.json        # 手柄手感、防误触阈值、原生快捷键与按键映射预设
-│   ├── stronghold_layout_16_9.json  # 卫戍协议 16:9 归一化全流程锚点与默认透视棋盘
+│   ├── stronghold_layout_16_9.json  # 卫戍协议局内 16:9 归一化锚点、策略/确认窗与 4x7 透视棋盘
 │   └── user_override.json           # (运行校准后自动生成) 用户个性化覆盖配置
 ├── assets/templates/                # 用户采集的局部 ROI 场景识别模板 (.png + .json)
 ├── src/arkcontroller/
