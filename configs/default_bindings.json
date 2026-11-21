@@ -1,0 +1,83 @@
+{
+  "left_deadzone": 0.14,
+  "right_deadzone": 0.16,
+  "cursor_max_speed_px": 1400.0,
+  "cursor_gamma": 2.2,
+  "ready_hold_ms": 350,
+  "repeat_initial_ms": 260,
+  "repeat_interval_ms": 95,
+  "use_native_keyboard_shortcuts": true,
+  "flick_distance_ratio": 0.09,
+  "vibration_enabled": true,
+  "trigger_threshold": 0.45,
+  "scroll_speed": 1.0,
+  "allow_retreat_chord": true,
+  "left_stick_mode": "dpad",
+  "left_stick_dpad_threshold": 0.5,
+  "left_stick_dpad_release_threshold": 0.3,
+  "auto_toggle_shop": true,
+  "keyboard_shortcuts": {
+    "shop_toggle": "a",
+    "shop_freeze": "s",
+    "shop_refresh": "d",
+    "battle_ready": "c",
+    "enemy_preview": "w",
+    "sell_board": "x",
+    "sell_bench": "x",
+    "retreat_unit": "q",
+    "covenant_panel": "",
+    "emote_wheel": "z",
+    "back": "esc",
+    "pause_menu": "esc"
+  },
+  "bindings": {
+    "global": {
+      "cycle_scene_layer": "BACK",
+      "toggle_calibration": "BACK+START",
+      "toggle_pause": "LT+BACK",
+      "toggle_free_cursor": "LS"
+    },
+    "menu": {
+      "confirm": "A",
+      "back": "B",
+      "quick_squad": "X",
+      "quick_rewards": "Y",
+      "prev_tab": "LB",
+      "next_tab": "RB",
+      "start_action": "START"
+    },
+    "battle_prep": {
+      "select_or_grab": "A",
+      "cancel": "B",
+      "shop_refresh": "X",
+      "shop_upgrade": "Y",
+      "shop_freeze": "RS",
+      "fast_buy_or_inspect": "RT+A",
+      "toggle_shop": "LT+LB",
+      "prev_zone": "LB",
+      "next_zone": "RB",
+      "battle_ready_hold": "START"
+    },
+    "holding": {
+      "place_or_confirm": "A",
+      "cancel": "B",
+      "quick_sell": "X",
+      "gift_teammate": "Y",
+      "toggle_bench_board": "LB/RB"
+    },
+    "modal_choice": {
+      "confirm_choice": "A",
+      "fast_confirm_choice": "RT+A",
+      "peek_board_hold": "LT"
+    },
+    "lt_chords": {
+      "covenant_panel": "LT+DPAD_LEFT",
+      "enemy_preview": "LT+DPAD_UP",
+      "emote_wheel": "LT+DPAD_DOWN",
+      "cycle_teammate": "LT+DPAD_RIGHT",
+      "toggle_shop": "LT+LB",
+      "retreat_unit": "LT+RB",
+      "pause_menu": "LT+START"
+    }
+  }
+}

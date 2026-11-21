@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arkcontroller"
+version = "0.1.2"
+description = "《明日方舟》卫戍协议零注入 Xbox 手柄全流程操控系统"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.7.0",
+    "mss>=9.0.1",
+    "opencv-python-headless>=4.10.0",
+    "numpy>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+]
+
+[project.scripts]
+arkcontroller = "arkcontroller.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
