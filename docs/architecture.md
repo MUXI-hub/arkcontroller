@@ -120,12 +120,15 @@ flowchart TD
    与校准后的游戏棋盘四角归一化坐标
    $$P_{\text{quad}} = \{p_{\text{TL}}, p_{\text{TR}}, p_{\text{BR}}, p_{\text{BL}}\}$$
    通过 `cv2.getPerspectiveTransform(src, dst)` 求解唯一可逆的 $3 \times 3$ 单应性矩阵 $H$ 及逆矩阵 $H^{-1}$。
-2. **正向格心与格框投影**：对于 $R \times C$ 棋盘（默认 $5 \times 9$）上的任意格 $(r, c)$：
+2. **正向格心与格框投影**：对于 $R \times C$ 棋盘（实机标准默认 $4 \times 7$）上的任意格 $(r, c)$：
    - 格心在单位平面为 $(s, t) = \left(\frac{c + 0.5}{C},\; \frac{r + 0.5}{R}\right)$；
    - 经齐次投影：
      $$\begin{bmatrix} x' \\ y' \\ w' \end{bmatrix} = H \begin{bmatrix} s \\ t \\ 1 \end{bmatrix}, \quad (u, v) = \left(\frac{x'}{w'},\; \frac{y'}{w'}\right)$$
    - 同理对四个角 $\left(\frac{c}{C}, \frac{r}{R}\right)$ 等投影即可获得与 3D 透视完全贴合的四边形多边形 `cell_polygon(r, c)`，直接供 HUD 渲染透视高亮框。
 3. **逆向光标拾取**：给定任意屏幕归一化坐标 $(u, v)$，经 $H^{-1}$ 反投影回单位正方形 $(s, t)$，即可 $O(1)$ 定位所在格 `(row, col)` 或在自由光标切回吸附模式时无缝定位最近地块。
+4. **多视图态镜头缩放补偿与动态商店左延**：
+   - `LayoutProfile` 支持 `LayoutViewState`（`normal` / `shop_open` / `unit_selected`）视图覆写与 `ViewportTransform` 仿射缩放平移补偿（经 OpenCV SIFT 实机配准，`shop_open` 下同步缩放棋盘、整备区与装备栏，中位误差 `1.1px`）；
+   - `resolve_shop_zone` 与 `resolve_shop_upgrade_point` 支持商店升至二本（5 槽）与四本（6 槽）时以最右卡槽为锚点按固定步距向左动态延伸，并同步左移升级灰卡点击坐标。
 
 ---
 
@@ -146,7 +149,7 @@ flowchart TD
 `SceneDetector` 采用**“模板优先 + 启发式安全回退 + 连续帧防抖”**三级架构：
 
 1. **局部 ROI 模板匹配层**：扫描 `assets/templates/` 中的 `<scene>.png` 与配套 `.json`（含 `roi_norm`、`threshold`、`search_padding`），在限定局部窗口内运行 `cv2.matchTemplate(..., cv2.TM_CCOEFF_NORMED)`（默认阈值 `0.82`），并过滤零方差纯色图像避免伪高分。
-2. **启发式视觉特征回退层**：在用户尚未采集本机模板时自动接管——通过边缘暗化遮罩 + 中央等距亮卡片识别 `MODAL_CHOICE`（并自动估算 2/3/4 选一卡片数），通过底部 10 槽周期性边缘频谱 + 右下角高亮准备区/顶部作战波次条区分 `BATTLE_PREP` 与 `BATTLE_COMBAT`；特征置信度不足时一律保守返回 `UNKNOWN_FREE_CURSOR`，绝不误锁玩家操作。
+2. **零模板 HSV 强特征与启发式视觉回退层**：在用户尚未采集本机模板时自动接管——通过官方 PC 端右上角粉红准备按钮、展开商店右侧黄色刷新 + 深蓝冻结/青绿解冻双态色块、左侧角色详情青蓝血条（排除拖拽售出金黄框）精准判别 `BATTLE_PREP`、`shop_open`、`unit_selected`，并实时检测展开商店当前为 `4 / 5 / 6` 槽（含六本满级无升级卡边框兜底）；同时通过边缘暗化遮罩 + 中央等距亮卡片识别 `MODAL_CHOICE`；特征置信度不足时一律保守返回 `UNKNOWN_FREE_CURSOR`，绝不误锁玩家操作。
 3. **连续帧防抖层**：连续 `debounce_frames = 2` 帧判定一致后才切换稳定场景，有效消除转场动画与加载黑屏引起的闪烁。
 4. **不打断操作保护**：若玩家正处于干员抓取/定朝向状态，或通过 `Back` 键开启了手动锁层，调度器不会因视觉波动强行中断当前操作。
 
@@ -165,12 +168,12 @@ stateDiagram-v2
 
     HOLDING_UNIT --> IDLE: 按 B 取消抓取
     HOLDING_UNIT --> IDLE: 移至另一整备格按 A (平滑拖拽互换)
-    HOLDING_UNIT --> IDLE: 按 X 快速出售 (场上 E / 整备 Q 或拖至出售区)
+    HOLDING_UNIT --> IDLE: 按 X 快速出售 (原生快捷键 X 或拖至右下售出区)
     HOLDING_UNIT --> IDLE: 按 Y 拖拽赠予联机队友头像
-    HOLDING_UNIT --> AIMING_DIRECTION: 移至棋盘格按 A (第一段平滑拖拽落位并按住/驻留)
+    HOLDING_UNIT --> AIMING_DIRECTION: 移至棋盘格按 A (第一段平滑拖拽落位)
 
     AIMING_DIRECTION --> IDLE: 推摇杆或十字键四向滑动定朝向并微震动
-    AIMING_DIRECTION --> IDLE: 按 B 触发撤回取消落位
+    AIMING_DIRECTION --> IDLE: 按 B 左键点击菱形左上角取消按钮撤回
 
     HOLDING_EQUIP --> IDLE: 移至干员格按 A (平滑拖拽穿戴装备/释放)
     HOLDING_EQUIP --> IDLE: 按 B 取消或按 X 出售装备
