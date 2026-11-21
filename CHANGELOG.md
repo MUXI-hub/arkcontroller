@@ -2,6 +2,26 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-11-21
+
+### 新增与重绘 (Added & Redesigned)
+- **罗德岛 PRTS 工业战术风透明悬浮窗彻底重绘 (`arkcontroller.overlay.hud_window`)**：
+  - 全面转向《明日方舟》罗德岛黑曜石 45° 斜切角工业美学（`#0B0E14` 磨砂底板、`#00E5FF` 战术青、`#FF6B00` 源石橙），提供复用几何与键帽原语 `chamfer_polygon`、`paint_button_tokens` 与 `render_snapshot()`；
+  - 顶栏重绘为带 `PRTS // TERMINAL` 刻度、菱形信标与斜纹 Toast 的斜切战术条；焦点框升级为兼容 4 点透视梯形的扫描线 + 白色 L 折角 + 边中刻度 + 角菱形锚点；抓取态渲染源石橙斜切铭牌、双轨流光航线与风筝菱形箭头；定朝向盘升级为 Diamond Tactical Rose 战术罗盘；长按开战渲染双环刻度充能仪；底栏采用切角战术条与工业风格 Xbox 彩色键帽；
+  - 100% 保留 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST`、`WDA_EXCLUDEFROMCAPTURE` 防截屏污染与全部既有导出契约，零 Qt6 `setPointSize(-1)` 警告。
+- **全新罗德岛 PRTS 桌面主控前端 (`arkcontroller.overlay.dashboard_window` & `arkcontroller.main`)**：
+  - 新增 `PRTSDashboardWindow`（普通窗口层级绝不置顶抢焦点，点击关闭自动最小化隐藏至系统托盘并在后台停止 60ms 遥测定时器零资源开销），提供四大核心终端分区：
+    1. **`OVERVIEW // 终端总览`**：内置 `QPainter` 实时 Xbox 手柄遥测仪（双摇杆靶盘含死区环、`LT`/`RT` 充能条、16 键高亮阵列）、游戏 16:9 视口绑定状态卡、7 项一键运行态开关（含暂停、HUD 显隐、左摇杆模式、原生快捷键、商店自动开合、震动反馈、`LT+RB` 撤退权限）以及校准向导与热重载快捷入口；
+    2. **`TUNING // 参数调校`**：7 项手感滑块（左右死区、自由光标最大移速、响应曲线指数 `gamma`、滚轮灵敏度、长按开战防误触时长、扳机阈值）配合实时响应曲线预览，支持「应用并持久化保存」（白名单校验后写入 `configs/user_override.json` 并即时热刷新全引擎）与「恢复默认手感」；
+    3. **`KEYMAP // 卫戍协议战术手册`**：以 9 张罗德岛任务简报卡片全景呈现 `v0.2.2+` 全流程 Xbox 手柄映射；
+    4. **`SYSTEM // 档案与诊断`**：展示程序版本、UAC 完整性状态、配置目录、视觉模板数、`4x7` 棋盘网格与多视图缩放补偿矩阵摘要及零注入安全协议说明。
+  - CLI 主入口新增 `--minimized` 启动参数（启动静默常驻系统托盘不弹出主控台，并在 UAC 提权重启时自动透传该参数）。
+- **系统托盘与校准向导视觉统一 (`arkcontroller.overlay.tray` & `calibration_ui`)**：
+  - `ControllerTray` 升级为菱形 PRTS 矢量图标与深色高对比 QSS 菜单，顶部新增「打开 PRTS 主控台」，支持单击/双击托盘图标直接唤出并前置主控台；
+  - `CalibrationDialog` 控制面板与画布锚点全面升级为统一的罗德岛斜切角、白色 L 折角与菱形控制点工业风，完整保留多视图态透视校准与模板采样逻辑。
+- **离屏 UI 自动化测试覆盖 (`tests/test_rhodes_ui.py`)**：
+  - 新增 33 项 `QT_QPA_PLATFORM=offscreen` 自动化 UI 渲染、遥测刷新、参数热保存持久化、托盘交互与零 Qt 字体警告回归测试，全仓单元测试增至 **180 项**、覆盖率达 **86%**。
+
 ## [0.2.2] - 2026-11-21
 
 ### 新增与修复 (Added & Fixed)

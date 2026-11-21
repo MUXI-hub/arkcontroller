@@ -39,10 +39,11 @@ flowchart TD
         DISP["ControlDispatcher (局外自由鼠标 / 局内焦点路由)"]
     end
 
-    subgraph OverlayLayer["PySide6 悬浮与托盘层"]
-        HUD["HUDWindow (WS_EX_TRANSPARENT 科技风透明叠加层)"]
+    subgraph OverlayLayer["PySide6 悬浮与桌面主控层"]
+        HUD["HUDWindow (PRTS 切角透明穿透叠加层 + WDA_EXCLUDEFROMCAPTURE)"]
+        DASH["PRTSDashboardWindow (四分区主控台 / 60ms 遥测仪 / 参数热保存)"]
         CALUI["CalibrationDialog (拖拽透视网格与模板采样器)"]
-        TRAY["ControllerTray (内置矢量图标托盘控制菜单)"]
+        TRAY["ControllerTray (菱形矢量图标深色托盘菜单)"]
     end
 
     GP --> XI
@@ -69,18 +70,23 @@ flowchart TD
     CALUI --> CFG
     TRAY --> DISP
     TRAY --> HUD
+    TRAY --> DASH
+    DASH --> CFG
+    DASH --> DISP
+    DASH --> CALUI
 ```
 
 ### 多频时钟协同调度（`main.py`）
 
-为避免截屏与 OpenCV 模板匹配阻塞手柄操作手感，主进程通过三个解耦时钟协同运行：
+为避免截屏、OpenCV 识别与桌面遥测刷新阻塞手柄操作手感，主进程通过解耦时钟协同运行：
 
 | 调度单元 | 运行载体 | 周期 / 频率 | 核心职责 |
 | :--- | :--- | :--- | :--- |
 | `ScreenCapture` 采图线程 | 独立后台守护线程 | `~200ms` (5Hz) | 线程独占 `mss` 截取 16:9 视口下采样至 `1280x720` BGR，支持 UAC 切换后惰性重建自愈并拦截全黑伪帧 |
 | `_vision_timer` | Qt 主线程 `QTimer` | `200ms` (5Hz) | 读取最新帧并执行 `SceneDetector.detect()` 更新稳定场景 |
-| `_window_timer` | Qt 主线程 `QTimer` | `250ms` (4Hz) | 追踪游戏窗口句柄、位置尺寸及前后台切换，刷新托盘状态 |
+| `_window_timer` | Qt 主线程 `QTimer` | `250ms` (4Hz) | 追踪游戏窗口句柄、位置尺寸及前后台切换，刷新托盘与主控台状态 |
 | `_input_timer` | Qt 主线程 `QTimer` | `8ms` (~125Hz) | 轮询 XInput、驱动 `GestureEngine` 与 `ControlDispatcher`、刷新 HUD |
+| `PRTSDashboardWindow` 遥测定时器 | Qt 主线程 `QTimer` | `60ms` (~16Hz) | 仅在主控台窗口可见时运行，刷新双摇杆靶盘、扳机条与按键阵列；关闭最小化至托盘后自动停止，后台零开销 |
 
 ---
 
@@ -220,8 +226,8 @@ arkcontroller/
 │   ├── input/                       # XInput 驱动、手势引擎与 Win32 SendInput 合成器
 │   ├── vision/                      # 异步截屏、双层场景识别与模板校准器
 │   ├── control/                     # 透视网格映射、两段式部署状态机与调度中枢
-│   ├── overlay/                     # PRTS 透明穿透 HUD、可视化校准向导与系统托盘
-│   └── main.py                      # CLI 入口与多频事件循环装配
-├── tests/                           # 6 个核心模块单元测试套件
+│   ├── overlay/                     # PRTS 透明穿透 HUD、PRTS 桌面主控台、校准向导与系统托盘
+│   └── main.py                      # CLI 入口（含 --minimized）与多频事件循环装配
+├── tests/                           # 7 个核心模块单元测试套件（含离屏 UI 测试）
 └── docs/                            # 架构设计与手柄操作手册
 ```
