@@ -2,6 +2,24 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [0.1.1] - 2026-11-21
+
+### 新增 (Added)
+- **左摇杆代替十字键导航 (`arkcontroller.input` & `arkcontroller.control`)**：
+  - `GestureEngine` 新增带滞回阈值（触发 `0.50` / 回中 `0.30`）与按住连发的 `StickDirection` 离散四向事件，默认 `left_stick_mode="dpad"` 下左摇杆可直接替代十字键完成全流程吸附跳格。
+  - 新增按下左摇杆 **`LS`** 一键切换「槽位吸附导航 ↔ 自由虚拟光标」模式，并在系统托盘菜单新增热切换开关。
+- **商店展开/收起联动与多界面缩放态补偿 (`arkcontroller.config` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 新增 `LayoutViewState`（`normal` / `shop_open` / `unit_selected`）、`ViewportTransform` 与 `ViewLayoutOverride` 模型，支持在展开商店或选取角色导致镜头缩放/平移时自动切换对应透视棋盘与槽位坐标，解决框选错位。
+  - 局内切入商店区自动展开商店、切入棋盘或抓取干员准备部署时自动收起商店；支持 **`LT + LB`** 随时手动展开/收起商店、商店区按 **`B`** 收起并退回整备区。
+  - 休整期整备区/棋盘按 **`RT + A`** 主动查看角色详情并激活 `unit_selected` 缩放补偿，按 **`B`** 退出详情恢复标准视角；同时自适应底部横向装备栏与侧边竖向装备栏的跨区导航。
+  - 可视化校准向导 `CalibrationDialog` 新增「校准视图态」切换（支持分别拖拽校准 `normal` / `shop_open` / `unit_selected` 透视网格）及 `shop_open` / `unit_selected` 视觉识别模板一键采集。
+
+### 修复 (Fixed)
+- 修复 `DeployFSM.pick_unit()` / `pick_equip()` 抓取时提前单击源槽位导致诱发游戏“选取角色 -> 界面缩放”并造成拖拽起终点错位的问题（改为默认无点击虚拟锁定，仅在原生快捷键出售前补发单击选中）。
+- 修复 Windows Qt6 启动时未设正字号默认字体触发 `QFont::setPointSize: Point size <= 0 (-1)` 警告的问题。
+- 修复 `CalibrationDialog` 在 PySide6 下 `QComboBox.currentData()` 对 `str, Enum` 拆箱导致视图态与场景模板切换失效的问题。
+- 新增 `ConfigLoader(use_user_override=...)` 隔离开关，确保自动化单元测试不受本机已保存的 `configs/user_override.json` 干扰。
+
 ## [0.1.0] - 2026-11-21
 
 ### 新增 (Added)

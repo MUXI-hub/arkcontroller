@@ -342,7 +342,7 @@ class TestConfigSystem:
     """验证默认配置加载、模型校验以及 user_override.json 合并与热重载。"""
 
     def test_load_default_configs_from_repo(self) -> None:
-        loader = ConfigLoader()
+        loader = ConfigLoader(use_user_override=False)
         keymap, layout = loader.load()
 
         assert isinstance(keymap, KeymapConfig)
@@ -357,12 +357,20 @@ class TestConfigSystem:
         assert keymap.use_native_keyboard_shortcuts is True
         assert keymap.flick_distance_ratio == pytest.approx(0.09)
         assert keymap.vibration_enabled is True
+        assert keymap.left_stick_mode == "dpad"
+        assert keymap.auto_toggle_shop is True
 
         for key in REQUIRED_BUTTON_KEYS:
             assert key in layout.buttons
             pt = layout.buttons[key]
             assert 0.0 <= pt.u <= 1.0
             assert 0.0 <= pt.v <= 1.0
+
+        assert "shop_toggle" in layout.buttons
+        assert "shop_open" in layout.view_overrides
+        assert "unit_selected" in layout.view_overrides
+        assert layout.resolve_board_quad("shop_open") != layout.board_quad
+        assert layout.resolve_board_quad("unit_selected") != layout.board_quad
 
         assert layout.bench_zone.count == 10
         assert layout.equip_zone.count == 5

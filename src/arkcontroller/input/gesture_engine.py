@@ -112,6 +112,15 @@ class StickMotion:
     dy_px: float
 
 
+@dataclass(frozen=True)
+class StickDirection:
+    """左摇杆离散四向导航事件（代替十字键跳格，支持滞回防抖与按住连发）。"""
+
+    stick: Literal["left", "right"]
+    direction: Literal["up", "down", "left", "right"]
+    is_repeat: bool = False
+
+
 GestureEvent: TypeAlias = (
     ButtonTap
     | ButtonHoldProgress
@@ -120,6 +129,7 @@ GestureEvent: TypeAlias = (
     | ChordTriggered
     | ModifierStateChanged
     | StickMotion
+    | StickDirection
 )
 
 
@@ -172,10 +182,18 @@ class GestureEngine:
             "left": [0.0, 0.0],
             "right": [0.0, 0.0],
         }
+        # 左摇杆代替十字键离散导航追踪状态（支持滞回与按住连发）
+        self._left_dpad_dir: Literal["up", "down", "left", "right"] | None = None
+        self._left_dpad_held_ms: float = 0.0
+        self._left_dpad_next_repeat_ms: float = 0.0
 
     def update_keymap(self, keymap: KeymapConfig) -> None:
         """热更新键位与手感配置（死区、速度、gamma、长按与连发阈值）。"""
         self._keymap = keymap
+        if getattr(self._keymap, "left_stick_mode", "dpad") != "dpad":
+            self._left_dpad_dir = None
+            self._left_dpad_held_ms = 0.0
+            self._left_dpad_next_repeat_ms = 0.0
 
     def reset(self) -> list[GestureEvent]:
         """重置所有内部按键与摇杆状态，并返回用于清理 HUD 的归零事件。"""
@@ -195,6 +213,9 @@ class GestureEngine:
         self._prev_buttons = frozenset()
         self._stick_remainder["left"] = [0.0, 0.0]
         self._stick_remainder["right"] = [0.0, 0.0]
+        self._left_dpad_dir = None
+        self._left_dpad_held_ms = 0.0
+        self._left_dpad_next_repeat_ms = 0.0
         return events
 
     def update(self, state: GamepadState, dt: float) -> list[GestureEvent]:
@@ -327,10 +348,25 @@ class GestureEngine:
 
             track.reset()
 
-        # 4. 处理左右摇杆位移积分（带 gamma 曲线与亚像素余量累加）
+        # 4. 处理左右摇杆位移积分（带 gamma 曲线与亚像素余量累加）与左摇杆离散方向导航
         left_motion = self._process_stick("left", state.lx, state.ly, dt_sec)
         if left_motion is not None:
             events.append(left_motion)
+
+        if getattr(self._keymap, "left_stick_mode", "dpad") == "dpad":
+            events.extend(
+                self._process_left_stick_direction(
+                    state.lx,
+                    state.ly,
+                    dt_ms,
+                    repeat_initial_ms,
+                    repeat_interval_ms,
+                )
+            )
+        else:
+            self._left_dpad_dir = None
+            self._left_dpad_held_ms = 0.0
+            self._left_dpad_next_repeat_ms = 0.0
 
         right_motion = self._process_stick("right", state.rx, state.ry, dt_sec)
         if right_motion is not None:
@@ -441,3 +477,46 @@ class GestureEngine:
             dx_px=dx_px,
             dy_px=dy_px,
         )
+
+    def _process_left_stick_direction(
+        self,
+        x: float,
+        y: float,
+        dt_ms: float,
+        repeat_initial_ms: int,
+        repeat_interval_ms: int,
+    ) -> list[StickDirection]:
+        """将左摇杆模拟向量转换为带滞回防抖与连发节拍的离散四向导航事件。"""
+        mag = math.hypot(x, y)
+        trigger_thresh = float(getattr(self._keymap, "left_stick_dpad_threshold", 0.50))
+        release_thresh = float(getattr(self._keymap, "left_stick_dpad_release_threshold", 0.30))
+
+        if mag <= release_thresh:
+            self._left_dpad_dir = None
+            self._left_dpad_held_ms = 0.0
+            self._left_dpad_next_repeat_ms = 0.0
+            return []
+
+        if mag < trigger_thresh:
+            # 位于滞回带内：保持已有方向不提前复位，但不触发新方向或连发
+            return []
+
+        cardinal: Literal["up", "down", "left", "right"]
+        if abs(x) >= abs(y):
+            cardinal = "right" if x >= 0.0 else "left"
+        else:
+            cardinal = "up" if y >= 0.0 else "down"
+
+        emitted: list[StickDirection] = []
+        if cardinal != self._left_dpad_dir:
+            self._left_dpad_dir = cardinal
+            self._left_dpad_held_ms = 0.0
+            self._left_dpad_next_repeat_ms = float(repeat_initial_ms)
+            emitted.append(StickDirection(stick="left", direction=cardinal, is_repeat=False))
+            return emitted
+
+        self._left_dpad_held_ms += dt_ms
+        while self._left_dpad_held_ms >= self._left_dpad_next_repeat_ms:
+            emitted.append(StickDirection(stick="left", direction=cardinal, is_repeat=True))
+            self._left_dpad_next_repeat_ms += float(repeat_interval_ms)
+        return emitted

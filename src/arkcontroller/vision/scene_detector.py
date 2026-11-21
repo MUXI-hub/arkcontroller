@@ -58,6 +58,9 @@ DEFAULT_SCENE_ROIS: dict[GameScene, tuple[float, float, float, float]] = {
 # 休整期商店展开状态辅助模板默认 ROI: (u, v, w, h)
 DEFAULT_SHOP_OPEN_ROI: tuple[float, float, float, float] = (0.14, 0.58, 0.68, 0.20)
 
+# 局内选中角色详情侧栏辅助模板默认 ROI: (u, v, w, h)
+DEFAULT_UNIT_SELECTED_ROI: tuple[float, float, float, float] = (0.0, 0.16, 0.24, 0.68)
+
 _VALID_SCENE_VALUES: dict[str, GameScene] = {
     scene.value: scene
     for scene in GameScene
@@ -73,6 +76,7 @@ class SceneDetectionResult:
     confidence: float
     shop_open: bool = True
     choice_count: int = 3
+    unit_selected: bool = False
 
 
 @dataclass(frozen=True)
@@ -219,12 +223,14 @@ class SceneDetector:
         self._lock = threading.RLock()
         self._scene_templates: list[_SceneTemplate] = []
         self._shop_open_template: _SceneTemplate | None = None
+        self._unit_selected_template: _SceneTemplate | None = None
 
         self._stable_result: SceneDetectionResult = SceneDetectionResult(
             scene=GameScene.UNKNOWN_FREE_CURSOR,
             confidence=0.0,
             shop_open=True,
             choice_count=3,
+            unit_selected=False,
         )
         self._pending_scene: GameScene | None = None
         self._pending_count: int = 0
@@ -253,6 +259,7 @@ class SceneDetector:
         """扫描并重新加载 ``templates_dir`` 下的所有本地模板与 ROI 元数据。"""
         scene_templates: list[_SceneTemplate] = []
         shop_template: _SceneTemplate | None = None
+        unit_template: _SceneTemplate | None = None
 
         if self.templates_dir.exists() and self.templates_dir.is_dir():
             for png_path in sorted(self.templates_dir.glob("*.png")):
@@ -261,18 +268,22 @@ class SceneDetector:
                     continue
                 if tpl.name == "shop_open":
                     shop_template = tpl
+                elif tpl.name == "unit_selected":
+                    unit_template = tpl
                 elif tpl.scene is not None:
                     scene_templates.append(tpl)
 
         with self._lock:
             self._scene_templates = scene_templates
             self._shop_open_template = shop_template
+            self._unit_selected_template = unit_template
 
         logger.debug(
-            "模板重载完成: 目录=%s, 场景模板数=%d, 商店模板=%s",
+            "模板重载完成: 目录=%s, 场景模板数=%d, 商店模板=%s, 角色详情模板=%s",
             self.templates_dir,
             len(scene_templates),
             shop_template is not None,
+            unit_template is not None,
         )
 
     def _load_single_template(self, png_path: Path) -> _SceneTemplate | None:
@@ -289,9 +300,9 @@ class SceneDetector:
             except (OSError, json.JSONDecodeError):
                 logger.warning("解析模板元数据失败，将按默认规则加载: %s", meta_path)
 
-        is_shop_template = stem == "shop_open"
+        is_aux_template = stem in ("shop_open", "unit_selected")
         scene: GameScene | None = None
-        if not is_shop_template:
+        if not is_aux_template:
             scene = self._resolve_scene_from_stem_and_meta(stem, meta)
             if scene is None:
                 logger.debug("忽略未映射到已知 GameScene 的模板文件: %s", png_path.name)
@@ -390,6 +401,7 @@ class SceneDetector:
         with self._lock:
             templates = list(self._scene_templates)
             shop_template = self._shop_open_template
+            unit_template = self._unit_selected_template
 
         # (a) 第一层：局部 ROI 模板匹配
         best_scene: GameScene | None = None
@@ -404,22 +416,26 @@ class SceneDetector:
         if best_scene is not None:
             shop_open = True
             choice_count = 3
+            unit_selected = False
             if best_scene == GameScene.BATTLE_PREP:
                 shop_open = self._detect_shop_open(frame, shop_template)
+                unit_selected = self._detect_unit_selected(frame, unit_template)
             elif best_scene == GameScene.MODAL_CHOICE:
                 shop_open = False
                 choice_count = self._estimate_choice_count(frame)
             elif best_scene == GameScene.BATTLE_COMBAT:
                 shop_open = False
+                unit_selected = self._detect_unit_selected(frame, unit_template)
             return SceneDetectionResult(
                 scene=best_scene,
                 confidence=round(best_score, 4),
                 shop_open=shop_open,
                 choice_count=choice_count,
+                unit_selected=unit_selected,
             )
 
         # (b) 第二层：启发式视觉特征回退
-        return self._detect_heuristic(frame, shop_template)
+        return self._detect_heuristic(frame, shop_template, unit_template)
 
     @staticmethod
     def _match_template(frame: np.ndarray, tpl: _SceneTemplate) -> float:
@@ -482,8 +498,20 @@ class SceneDetector:
 
         return True
 
+    def _detect_unit_selected(
+        self, frame: np.ndarray, unit_template: _SceneTemplate | None
+    ) -> bool:
+        """判断当前是否处于选取角色详情面板（触发界面缩放）状态。"""
+        if unit_template is not None:
+            score = self._match_template(frame, unit_template)
+            return score >= unit_template.threshold
+        return False
+
     def _detect_heuristic(
-        self, frame: np.ndarray, shop_template: _SceneTemplate | None
+        self,
+        frame: np.ndarray,
+        shop_template: _SceneTemplate | None,
+        unit_template: _SceneTemplate | None = None,
     ) -> SceneDetectionResult:
         """基于 1280x720 画面亮度/边缘/色块特征的保守启发式回退判别器。"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -510,22 +538,26 @@ class SceneDetector:
             if 0.10 <= ready_vivid_ratio <= 0.88:
                 confidence = min(0.80, 0.64 + 0.12 * bench_score + 0.08 * min(ready_vivid_ratio / 0.35, 1.0))
                 shop_open = self._detect_shop_open(frame, shop_template)
+                unit_selected = self._detect_unit_selected(frame, unit_template)
                 return SceneDetectionResult(
                     scene=GameScene.BATTLE_PREP,
                     confidence=round(confidence, 4),
                     shop_open=shop_open,
                     choice_count=3,
+                    unit_selected=unit_selected,
                 )
 
             # 右下角无准备按钮高亮块，且顶部中央存在作战波次 HUD 面板 -> 作战期
             combat_hud_score = self._measure_combat_top_hud_score(gray, hsv)
             if ready_vivid_ratio < 0.08 and combat_hud_score >= 0.60:
                 confidence = min(0.76, 0.62 + 0.08 * bench_score + 0.08 * combat_hud_score)
+                unit_selected = self._detect_unit_selected(frame, unit_template)
                 return SceneDetectionResult(
                     scene=GameScene.BATTLE_COMBAT,
                     confidence=round(confidence, 4),
                     shop_open=False,
                     choice_count=3,
+                    unit_selected=unit_selected,
                 )
 
         # 置信度不足时一律安全返回未知自由光标模式

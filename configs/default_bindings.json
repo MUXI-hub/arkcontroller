@@ -12,7 +12,12 @@
   "trigger_threshold": 0.45,
   "scroll_speed": 1.0,
   "allow_retreat_chord": true,
+  "left_stick_mode": "dpad",
+  "left_stick_dpad_threshold": 0.5,
+  "left_stick_dpad_release_threshold": 0.3,
+  "auto_toggle_shop": true,
   "keyboard_shortcuts": {
+    "shop_toggle": "",
     "shop_refresh": "d",
     "shop_freeze": "r",
     "battle_ready": "space",
@@ -29,7 +34,8 @@
     "global": {
       "cycle_scene_layer": "BACK",
       "toggle_calibration": "BACK+START",
-      "toggle_pause": "LT+BACK"
+      "toggle_pause": "LT+BACK",
+      "toggle_free_cursor": "LS"
     },
     "menu": {
       "confirm": "A",
@@ -46,7 +52,8 @@
       "shop_refresh": "X",
       "shop_upgrade": "Y",
       "shop_freeze": "RS",
-      "fast_buy": "RT+A",
+      "fast_buy_or_inspect": "RT+A",
+      "toggle_shop": "LT+LB",
       "prev_zone": "LB",
       "next_zone": "RB",
       "battle_ready_hold": "START"
@@ -68,6 +75,7 @@
       "enemy_preview": "LT+DPAD_UP",
       "emote_wheel": "LT+DPAD_DOWN",
       "cycle_teammate": "LT+DPAD_RIGHT",
+      "toggle_shop": "LT+LB",
       "retreat_unit": "LT+RB",
       "pause_menu": "LT+START"
     }

@@ -18,6 +18,7 @@ from arkcontroller.input.gesture_engine import (
     ChordTriggered,
     GestureEngine,
     ModifierStateChanged,
+    StickDirection,
     StickMotion,
 )
 from arkcontroller.input.xinput_driver import (
@@ -467,26 +468,68 @@ class TestGestureEngineStickIntegration:
         keymap = KeymapConfig(cursor_max_speed_px=1000.0, cursor_gamma=2.0)
         engine = GestureEngine(keymap)
 
-        # 向右满推 -> dx_px > 0
+        # 向右满推 -> dx_px > 0，且默认 dpad 模式下同时输出 StickDirection("left", "right")
         ev_right = engine.update(_make_state(lx=1.0, ly=0.0), dt=0.010)
-        assert len(ev_right) == 1
-        assert isinstance(ev_right[0], StickMotion)
-        assert ev_right[0].stick == "left"
-        assert ev_right[0].dx_px == 10.0
-        assert ev_right[0].dy_px == 0.0
+        motions_right = [e for e in ev_right if isinstance(e, StickMotion)]
+        dirs_right = [e for e in ev_right if isinstance(e, StickDirection)]
+        assert len(motions_right) == 1
+        assert motions_right[0].stick == "left"
+        assert motions_right[0].dx_px == 10.0
+        assert motions_right[0].dy_px == 0.0
+        assert dirs_right == [StickDirection("left", "right", is_repeat=False)]
 
         # 向上满推 (ly = +1.0) -> 屏幕坐标向上 dy_px < 0
         ev_up = engine.update(_make_state(lx=0.0, ly=1.0), dt=0.010)
-        assert ev_up[0].dx_px == 0.0
-        assert ev_up[0].dy_px == -10.0
+        motions_up = [e for e in ev_up if isinstance(e, StickMotion)]
+        assert motions_up[0].dx_px == 0.0
+        assert motions_up[0].dy_px == -10.0
 
         # 向下满推 (ly = -1.0) -> 屏幕坐标向下 dy_px > 0
         ev_down = engine.update(_make_state(lx=0.0, ly=-1.0), dt=0.010)
-        assert ev_down[0].dx_px == 0.0
-        assert ev_down[0].dy_px == 10.0
+        motions_down = [e for e in ev_down if isinstance(e, StickMotion)]
+        assert motions_down[0].dx_px == 0.0
+        assert motions_down[0].dy_px == 10.0
 
-        # 归中不产生 StickMotion 事件
+        # 归中不产生任何摇杆事件
         assert engine.update(_make_state(lx=0.0, ly=0.0), dt=0.010) == []
+
+    def test_left_stick_dpad_hysteresis_repeat_and_cursor_mode_toggle(self) -> None:
+        keymap = KeymapConfig(
+            left_stick_mode="dpad",
+            left_stick_dpad_threshold=0.50,
+            left_stick_dpad_release_threshold=0.30,
+            repeat_initial_ms=200,
+            repeat_interval_ms=100,
+        )
+        engine = GestureEngine(keymap)
+
+        # 低于触发阈值不发射 StickDirection
+        ev_low = engine.update(_make_state(lx=0.40, ly=0.0), dt=0.05)
+        assert not any(isinstance(e, StickDirection) for e in ev_low)
+
+        # 超过触发阈值立即触发首次方向事件
+        ev_first = engine.update(_make_state(lx=0.75, ly=0.0), dt=0.05)
+        assert StickDirection("left", "right", is_repeat=False) in ev_first
+
+        # 处于滞回带 (0.30, 0.50) 不重复触发且不复位，再次推回 0.75 不误发新首步
+        ev_hyst = engine.update(_make_state(lx=0.40, ly=0.0), dt=0.05)
+        assert not any(isinstance(e, StickDirection) for e in ev_hyst)
+        ev_hold1 = engine.update(_make_state(lx=0.75, ly=0.0), dt=0.10)
+        assert not any(isinstance(e, StickDirection) for e in ev_hold1)
+
+        # 持续按住累计达到 repeat_initial_ms(200ms) -> 触发连发
+        ev_rep1 = engine.update(_make_state(lx=0.75, ly=0.0), dt=0.11)
+        assert StickDirection("left", "right", is_repeat=True) in ev_rep1
+
+        # 回中低于 release_threshold(0.30) 后再次推杆，应作为新一轮首步触发
+        engine.update(_make_state(lx=0.10, ly=0.0), dt=0.02)
+        ev_again = engine.update(_make_state(lx=0.80, ly=0.0), dt=0.02)
+        assert StickDirection("left", "right", is_repeat=False) in ev_again
+
+        # 切换为 cursor 模式后不再发射 StickDirection
+        engine.update_keymap(KeymapConfig(left_stick_mode="cursor"))
+        ev_cursor = engine.update(_make_state(lx=0.90, ly=0.0), dt=0.02)
+        assert not any(isinstance(e, StickDirection) for e in ev_cursor)
 
     def test_stick_gamma_curve_and_subpixel_accumulator(self) -> None:
         keymap = KeymapConfig(cursor_max_speed_px=1400.0, cursor_gamma=2.2)

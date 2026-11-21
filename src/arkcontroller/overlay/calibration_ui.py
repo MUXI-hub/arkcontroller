@@ -41,7 +41,13 @@ from PySide6.QtWidgets import (
 )
 
 from arkcontroller.config.loader import ConfigLoader
-from arkcontroller.config.models import KeymapConfig, LayoutProfile, LinearZone, PerspectiveQuad
+from arkcontroller.config.models import (
+    KeymapConfig,
+    LayoutProfile,
+    LayoutViewState,
+    LinearZone,
+    PerspectiveQuad,
+)
 from arkcontroller.control.grid_mapper import LinearZoneMapper, PerspectiveBoardMapper
 from arkcontroller.overlay.hud_window import (
     COLOR_AMBER,
@@ -68,6 +74,12 @@ CALIBRATABLE_SCENES: tuple[GameScene, ...] = (
     GameScene.SETTLEMENT,
 )
 
+VIEW_STATE_DISPLAY_NAMES: dict[LayoutViewState, str] = {
+    LayoutViewState.NORMAL: "默认态（商店收起 / 未选角色）",
+    LayoutViewState.SHOP_OPEN: "商店展开缩放态 (shop_open)",
+    LayoutViewState.UNIT_SELECTED: "选取角色缩放态 (unit_selected)",
+}
+
 
 @dataclass
 class _DragHandle:
@@ -90,6 +102,7 @@ class _CalibrationCanvas(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         self._base_layout = layout
+        self._view_state: LayoutViewState = LayoutViewState.NORMAL
         self._board_rows: int = layout.board_quad.rows
         self._board_cols: int = layout.board_quad.cols
         self._visible_groups: dict[str, bool] = {
@@ -105,17 +118,28 @@ class _CalibrationCanvas(QWidget):
         self._font_label = QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold)
         self._font_coord = QFont("Consolas", 8, QFont.Weight.Bold)
 
-        self.reset_from_layout(layout)
+        self.reset_from_layout(layout, view_state=self._view_state)
 
-    def reset_from_layout(self, layout: LayoutProfile) -> None:
-        """从给定 LayoutProfile 重置所有控制点坐标与棋盘行列维度。"""
+    @property
+    def view_state(self) -> LayoutViewState:
+        return self._view_state
+
+    def reset_from_layout(
+        self,
+        layout: LayoutProfile,
+        *,
+        view_state: LayoutViewState | None = None,
+    ) -> None:
+        """从给定 LayoutProfile 与指定界面缩放态重置全部控制点与棋盘行列维度。"""
         self._base_layout = layout
-        self._board_rows = layout.board_quad.rows
-        self._board_cols = layout.board_quad.cols
-        q = layout.board_quad
-        sz = layout.shop_zone
-        bz = layout.bench_zone
-        ez = layout.equip_zone
+        if view_state is not None:
+            self._view_state = view_state
+        q = layout.resolve_board_quad(self._view_state)
+        sz = layout.resolve_shop_zone(self._view_state)
+        bz = layout.resolve_bench_zone(self._view_state)
+        ez = layout.resolve_equip_zone(self._view_state)
+        self._board_rows = q.rows
+        self._board_cols = q.cols
 
         self._handles = {
             "board_tl": _DragHandle("board_tl", "board", "棋盘左上", q.top_left[0], q.top_left[1], COLOR_CYAN),
@@ -174,20 +198,38 @@ class _CalibrationCanvas(QWidget):
         )
 
     def export_layout_override(self) -> dict[str, object]:
-        """导出与 ConfigLoader.save_user_override 兼容的布局覆盖字典。"""
+        """导出与 ConfigLoader.save_user_override 兼容的布局覆盖字典（支持三态缩放覆盖）。"""
         quad = self.build_board_quad()
         # 校验单应性可逆，避免保存退化四角导致主循环异常
         PerspectiveBoardMapper(quad)
 
-        shop = self.build_linear_zone("shop", self._base_layout.shop_zone)
-        bench = self.build_linear_zone("bench", self._base_layout.bench_zone)
-        equip = self.build_linear_zone("equip", self._base_layout.equip_zone)
+        shop = self.build_linear_zone("shop", self._base_layout.resolve_shop_zone(self._view_state))
+        bench = self.build_linear_zone("bench", self._base_layout.resolve_bench_zone(self._view_state))
+        equip = self.build_linear_zone("equip", self._base_layout.resolve_equip_zone(self._view_state))
+
+        if self._view_state == LayoutViewState.NORMAL:
+            return {
+                "layout": {
+                    "board_quad": quad.to_dict(),
+                    "shop_zone": shop.to_dict(),
+                    "bench_zone": bench.to_dict(),
+                    "equip_zone": equip.to_dict(),
+                }
+            }
+
+        state_payload: dict[str, object] = {
+            "board_quad": quad.to_dict(),
+            "bench_zone": bench.to_dict(),
+            "equip_zone": equip.to_dict(),
+        }
+        if self._view_state == LayoutViewState.SHOP_OPEN:
+            state_payload["shop_zone"] = shop.to_dict()
+
         return {
             "layout": {
-                "board_quad": quad.to_dict(),
-                "shop_zone": shop.to_dict(),
-                "bench_zone": bench.to_dict(),
-                "equip_zone": equip.to_dict(),
+                "view_overrides": {
+                    self._view_state.value: state_payload,
+                }
             }
         }
 
@@ -279,7 +321,9 @@ class _CalibrationCanvas(QWidget):
                     painter,
                     w,
                     h,
-                    self.build_linear_zone("shop", self._base_layout.shop_zone),
+                    self.build_linear_zone(
+                        "shop", self._base_layout.resolve_shop_zone(self._view_state)
+                    ),
                     COLOR_GREEN,
                     prefix="S",
                 )
@@ -290,18 +334,22 @@ class _CalibrationCanvas(QWidget):
                     painter,
                     w,
                     h,
-                    self.build_linear_zone("bench", self._base_layout.bench_zone),
+                    self.build_linear_zone(
+                        "bench", self._base_layout.resolve_bench_zone(self._view_state)
+                    ),
                     COLOR_AMBER,
                     prefix="B",
                 )
 
-            # 4. 侧边 5 格装备栏预览
+            # 4. 侧边/底部 5 格装备栏预览
             if self._visible_groups.get("equip", True):
                 self._draw_linear_zone_preview(
                     painter,
                     w,
                     h,
-                    self.build_linear_zone("equip", self._base_layout.equip_zone),
+                    self.build_linear_zone(
+                        "equip", self._base_layout.resolve_equip_zone(self._view_state)
+                    ),
                     COLOR_VIOLET,
                     prefix="E",
                 )
@@ -575,10 +623,21 @@ class CalibrationDialog(QDialog):
         title.setStyleSheet("color: #00E5FF; font-size: 14px; font-weight: bold;")
         vbox.addWidget(title)
 
-        desc = QLabel("直接拖动菱形控制点对齐游戏画面，实时预览透视网格。")
+        desc = QLabel("先选择界面缩放态，再拖动菱形控制点对齐游戏画面并保存。")
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #94A3B8; font-size: 11px;")
         vbox.addWidget(desc)
+
+        # 校准视图态切换（默认态 / 商店展开态 / 选中角色态）
+        view_label = QLabel("当前校准视图态（应对界面缩放错位）：")
+        view_label.setStyleSheet("color: #CBD5E1; font-weight: bold;")
+        vbox.addWidget(view_label)
+
+        self._view_state_combo = QComboBox()
+        for vs in LayoutViewState:
+            self._view_state_combo.addItem(VIEW_STATE_DISPLAY_NAMES[vs], userData=vs)
+        self._view_state_combo.currentIndexChanged.connect(self._on_view_state_changed)
+        vbox.addWidget(self._view_state_combo)
 
         # 图层开关行
         layer_row1 = QHBoxLayout()
@@ -636,6 +695,8 @@ class CalibrationDialog(QDialog):
         for scene in CALIBRATABLE_SCENES:
             label = f"{SCENE_DISPLAY_NAMES.get(scene, scene.value)} ({scene.value})"
             self._scene_combo.addItem(label, userData=scene)
+        self._scene_combo.addItem("辅助状态：商店已展开 (shop_open)", userData="shop_open")
+        self._scene_combo.addItem("辅助状态：选取角色缩放 (unit_selected)", userData="unit_selected")
         vbox.addWidget(self._scene_combo)
 
         self._btn_capture = QPushButton("截取当前画面作为场景识别模板")
@@ -707,26 +768,49 @@ class CalibrationDialog(QDialog):
             return
         super().keyPressEvent(event)
 
+    def _on_view_state_changed(self) -> None:
+        raw_vs = self._view_state_combo.currentData()
+        if isinstance(raw_vs, LayoutViewState):
+            vs = raw_vs
+        elif isinstance(raw_vs, str):
+            try:
+                vs = LayoutViewState(raw_vs)
+            except ValueError:
+                return
+        else:
+            return
+        resolved_quad = self._layout.resolve_board_quad(vs)
+        self._spin_rows.blockSignals(True)
+        self._spin_cols.blockSignals(True)
+        self._spin_rows.setValue(resolved_quad.rows)
+        self._spin_cols.setValue(resolved_quad.cols)
+        self._spin_rows.blockSignals(False)
+        self._spin_cols.blockSignals(False)
+        self._canvas.reset_from_layout(self._layout, view_state=vs)
+        self._set_status(f"已切换校准视图态：{VIEW_STATE_DISPLAY_NAMES[vs]}", "#00E5FF")
+
     def _on_board_dim_changed(self) -> None:
         self._canvas.set_board_dimensions(self._spin_rows.value(), self._spin_cols.value())
 
     def _on_reset_clicked(self) -> None:
+        vs = self._canvas.view_state
+        resolved_quad = self._layout.resolve_board_quad(vs)
         self._spin_rows.blockSignals(True)
         self._spin_cols.blockSignals(True)
-        self._spin_rows.setValue(self._layout.board_quad.rows)
-        self._spin_cols.setValue(self._layout.board_quad.cols)
+        self._spin_rows.setValue(resolved_quad.rows)
+        self._spin_cols.setValue(resolved_quad.cols)
         self._spin_rows.blockSignals(False)
         self._spin_cols.blockSignals(False)
-        self._canvas.reset_from_layout(self._layout)
+        self._canvas.reset_from_layout(self._layout, view_state=vs)
         self._set_status("已重置为当前生效配置。", "#94A3B8")
 
     def _on_capture_template_clicked(self) -> None:
-        """截取游戏原始干净画面并写入对应 GameScene 识别模板，随即热重载检测器。"""
+        """截取游戏原始干净画面并写入对应场景/状态识别模板，随即热重载检测器。"""
         if self._calibrator is None:
             self._set_status("校准器未初始化，无法保存场景模板。", "#F44336")
             return
 
-        scene: GameScene = self._scene_combo.currentData()
+        target = self._scene_combo.currentData()
         frame = None
         if self._screen_capture is not None and self._viewport is not None:
             # 暂时隐藏自身不透明度以避免校准遮罩污染截图模板
@@ -750,7 +834,13 @@ class CalibrationDialog(QDialog):
             return
 
         try:
-            saved_path = self._calibrator.capture_scene_template(frame, scene)
+            if target == "shop_open":
+                saved_path = self._calibrator.capture_shop_open_template(frame)
+            elif target == "unit_selected":
+                saved_path = self._calibrator.capture_unit_selected_template(frame)
+            else:
+                scene_enum = target if isinstance(target, GameScene) else GameScene(str(target))
+                saved_path = self._calibrator.capture_scene_template(frame, scene_enum)
             if self._scene_detector is not None:
                 self._scene_detector.reload_templates()
             self._set_status(f"模板已保存并热重载：{saved_path.name}", "#4CAF50")

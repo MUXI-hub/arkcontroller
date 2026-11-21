@@ -164,7 +164,7 @@ class TestNodeGraphMapper:
         assert len(mapper.node_polygon("top_left")) == 4
 
     def test_default_layout_menus_are_fully_navigable(self) -> None:
-        _, layout = ConfigLoader().load()
+        _, layout = ConfigLoader(use_user_override=False).load()
         for node_map in (
             layout.activity_hub_nodes,
             layout.pre_match_nodes,
@@ -202,7 +202,7 @@ class TestPerspectiveBoardMapper:
 
     def test_trapezoid_homography_roundtrip_and_foreshortening(self) -> None:
         # 使用真实卫戍协议 16:9 梯形透视棋盘（上窄下宽 5x9）
-        _, layout = ConfigLoader().load()
+        _, layout = ConfigLoader(use_user_override=False).load()
         mapper = PerspectiveBoardMapper(layout.board_quad)
 
         assert mapper.H.shape == (3, 3)
@@ -253,7 +253,7 @@ class TestPerspectiveBoardMapper:
         assert horiz[-1][1] == pytest.approx(layout.board_quad.bottom_right, abs=1e-6)
 
     def test_board_move_and_boundary_exits(self) -> None:
-        _, layout = ConfigLoader().load()
+        _, layout = ConfigLoader(use_user_override=False).load()
         mapper = PerspectiveBoardMapper(layout.board_quad)
 
         assert mapper.move(0, 0, "up") == (0, 0, "up")

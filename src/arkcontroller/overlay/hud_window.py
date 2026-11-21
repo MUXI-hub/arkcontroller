@@ -623,6 +623,11 @@ class HUDWindow(QWidget):
         segments: list[str] = [f"PRTS // {scene_name}"]
         if snapshot.focus_label:
             segments.append(snapshot.focus_label)
+        view_state = getattr(snapshot, "view_state", "normal")
+        if view_state == "shop_open":
+            segments.append("商店展开")
+        elif view_state == "unit_selected":
+            segments.append("角色详情缩放")
         if snapshot.free_cursor_active:
             segments.append("自由光标")
         if snapshot.scene_locked_manual:

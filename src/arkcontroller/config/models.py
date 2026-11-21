@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Mapping
 
 VALID_ANCHORS: tuple[str, ...] = (
@@ -13,6 +14,16 @@ VALID_ANCHORS: tuple[str, ...] = (
     "bottom_edge",
     "client",
 )
+
+VALID_LEFT_STICK_MODES: tuple[str, ...] = ("dpad", "cursor")
+
+
+class LayoutViewState(str, Enum):
+    """卫戍协议局内界面镜头/缩放状态枚举。"""
+
+    NORMAL = "normal"
+    SHOP_OPEN = "shop_open"
+    UNIT_SELECTED = "unit_selected"
 
 REQUIRED_BUTTON_KEYS: tuple[str, ...] = (
     "back",
@@ -57,6 +68,7 @@ def _validate_positive_unit(name: str, value: float) -> float:
 def _default_keyboard_shortcuts() -> dict[str, str]:
     """返回《明日方舟》官方 PC 客户端卫戍协议默认快捷键映射。"""
     return {
+        "shop_toggle": "",
         "shop_refresh": "d",
         "shop_freeze": "r",
         "battle_ready": "space",
@@ -78,6 +90,7 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "cycle_scene_layer": "BACK",
             "toggle_calibration": "BACK+START",
             "toggle_pause": "LT+BACK",
+            "toggle_free_cursor": "LS",
         },
         "menu": {
             "confirm": "A",
@@ -94,7 +107,8 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "shop_refresh": "X",
             "shop_upgrade": "Y",
             "shop_freeze": "RS",
-            "fast_buy": "RT+A",
+            "fast_buy_or_inspect": "RT+A",
+            "toggle_shop": "LT+LB",
             "prev_zone": "LB",
             "next_zone": "RB",
             "battle_ready_hold": "START",
@@ -116,6 +130,7 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "enemy_preview": "LT+DPAD_UP",
             "emote_wheel": "LT+DPAD_DOWN",
             "cycle_teammate": "LT+DPAD_RIGHT",
+            "toggle_shop": "LT+LB",
             "retreat_unit": "LT+RB",
             "pause_menu": "LT+START",
         },
@@ -400,6 +415,169 @@ def _parse_node_map(raw: Mapping[str, Any]) -> dict[str, NavNode]:
 
 
 @dataclass
+class ViewportTransform:
+    """界面缩放与平移变换参数（用于商店展开或选取角色触发镜头缩放后的坐标补偿）。"""
+
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    offset_u: float = 0.0
+    offset_v: float = 0.0
+    pivot_u: float = 0.5
+    pivot_v: float = 0.5
+
+    def __post_init__(self) -> None:
+        self.scale_x = float(self.scale_x)
+        self.scale_y = float(self.scale_y)
+        self.offset_u = float(self.offset_u)
+        self.offset_v = float(self.offset_v)
+        self.pivot_u = _validate_unit_coord("pivot_u", self.pivot_u)
+        self.pivot_v = _validate_unit_coord("pivot_v", self.pivot_v)
+        if self.scale_x <= 0.0 or self.scale_y <= 0.0:
+            raise ValueError(
+                f"缩放因子必须大于 0，当前值: scale_x={self.scale_x}, scale_y={self.scale_y}"
+            )
+
+    def is_identity(self) -> bool:
+        """判断当前变换是否为单位恒等变换。"""
+        return (
+            abs(self.scale_x - 1.0) < 1e-6
+            and abs(self.scale_y - 1.0) < 1e-6
+            and abs(self.offset_u) < 1e-6
+            and abs(self.offset_v) < 1e-6
+        )
+
+    def apply_point(self, u: float, v: float) -> tuple[float, float]:
+        """对单个归一化坐标点应用缩放与平移并安全裁剪至 [0.0, 1.0]。"""
+        nu = self.pivot_u + (float(u) - self.pivot_u) * self.scale_x + self.offset_u
+        nv = self.pivot_v + (float(v) - self.pivot_v) * self.scale_y + self.offset_v
+        return (max(0.0, min(1.0, nu)), max(0.0, min(1.0, nv)))
+
+    def apply_quad(self, quad: PerspectiveQuad) -> PerspectiveQuad:
+        """对棋盘透视四角应用缩放与平移变换，返回新 PerspectiveQuad。"""
+        if self.is_identity():
+            return quad
+        return PerspectiveQuad(
+            top_left=self.apply_point(*quad.top_left),
+            top_right=self.apply_point(*quad.top_right),
+            bottom_right=self.apply_point(*quad.bottom_right),
+            bottom_left=self.apply_point(*quad.bottom_left),
+            rows=quad.rows,
+            cols=quad.cols,
+        )
+
+    def apply_zone(self, zone: LinearZone) -> LinearZone:
+        """对线性槽位区应用缩放与平移变换，返回新 LinearZone。"""
+        if self.is_identity():
+            return zone
+        su, sv = self.apply_point(zone.start_u, zone.start_v)
+        eu, ev = self.apply_point(zone.end_u, zone.end_v)
+        sw = max(1e-4, min(1.0, zone.slot_w * self.scale_x))
+        sh = max(1e-4, min(1.0, zone.slot_h * self.scale_y))
+        return LinearZone(
+            name=zone.name,
+            count=zone.count,
+            start_u=su,
+            start_v=sv,
+            end_u=eu,
+            end_v=ev,
+            slot_w=sw,
+            slot_h=sh,
+        )
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "scale_x": self.scale_x,
+            "scale_y": self.scale_y,
+            "offset_u": self.offset_u,
+            "offset_v": self.offset_v,
+            "pivot_u": self.pivot_u,
+            "pivot_v": self.pivot_v,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ViewportTransform:
+        return cls(
+            scale_x=float(data.get("scale_x", 1.0)),
+            scale_y=float(data.get("scale_y", 1.0)),
+            offset_u=float(data.get("offset_u", 0.0)),
+            offset_v=float(data.get("offset_v", 0.0)),
+            pivot_u=float(data.get("pivot_u", 0.5)),
+            pivot_v=float(data.get("pivot_v", 0.5)),
+        )
+
+
+@dataclass
+class ViewLayoutOverride:
+    """特定界面缩放态（如 shop_open / unit_selected）下的区域几何或缩放补偿覆盖。"""
+
+    board_quad: PerspectiveQuad | None = None
+    bench_zone: LinearZone | None = None
+    equip_zone: LinearZone | None = None
+    shop_zone: LinearZone | None = None
+    board_transform: ViewportTransform | None = None
+    bench_transform: ViewportTransform | None = None
+    equip_transform: ViewportTransform | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        if self.board_quad is not None:
+            result["board_quad"] = self.board_quad.to_dict()
+        if self.bench_zone is not None:
+            result["bench_zone"] = self.bench_zone.to_dict()
+        if self.equip_zone is not None:
+            result["equip_zone"] = self.equip_zone.to_dict()
+        if self.shop_zone is not None:
+            result["shop_zone"] = self.shop_zone.to_dict()
+        if self.board_transform is not None:
+            result["board_transform"] = self.board_transform.to_dict()
+        if self.bench_transform is not None:
+            result["bench_transform"] = self.bench_transform.to_dict()
+        if self.equip_transform is not None:
+            result["equip_transform"] = self.equip_transform.to_dict()
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ViewLayoutOverride:
+        def _parse_quad(raw: Any) -> PerspectiveQuad | None:
+            if raw is None:
+                return None
+            return raw if isinstance(raw, PerspectiveQuad) else PerspectiveQuad.from_dict(raw)
+
+        def _parse_zone(raw: Any) -> LinearZone | None:
+            if raw is None:
+                return None
+            return raw if isinstance(raw, LinearZone) else LinearZone.from_dict(raw)
+
+        def _parse_tf(raw: Any) -> ViewportTransform | None:
+            if raw is None:
+                return None
+            return raw if isinstance(raw, ViewportTransform) else ViewportTransform.from_dict(raw)
+
+        return cls(
+            board_quad=_parse_quad(data.get("board_quad")),
+            bench_zone=_parse_zone(data.get("bench_zone")),
+            equip_zone=_parse_zone(data.get("equip_zone")),
+            shop_zone=_parse_zone(data.get("shop_zone")),
+            board_transform=_parse_tf(data.get("board_transform")),
+            bench_transform=_parse_tf(data.get("bench_transform")),
+            equip_transform=_parse_tf(data.get("equip_transform")),
+        )
+
+
+def _parse_view_overrides(raw: Any) -> dict[str, ViewLayoutOverride]:
+    """解析多界面缩放态覆盖映射表。"""
+    if not isinstance(raw, Mapping):
+        return {}
+    parsed: dict[str, ViewLayoutOverride] = {}
+    for state_key, val in raw.items():
+        if isinstance(val, ViewLayoutOverride):
+            parsed[str(state_key)] = val
+        elif isinstance(val, Mapping):
+            parsed[str(state_key)] = ViewLayoutOverride.from_dict(val)
+    return parsed
+
+
+@dataclass
 class LayoutProfile:
     """卫戍协议全流程 16:9 归一化布局配置集。"""
 
@@ -413,15 +591,72 @@ class LayoutProfile:
     choice_zone: LinearZone
     board_quad: PerspectiveQuad
     buttons: dict[str, NormalizedPoint]
+    view_overrides: dict[str, ViewLayoutOverride] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         missing = [key for key in REQUIRED_BUTTON_KEYS if key not in self.buttons]
         if missing:
             raise ValueError(f"LayoutProfile.buttons 缺少必需按钮锚点: {', '.join(missing)}")
 
+    def _get_view_override(
+        self, view_state: LayoutViewState | str
+    ) -> ViewLayoutOverride | None:
+        key = view_state.value if isinstance(view_state, LayoutViewState) else str(view_state)
+        if key == LayoutViewState.NORMAL.value:
+            return None
+        return self.view_overrides.get(key)
+
+    def resolve_board_quad(
+        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+    ) -> PerspectiveQuad:
+        """按当前镜头缩放态解析生效的棋盘透视四角。"""
+        override = self._get_view_override(view_state)
+        if override is None:
+            return self.board_quad
+        if override.board_quad is not None:
+            return override.board_quad
+        if override.board_transform is not None:
+            return override.board_transform.apply_quad(self.board_quad)
+        return self.board_quad
+
+    def resolve_bench_zone(
+        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+    ) -> LinearZone:
+        """按当前镜头缩放态解析生效的整备区线性槽位。"""
+        override = self._get_view_override(view_state)
+        if override is None:
+            return self.bench_zone
+        if override.bench_zone is not None:
+            return override.bench_zone
+        if override.bench_transform is not None:
+            return override.bench_transform.apply_zone(self.bench_zone)
+        return self.bench_zone
+
+    def resolve_equip_zone(
+        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+    ) -> LinearZone:
+        """按当前镜头缩放态解析生效的装备栏线性槽位。"""
+        override = self._get_view_override(view_state)
+        if override is None:
+            return self.equip_zone
+        if override.equip_zone is not None:
+            return override.equip_zone
+        if override.equip_transform is not None:
+            return override.equip_transform.apply_zone(self.equip_zone)
+        return self.equip_zone
+
+    def resolve_shop_zone(
+        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+    ) -> LinearZone:
+        """按当前镜头缩放态解析生效的商店线性槽位。"""
+        override = self._get_view_override(view_state)
+        if override is not None and override.shop_zone is not None:
+            return override.shop_zone
+        return self.shop_zone
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为完整 JSON 字典。"""
-        return {
+        data: dict[str, Any] = {
             "activity_hub_nodes": {k: v.to_dict() for k, v in self.activity_hub_nodes.items()},
             "pre_match_nodes": {k: v.to_dict() for k, v in self.pre_match_nodes.items()},
             "squad_edit_nodes": {k: v.to_dict() for k, v in self.squad_edit_nodes.items()},
@@ -433,6 +668,9 @@ class LayoutProfile:
             "board_quad": self.board_quad.to_dict(),
             "buttons": {k: v.to_dict() for k, v in self.buttons.items()},
         }
+        if self.view_overrides:
+            data["view_overrides"] = {k: v.to_dict() for k, v in self.view_overrides.items()}
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> LayoutProfile:
@@ -473,6 +711,7 @@ class LayoutProfile:
                 else PerspectiveQuad.from_dict(data["board_quad"])
             ),
             buttons=buttons,
+            view_overrides=_parse_view_overrides(data.get("view_overrides")),
         )
 
 
@@ -493,6 +732,10 @@ class KeymapConfig:
     trigger_threshold: float = 0.45
     scroll_speed: float = 1.0
     allow_retreat_chord: bool = True
+    left_stick_mode: str = "dpad"
+    left_stick_dpad_threshold: float = 0.50
+    left_stick_dpad_release_threshold: float = 0.30
+    auto_toggle_shop: bool = True
     keyboard_shortcuts: dict[str, str] = field(default_factory=_default_keyboard_shortcuts)
     bindings: dict[str, dict[str, str]] = field(default_factory=_default_bindings)
 
@@ -510,6 +753,10 @@ class KeymapConfig:
         self.trigger_threshold = float(self.trigger_threshold)
         self.scroll_speed = float(self.scroll_speed)
         self.allow_retreat_chord = bool(self.allow_retreat_chord)
+        self.left_stick_mode = str(self.left_stick_mode).strip().lower()
+        self.left_stick_dpad_threshold = float(self.left_stick_dpad_threshold)
+        self.left_stick_dpad_release_threshold = float(self.left_stick_dpad_release_threshold)
+        self.auto_toggle_shop = bool(self.auto_toggle_shop)
 
         if not (0.0 <= self.left_deadzone < 0.95):
             raise ValueError(f"left_deadzone 必须位于 [0.0, 0.95) 范围内，当前值: {self.left_deadzone}")
@@ -536,6 +783,19 @@ class KeymapConfig:
             )
         if self.scroll_speed <= 0.0:
             raise ValueError(f"scroll_speed 必须大于 0，当前值: {self.scroll_speed}")
+        if self.left_stick_mode not in VALID_LEFT_STICK_MODES:
+            raise ValueError(
+                f"无效的 left_stick_mode '{self.left_stick_mode}'，允许值: {', '.join(VALID_LEFT_STICK_MODES)}"
+            )
+        if not (0.0 < self.left_stick_dpad_threshold <= 1.0):
+            raise ValueError(
+                f"left_stick_dpad_threshold 必须位于 (0.0, 1.0] 范围内，当前值: {self.left_stick_dpad_threshold}"
+            )
+        if not (0.0 <= self.left_stick_dpad_release_threshold < self.left_stick_dpad_threshold):
+            raise ValueError(
+                f"left_stick_dpad_release_threshold 必须位于 [0.0, {self.left_stick_dpad_threshold}) 范围内，"
+                f"当前值: {self.left_stick_dpad_release_threshold}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 字典。"""
@@ -553,6 +813,10 @@ class KeymapConfig:
             "trigger_threshold": self.trigger_threshold,
             "scroll_speed": self.scroll_speed,
             "allow_retreat_chord": self.allow_retreat_chord,
+            "left_stick_mode": self.left_stick_mode,
+            "left_stick_dpad_threshold": self.left_stick_dpad_threshold,
+            "left_stick_dpad_release_threshold": self.left_stick_dpad_release_threshold,
+            "auto_toggle_shop": self.auto_toggle_shop,
             "keyboard_shortcuts": dict(self.keyboard_shortcuts),
             "bindings": {section: dict(items) for section, items in self.bindings.items()},
         }
@@ -586,6 +850,12 @@ class KeymapConfig:
             trigger_threshold=float(data.get("trigger_threshold", 0.45)),
             scroll_speed=float(data.get("scroll_speed", 1.0)),
             allow_retreat_chord=bool(data.get("allow_retreat_chord", True)),
+            left_stick_mode=str(data.get("left_stick_mode", "dpad")),
+            left_stick_dpad_threshold=float(data.get("left_stick_dpad_threshold", 0.50)),
+            left_stick_dpad_release_threshold=float(
+                data.get("left_stick_dpad_release_threshold", 0.30)
+            ),
+            auto_toggle_shop=bool(data.get("auto_toggle_shop", True)),
             keyboard_shortcuts=shortcuts,
             bindings=bindings,
         )

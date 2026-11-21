@@ -342,6 +342,43 @@ def test_shop_open_template_detection(tmp_path: Path) -> None:
     assert res_closed.shop_open is False
 
 
+def test_unit_selected_template_detection(tmp_path: Path) -> None:
+    """验证 unit_selected.png 模板能够区分常规休整态与选取角色缩放态。"""
+    mock_loader = MagicMock()
+    calibrator = VisionCalibrator(templates_dir=tmp_path, loader=mock_loader)
+
+    prep_roi = (0.76, 0.78, 0.20, 0.16)
+    unit_roi = (0.02, 0.20, 0.20, 0.40)
+
+    px = int(round(prep_roi[0] * STANDARD_WIDTH))
+    py = int(round(prep_roi[1] * STANDARD_HEIGHT))
+    pw = int(round(prep_roi[2] * STANDARD_WIDTH))
+    ph = int(round(prep_roi[3] * STANDARD_HEIGHT))
+
+    ux = int(round(unit_roi[0] * STANDARD_WIDTH))
+    uy = int(round(unit_roi[1] * STANDARD_HEIGHT))
+    uw = int(round(unit_roi[2] * STANDARD_WIDTH))
+    uh = int(round(unit_roi[3] * STANDARD_HEIGHT))
+
+    frame_unit_selected = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 30, dtype=np.uint8)
+    _draw_distinctive_badge(frame_unit_selected, px, py, pw, ph, seed=31)
+    _draw_distinctive_badge(frame_unit_selected, ux, uy, uw, uh, seed=42)
+
+    calibrator.capture_scene_template(frame_unit_selected, GameScene.BATTLE_PREP, roi_norm=prep_roi)
+    calibrator.capture_unit_selected_template(frame_unit_selected, roi_norm=unit_roi)
+
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+    res_sel = detector.detect(frame_unit_selected)
+    assert res_sel.scene == GameScene.BATTLE_PREP
+    assert res_sel.unit_selected is True
+
+    frame_normal = frame_unit_selected.copy()
+    frame_normal[uy : uy + uh, ux : ux + uw] = 26
+    res_norm = detector.detect(frame_normal)
+    assert res_norm.scene == GameScene.BATTLE_PREP
+    assert res_norm.unit_selected is False
+
+
 # =====================================================================
 # 3. 无模板启发式视觉特征回退测试
 # =====================================================================

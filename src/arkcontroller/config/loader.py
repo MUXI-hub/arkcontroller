@@ -27,6 +27,7 @@ _LAYOUT_TOP_LEVEL_KEYS = frozenset(
         "choice_zone",
         "board_quad",
         "buttons",
+        "view_overrides",
     }
 )
 
@@ -45,6 +46,10 @@ _KEYMAP_TOP_LEVEL_KEYS = frozenset(
         "trigger_threshold",
         "scroll_speed",
         "allow_retreat_chord",
+        "left_stick_mode",
+        "left_stick_dpad_threshold",
+        "left_stick_dpad_release_threshold",
+        "auto_toggle_shop",
         "keyboard_shortcuts",
         "bindings",
     }
@@ -84,7 +89,12 @@ def _normalize_override_structure(raw: dict[str, Any]) -> dict[str, dict[str, An
 class ConfigLoader:
     """加载默认配置、合并用户校准覆盖文件并支持热重载。"""
 
-    def __init__(self, config_dir: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        config_dir: Path | str | None = None,
+        *,
+        use_user_override: bool = True,
+    ) -> None:
         if config_dir is None:
             repo_configs = Path(__file__).resolve().parents[3] / "configs"
             cwd_configs = Path.cwd() / "configs"
@@ -92,6 +102,7 @@ class ConfigLoader:
         else:
             self.config_dir = Path(config_dir)
 
+        self.use_user_override: bool = bool(use_user_override)
         self._keymap: KeymapConfig | None = None
         self._layout: LayoutProfile | None = None
 
@@ -142,7 +153,11 @@ class ConfigLoader:
         """强制从磁盘重新读取默认配置与用户覆盖配置并刷新缓存。"""
         keymap_raw = self._read_json(self.keymap_path)
         layout_raw = self._read_json(self.layout_path)
-        override = self._read_user_override()
+        override = (
+            self._read_user_override()
+            if self.use_user_override
+            else {"keymap": {}, "layout": {}}
+        )
 
         merged_keymap = _deep_merge(keymap_raw, override["keymap"])
         merged_layout = _deep_merge(layout_raw, override["layout"])

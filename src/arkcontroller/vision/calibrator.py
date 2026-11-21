@@ -19,6 +19,7 @@ from arkcontroller.vision.scene_detector import (
     DEFAULT_MATCH_THRESHOLD,
     DEFAULT_SCENE_ROIS,
     DEFAULT_SHOP_OPEN_ROI,
+    DEFAULT_UNIT_SELECTED_ROI,
     STANDARD_HEIGHT,
     STANDARD_WIDTH,
     GameScene,
@@ -184,6 +185,44 @@ class VisionCalibrator:
         )
         metadata = {
             "scene": "shop_open",
+            "template_file": png_path.name,
+            "frame_size": [STANDARD_WIDTH, STANDARD_HEIGHT],
+            "roi_norm": list(aligned_roi),
+            "threshold": effective_threshold,
+        }
+        json_path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return png_path
+
+    def capture_unit_selected_template(
+        self,
+        frame: np.ndarray,
+        roi_norm: tuple[float, float, float, float] | None = None,
+        threshold: float | None = None,
+    ) -> Path:
+        """采集选取角色详情缩放状态辅助模板 ``unit_selected.png`` 与 ``unit_selected.json``。"""
+        normalized = _normalize_frame(frame)
+        if normalized is None:
+            raise ValueError("输入画面帧无效，无法保存选中角色状态模板")
+
+        effective_roi = roi_norm if roi_norm is not None else DEFAULT_UNIT_SELECTED_ROI
+        cropped, aligned_roi = _crop_by_roi_norm(normalized, effective_roi)
+
+        self.templates_dir.mkdir(parents=True, exist_ok=True)
+        png_path = self.templates_dir / "unit_selected.png"
+        json_path = self.templates_dir / "unit_selected.json"
+
+        _imwrite_png(png_path, cropped)
+
+        effective_threshold = (
+            float(np.clip(threshold, 0.1, 0.999))
+            if threshold is not None
+            else self.default_threshold
+        )
+        metadata = {
+            "scene": "unit_selected",
             "template_file": png_path.name,
             "frame_size": [STANDARD_WIDTH, STANDARD_HEIGHT],
             "roi_norm": list(aligned_roi),

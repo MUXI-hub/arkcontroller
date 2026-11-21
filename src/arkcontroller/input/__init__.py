@@ -9,6 +9,7 @@ from arkcontroller.input.gesture_engine import (
     GestureEngine,
     GestureEvent,
     ModifierStateChanged,
+    StickDirection,
     StickMotion,
 )
 from arkcontroller.input.virtual_hid import (
@@ -40,6 +41,7 @@ __all__ = [
     "KEYBDINPUT",
     "MOUSEINPUT",
     "ModifierStateChanged",
+    "StickDirection",
     "StickMotion",
     "VirtualHID",
     "XInputDriver",

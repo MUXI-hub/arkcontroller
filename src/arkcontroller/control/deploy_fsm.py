@@ -34,6 +34,7 @@ class HoldingSource:
     norm_pos: tuple[float, float]
     slot_index: int | None = None
     board_cell: tuple[int, int] | None = None
+    clicked_in_game: bool = False
 
 
 class DeployFSM:
@@ -114,10 +115,16 @@ class DeployFSM:
         *,
         slot_index: int | None = None,
         board_cell: tuple[int, int] | None = None,
+        click_on_pick: bool = False,
     ) -> bool:
-        """从整备区或棋盘锁定抓取干员，同时单击源位置以显示游戏内选中详情。"""
-        sx, sy = viewport.norm_to_screen(source_norm[0], source_norm[1])
-        self._hid.click(sx, sy, button="left")
+        """从整备区或棋盘锁定虚拟抓取源。
+
+        默认 ``click_on_pick=False`` 不提前单击源位置，避免触发游戏内「选取角色」引发的
+        界面镜头缩放与平移，确保后续平滑拖拽起终点与 HUD 框选坐标完全对齐。
+        """
+        if click_on_pick:
+            sx, sy = viewport.norm_to_screen(source_norm[0], source_norm[1])
+            self._hid.click(sx, sy, button="left")
 
         self._state = DeployState.HOLDING_UNIT
         self._holding_source = HoldingSource(
@@ -125,6 +132,7 @@ class DeployFSM:
             norm_pos=(float(source_norm[0]), float(source_norm[1])),
             slot_index=slot_index,
             board_cell=board_cell,
+            clicked_in_game=bool(click_on_pick),
         )
         self._aim_origin_norm = None
         self._aim_preview_dir = None
@@ -139,10 +147,12 @@ class DeployFSM:
         viewport: ViewportRect,
         *,
         slot_index: int | None = None,
+        click_on_pick: bool = False,
     ) -> bool:
-        """从侧边装备栏锁定抓取装备/法术卡，同时单击源槽位以展示说明。"""
-        sx, sy = viewport.norm_to_screen(source_norm[0], source_norm[1])
-        self._hid.click(sx, sy, button="left")
+        """从侧边装备栏锁定虚拟抓取装备/法术卡，默认不提前单击以避免干扰界面缩放。"""
+        if click_on_pick:
+            sx, sy = viewport.norm_to_screen(source_norm[0], source_norm[1])
+            self._hid.click(sx, sy, button="left")
 
         self._state = DeployState.HOLDING_EQUIP
         self._holding_source = HoldingSource(
@@ -150,6 +160,7 @@ class DeployFSM:
             norm_pos=(float(source_norm[0]), float(source_norm[1])),
             slot_index=slot_index,
             board_cell=None,
+            clicked_in_game=bool(click_on_pick),
         )
         self._aim_origin_norm = None
         self._aim_preview_dir = None
@@ -284,6 +295,9 @@ class DeployFSM:
             return False
 
         if self._keymap.use_native_keyboard_shortcuts:
+            if not self._holding_source.clicked_in_game:
+                start_xy = viewport.norm_to_screen(*self._holding_source.norm_pos)
+                self._hid.click(start_xy[0], start_xy[1], button="left")
             shortcuts = getattr(self._keymap, "keyboard_shortcuts", {}) or {}
             if self._holding_source.zone == "board":
                 sell_key = shortcuts.get("sell_board", "e")

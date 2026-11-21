@@ -526,6 +526,7 @@
   "buttons": {
     "back": { "u": 0.055, "v": 0.06, "anchor": "left_edge" },
     "start_action": { "u": 0.875, "v": 0.87, "anchor": "right_edge" },
+    "shop_toggle": { "u": 0.905, "v": 0.74, "anchor": "right_edge" },
     "shop_refresh": { "u": 0.14, "v": 0.215, "anchor": "center_16_9" },
     "shop_upgrade": { "u": 0.14, "v": 0.135, "anchor": "center_16_9" },
     "shop_freeze": { "u": 0.845, "v": 0.215, "anchor": "center_16_9" },
@@ -544,5 +545,27 @@
     "squad_skill_2": { "u": 0.715, "v": 0.76, "anchor": "center_16_9" },
     "squad_skill_3": { "u": 0.79, "v": 0.76, "anchor": "center_16_9" },
     "squad_module": { "u": 0.865, "v": 0.76, "anchor": "center_16_9" }
+  },
+  "view_overrides": {
+    "shop_open": {
+      "board_transform": {
+        "scale_x": 0.92,
+        "scale_y": 0.90,
+        "offset_u": 0.0,
+        "offset_v": -0.04,
+        "pivot_u": 0.5,
+        "pivot_v": 0.5
+      }
+    },
+    "unit_selected": {
+      "board_transform": {
+        "scale_x": 0.92,
+        "scale_y": 0.92,
+        "offset_u": 0.07,
+        "offset_v": 0.0,
+        "pivot_u": 0.5,
+        "pivot_v": 0.5
+      }
+    }
   }
 }

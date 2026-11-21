@@ -81,6 +81,7 @@ class ControllerTray(QSystemTrayIcon):
     toggle_pause_requested = Signal()
     toggle_overlay_requested = Signal(bool)
     toggle_shortcuts_mode_requested = Signal(bool)
+    toggle_left_stick_dpad_requested = Signal(bool)
     open_calibration_requested = Signal()
     reload_config_requested = Signal()
     quit_requested = Signal()
@@ -90,6 +91,7 @@ class ControllerTray(QSystemTrayIcon):
         *,
         overlay_enabled: bool = True,
         use_native_shortcuts: bool = True,
+        left_stick_as_dpad: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         self._icon_active = create_prts_icon(active=True, paused=False)
@@ -131,6 +133,13 @@ class ControllerTray(QSystemTrayIcon):
         self._action_shortcuts.setChecked(use_native_shortcuts)
         self._action_shortcuts.triggered.connect(self.toggle_shortcuts_mode_requested.emit)
         self._menu.addAction(self._action_shortcuts)
+
+        # 左摇杆代替十字键导航模式
+        self._action_left_stick_dpad = QAction("左摇杆代替十字键导航（按 LS 切换自由光标）", self._menu)
+        self._action_left_stick_dpad.setCheckable(True)
+        self._action_left_stick_dpad.setChecked(left_stick_as_dpad)
+        self._action_left_stick_dpad.triggered.connect(self.toggle_left_stick_dpad_requested.emit)
+        self._menu.addAction(self._action_left_stick_dpad)
 
         self._menu.addSeparator()
 
@@ -199,6 +208,7 @@ class ControllerTray(QSystemTrayIcon):
         overlay_enabled: bool,
         use_native_shortcuts: bool,
         paused: bool,
+        left_stick_as_dpad: bool | None = None,
     ) -> None:
         """从主控状态反向同步托盘菜单勾选框状态（不触发回环信号）。"""
         self._action_overlay.blockSignals(True)
@@ -208,6 +218,11 @@ class ControllerTray(QSystemTrayIcon):
         self._action_shortcuts.blockSignals(True)
         self._action_shortcuts.setChecked(use_native_shortcuts)
         self._action_shortcuts.blockSignals(False)
+
+        if left_stick_as_dpad is not None:
+            self._action_left_stick_dpad.blockSignals(True)
+            self._action_left_stick_dpad.setChecked(left_stick_as_dpad)
+            self._action_left_stick_dpad.blockSignals(False)
 
         self._action_pause.blockSignals(True)
         self._action_pause.setChecked(paused)

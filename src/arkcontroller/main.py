@@ -17,6 +17,7 @@ import time
 from typing import Sequence
 
 from PySide6.QtCore import QObject, QTimer
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
 from arkcontroller.config.loader import ConfigLoader
@@ -155,10 +156,12 @@ class ArkControllerApp(QObject):
         self.tray = ControllerTray(
             overlay_enabled=not no_overlay,
             use_native_shortcuts=self.keymap.use_native_keyboard_shortcuts,
+            left_stick_as_dpad=(self.keymap.left_stick_mode == "dpad"),
         )
         self.tray.toggle_pause_requested.connect(self.toggle_pause)
         self.tray.toggle_overlay_requested.connect(self.set_overlay_enabled)
         self.tray.toggle_shortcuts_mode_requested.connect(self.set_use_native_shortcuts)
+        self.tray.toggle_left_stick_dpad_requested.connect(self.set_left_stick_as_dpad)
         self.tray.open_calibration_requested.connect(self.open_calibration)
         self.tray.reload_config_requested.connect(self.reload_configs)
         self.tray.quit_requested.connect(self.request_quit)
@@ -401,6 +404,22 @@ class ArkControllerApp(QObject):
         logger.info("已切换操控输出模式：%s", mode_label)
         self.tray.show_notification("ArkController 模式切换", f"当前已切换为：{mode_label}")
 
+    def set_left_stick_as_dpad(self, enabled: bool) -> None:
+        """切换左摇杆默认用途：代替十字键导航（按 LS 切自由光标）或直接推杆移动光标。"""
+        new_mode = "dpad" if enabled else "cursor"
+        new_keymap = replace(self.keymap, left_stick_mode=new_mode)
+        self._apply_updated_configs(new_keymap, self.layout)
+        try:
+            self.config_loader.save_user_override(
+                {"keymap": {"left_stick_mode": new_mode}}
+            )
+        except Exception:
+            logger.warning("保存左摇杆模式切换至 user_override.json 失败", exc_info=True)
+
+        mode_label = "左摇杆代替十字键导航（按 LS 切自由光标）" if enabled else "左摇杆直接移动自由光标"
+        logger.info("已切换左摇杆模式：%s", mode_label)
+        self.tray.show_notification("ArkController 左摇杆模式", mode_label)
+
     def reload_configs(self) -> None:
         """从磁盘热重载配置文件与场景识别模板。"""
         try:
@@ -431,6 +450,7 @@ class ArkControllerApp(QObject):
             overlay_enabled=self.hud.overlay_enabled,
             use_native_shortcuts=keymap.use_native_keyboard_shortcuts,
             paused=paused,
+            left_stick_as_dpad=(keymap.left_stick_mode == "dpad"),
         )
 
     def open_calibration(self) -> None:
@@ -531,6 +551,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         qt_app = QApplication(["arkcontroller"])
     qt_app.setApplicationName("ArkController")
     qt_app.setQuitOnLastWindowClosed(False)
+    # 显式指定正数点字号，避免 Windows Qt6 下部分控件/样式表触发 QFont::setPointSize(-1) 警告
+    if qt_app.font().pointSize() <= 0:
+        qt_app.setFont(QFont("Microsoft YaHei UI", 9))
 
     # 4. 装配全链路控制中枢
     controller = ArkControllerApp(
