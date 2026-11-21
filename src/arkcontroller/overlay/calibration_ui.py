@@ -56,6 +56,8 @@ from arkcontroller.overlay.hud_window import (
     COLOR_RED,
     SCENE_DISPLAY_NAMES,
     align_widget_to_physical_rect,
+    chamfer_polygon,
+    diamond_polygon,
 )
 from arkcontroller.platform.window_tracker import ViewportRect
 from arkcontroller.vision.calibrator import VisionCalibrator
@@ -303,10 +305,20 @@ class _CalibrationCanvas(QWidget):
             # 半透明校准暗幕，保留下方游戏画面清晰可见
             painter.fillRect(self.rect(), QColor(8, 12, 18, 128))
 
-            # 16:9 视口校准参考外框
-            painter.setPen(QPen(QColor(0, 229, 255, 130), 2.0, Qt.PenStyle.DashLine))
+            # 16:9 视口校准参考外框：细虚线 + 四角罗德岛战术 L 折角
+            painter.setPen(QPen(QColor(0, 200, 255, 110), 1.2, Qt.PenStyle.DashLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0))
+            corner_pen = QPen(COLOR_CYAN, 3.0)
+            corner_pen.setCapStyle(Qt.PenCapStyle.SquareCap)
+            painter.setPen(corner_pen)
+            arm = 26.0
+            for cx, cy, dx, dy in (
+                (2.0, 2.0, 1, 1), (w - 2.0, 2.0, -1, 1),
+                (2.0, h - 2.0, 1, -1), (w - 2.0, h - 2.0, -1, -1),
+            ):
+                painter.drawLine(QPointF(cx, cy), QPointF(cx + dx * arm, cy))
+                painter.drawLine(QPointF(cx, cy), QPointF(cx, cy + dy * arm))
 
             # 1. 实时 5x9 透视棋盘网格预览
             if self._visible_groups.get("board", True):
@@ -456,36 +468,31 @@ class _CalibrationCanvas(QWidget):
         is_active: bool,
         is_hover: bool,
     ) -> None:
-        """绘制工业科技风可拖拽菱形/圆形控制点及坐标读数。"""
+        """绘制罗德岛工业风可拖拽菱形锚点（外环菱形 + 实心菱形核）及斜切坐标铭牌。"""
         hx, hy = handle.u * w, handle.v * h
         r = 10.0 if (is_active or is_hover) else 8.0
 
-        # 发光外圈
+        # 外层菱形光晕框
         if is_active or is_hover:
             halo = QColor(handle.color)
-            halo.setAlpha(95)
-            painter.setPen(Qt.PenStyle.NoPen)
+            halo.setAlpha(80)
+            painter.setPen(QPen(handle.color, 1.2))
             painter.setBrush(QBrush(halo))
-            painter.drawEllipse(QPointF(hx, hy), r + 6.0, r + 6.0)
+            painter.drawPolygon(diamond_polygon(hx, hy, r + 7.0))
 
-        # 主菱形控制点
-        diamond = QPolygonF(
-            [
-                QPointF(hx, hy - r),
-                QPointF(hx + r, hy),
-                QPointF(hx, hy + r),
-                QPointF(hx - r, hy),
-            ]
-        )
+        # 主菱形控制点 + 黑芯十字
         painter.setPen(QPen(QColor("#FFFFFF"), 2.0))
         painter.setBrush(QBrush(handle.color))
-        painter.drawPolygon(diamond)
+        painter.drawPolygon(diamond_polygon(hx, hy, r))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor("#0B0E14")))
+        painter.drawPolygon(diamond_polygon(hx, hy, r * 0.38))
 
-        # 标签与归一化坐标提示
+        # 标签与归一化坐标提示（斜切黑晶铭牌 + 左侧色条）
         text = f"{handle.label} ({handle.u:.3f}, {handle.v:.3f})"
         painter.setFont(self._font_coord)
         fm = painter.fontMetrics()
-        tw = fm.horizontalAdvance(text) + 12.0
+        tw = fm.horizontalAdvance(text) + 20.0
         th = fm.height() + 6.0
         tx = hx + 14.0
         if tx + tw > w - 8.0:
@@ -493,11 +500,14 @@ class _CalibrationCanvas(QWidget):
         ty = max(6.0, min(h - th - 6.0, hy - th / 2.0))
 
         badge_rect = QRectF(tx, ty, tw, th)
-        painter.setPen(QPen(handle.color, 1.1))
-        painter.setBrush(QBrush(QColor(12, 16, 24, 224)))
-        painter.drawRoundedRect(badge_rect, 4.0, 4.0)
-        painter.setPen(QPen(QColor("#F8FAFC")))
-        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, text)
+        painter.setPen(QPen(handle.color, 1.0))
+        painter.setBrush(QBrush(QColor(11, 14, 20, 232)))
+        painter.drawPolygon(chamfer_polygon(badge_rect, tl=5.0, br=5.0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(handle.color))
+        painter.drawRect(QRectF(badge_rect.left() + 3.0, badge_rect.top() + 3.0, 2.5, th - 6.0))
+        painter.setPen(QPen(QColor("#F4F6F9")))
+        painter.drawText(badge_rect.adjusted(6.0, 0.0, 0.0, 0.0), Qt.AlignmentFlag.AlignCenter, text)
 
 
 class CalibrationDialog(QDialog):
@@ -555,59 +565,79 @@ class CalibrationDialog(QDialog):
         dock.setStyleSheet(
             """
             QFrame#CalibrationDock {
-                background-color: rgba(13, 18, 26, 232);
-                border: 1.5px solid rgba(0, 229, 255, 170);
-                border-radius: 10px;
+                background-color: rgba(11, 14, 20, 236);
+                border: 1px solid rgba(0, 200, 255, 170);
+                border-left: 4px solid #00C8FF;
+                border-radius: 0px;
             }
             QLabel {
                 color: #E2E8F0;
                 font-family: "Microsoft YaHei UI";
-                font-size: 12px;
+                font-size: 9pt;
             }
             QCheckBox {
                 color: #E2E8F0;
                 font-family: "Microsoft YaHei UI";
-                font-size: 12px;
+                font-size: 9pt;
                 spacing: 6px;
             }
+            QCheckBox::indicator {
+                width: 11px;
+                height: 11px;
+                background-color: #121822;
+                border: 1px solid #2C3A4D;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #00C8FF;
+                border: 1px solid #F4F6F9;
+            }
             QComboBox, QSpinBox {
-                background-color: #1E293B;
-                color: #F8FAFC;
-                border: 1px solid #475569;
-                border-radius: 5px;
+                background-color: #121822;
+                color: #F4F6F9;
+                border: 1px solid #2C3A4D;
+                border-radius: 0px;
                 padding: 4px 8px;
                 font-family: "Microsoft YaHei UI";
-                font-size: 12px;
+                font-size: 9pt;
+            }
+            QComboBox:hover, QSpinBox:hover {
+                border-color: #00C8FF;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #0B0E14;
+                color: #F4F6F9;
+                selection-background-color: rgba(0, 200, 255, 70);
+                border: 1px solid #00C8FF;
             }
             QPushButton {
-                background-color: #1E293B;
-                color: #F8FAFC;
-                border: 1px solid #475569;
-                border-radius: 6px;
+                background-color: #151C27;
+                color: #F4F6F9;
+                border: 1px solid #2C3A4D;
+                border-radius: 0px;
                 padding: 6px 10px;
                 font-family: "Microsoft YaHei UI";
-                font-size: 12px;
+                font-size: 9pt;
                 font-weight: bold;
             }
             QPushButton:hover {
-                border-color: #00E5FF;
-                background-color: #273449;
+                border-color: #00C8FF;
+                background-color: #1B2533;
             }
             QPushButton#SaveBtn {
-                background-color: #00B8D4;
-                color: #091018;
-                border: none;
+                background-color: #FF9800;
+                color: #120C02;
+                border: 1px solid #FFD08A;
             }
             QPushButton#SaveBtn:hover {
-                background-color: #00E5FF;
+                background-color: #FFB547;
             }
             QPushButton#CaptureBtn {
-                background-color: #1D4ED8;
-                color: #FFFFFF;
-                border: 1px solid #60A5FA;
+                background-color: rgba(0, 200, 255, 40);
+                color: #F4F6F9;
+                border: 1px solid #00C8FF;
             }
             QPushButton#CaptureBtn:hover {
-                background-color: #2563EB;
+                background-color: rgba(0, 200, 255, 80);
             }
             """
         )
@@ -616,18 +646,18 @@ class CalibrationDialog(QDialog):
         vbox.setContentsMargins(14, 12, 14, 12)
         vbox.setSpacing(8)
 
-        title = QLabel("PRTS // 卫戍协议可视化校准向导")
-        title.setStyleSheet("color: #00E5FF; font-size: 14px; font-weight: bold;")
+        title = QLabel("PRTS // CALIBRATION  卫戍协议可视化校准向导")
+        title.setStyleSheet("color: #00C8FF; font-size: 10pt; font-weight: bold; border-bottom: 1px solid #1F2A38; padding-bottom: 4px;")
         vbox.addWidget(title)
 
         desc = QLabel("先选择界面缩放态，再拖动菱形控制点对齐游戏画面并保存。")
         desc.setWordWrap(True)
-        desc.setStyleSheet("color: #94A3B8; font-size: 11px;")
+        desc.setStyleSheet("color: #8A99AD; font-size: 8pt;")
         vbox.addWidget(desc)
 
         # 校准视图态切换（默认态 / 商店展开态 / 选中角色态）
         view_label = QLabel("当前校准视图态（应对界面缩放错位）：")
-        view_label.setStyleSheet("color: #CBD5E1; font-weight: bold;")
+        view_label.setStyleSheet("color: #FF9800; font-weight: bold;")
         vbox.addWidget(view_label)
 
         self._view_state_combo = QComboBox()
@@ -680,12 +710,12 @@ class CalibrationDialog(QDialog):
         # 分割线
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.Shape.HLine)
-        sep1.setStyleSheet("color: rgba(148, 163, 184, 70);")
+        sep1.setStyleSheet("color: #1F2A38;")
         vbox.addWidget(sep1)
 
         # 场景识别模板采样区域
         tpl_title = QLabel("场景视觉模板采样（提升自动切层精准度）")
-        tpl_title.setStyleSheet("color: #CBD5E1; font-weight: bold;")
+        tpl_title.setStyleSheet("color: #FF9800; font-weight: bold;")
         vbox.addWidget(tpl_title)
 
         self._scene_combo = QComboBox()
@@ -704,7 +734,7 @@ class CalibrationDialog(QDialog):
         # 状态提示栏
         self._status_label = QLabel("提示：按 Esc 或点击关闭可立即返回游戏穿透操控。")
         self._status_label.setWordWrap(True)
-        self._status_label.setStyleSheet("color: #94A3B8; font-size: 11px;")
+        self._status_label.setStyleSheet("color: #8A99AD; font-size: 8pt;")
         vbox.addWidget(self._status_label)
 
         # 底部操作按钮
@@ -862,4 +892,4 @@ class CalibrationDialog(QDialog):
 
     def _set_status(self, message: str, color_hex: str) -> None:
         self._status_label.setText(message)
-        self._status_label.setStyleSheet(f"color: {color_hex}; font-size: 11px;")
+        self._status_label.setStyleSheet(f"color: {color_hex}; font-size: 8pt;")

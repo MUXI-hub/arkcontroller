@@ -1,18 +1,76 @@
 """ArkController 系统托盘图标与常驻控制菜单。
 
-内置纯代码绘制的 PRTS 工业风格矢量托盘图标（不依赖外部 .ico 文件），
-支持实时展示手柄/游戏窗口绑定状态、一键暂停恢复、开关 HUD、切换原生快捷键/纯鼠标模式、打开校准向导与热重载配置。
+内置纯代码绘制的罗德岛 PRTS 菱形矢量托盘图标（不依赖外部 .ico 文件），菜单采用明日方舟深色高对比风格，
+支持单击 / 双击托盘图标唤出 PRTS 主控台、实时展示手柄/游戏窗口绑定状态、一键暂停恢复、开关 HUD、
+切换原生快捷键/纯鼠标模式、打开校准向导与热重载配置。
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, Qt, Signal
-from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QFont,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
+
+TRAY_MENU_QSS = """
+QMenu {
+    background-color: #0B0E14;
+    color: #F4F6F9;
+    border: 1px solid #00C8FF;
+    padding: 6px 0px;
+    font-family: "Microsoft YaHei UI";
+    font-size: 9pt;
+}
+QMenu::item {
+    padding: 7px 28px 7px 26px;
+    border-left: 3px solid transparent;
+    background: transparent;
+}
+QMenu::item:selected {
+    background-color: rgba(0, 200, 255, 46);
+    border-left: 3px solid #FF9800;
+    color: #FFFFFF;
+}
+QMenu::item:disabled {
+    color: #8A99AD;
+}
+QMenu::separator {
+    height: 1px;
+    background: #1F2A38;
+    margin: 5px 10px;
+}
+QMenu::indicator {
+    width: 12px;
+    height: 12px;
+    left: 8px;
+}
+QMenu::indicator:checked {
+    background-color: #00C8FF;
+    border: 1px solid #F4F6F9;
+}
+QMenu::indicator:unchecked {
+    background-color: #121822;
+    border: 1px solid #2C3A4D;
+}
+"""
+
+
+def _diamond(cx: float, cy: float, r: float) -> QPolygonF:
+    return QPolygonF([QPointF(cx, cy - r), QPointF(cx + r, cy), QPointF(cx, cy + r), QPointF(cx - r, cy)])
 
 
 def create_prts_icon(active: bool = True, paused: bool = False) -> QIcon:
-    """动态绘制 64x64 PRTS 科技风菱形准星托盘图标（无需外部图标资源）。"""
+    """动态绘制 64x64 罗德岛 PRTS 菱形矢量托盘图标（无需外部图标资源）。"""
     size = 64
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -21,54 +79,54 @@ def create_prts_icon(active: bool = True, paused: bool = False) -> QIcon:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     try:
         accent = (
-            QColor("#FFB300")
+            QColor("#FF9800")
             if paused
-            else (QColor("#00E5FF") if active else QColor("#64748B"))
+            else (QColor("#00C8FF") if active else QColor("#64748B"))
         )
 
-        # 深色八角底座
-        bg_poly = QPolygonF(
+        # 斜切角黑曜石底座（左上 / 右下 45° 切角）
+        base = QPolygonF(
             [
-                QPointF(18, 4),
-                QPointF(46, 4),
-                QPointF(60, 18),
-                QPointF(60, 46),
-                QPointF(46, 60),
-                QPointF(18, 60),
-                QPointF(4, 46),
-                QPointF(4, 18),
+                QPointF(16, 3),
+                QPointF(61, 3),
+                QPointF(61, 48),
+                QPointF(48, 61),
+                QPointF(3, 61),
+                QPointF(3, 16),
             ]
         )
-        painter.setPen(QPen(accent, 3.0))
-        painter.setBrush(QBrush(QColor("#0F172A")))
-        painter.drawPolygon(bg_poly)
+        painter.setPen(QPen(accent, 2.6))
+        painter.setBrush(QBrush(QColor("#0B0E14")))
+        painter.drawPolygon(base)
 
-        # 内层 PRTS 菱形骨架
-        diamond = QPolygonF(
-            [
-                QPointF(32, 12),
-                QPointF(52, 32),
-                QPointF(32, 52),
-                QPointF(12, 32),
-            ]
-        )
-        inner_fill = QColor(accent)
-        inner_fill.setAlpha(42)
-        painter.setPen(QPen(accent, 2.5))
-        painter.setBrush(QBrush(inner_fill))
-        painter.drawPolygon(diamond)
+        # 外层菱形骨架
+        outer_pen = QPen(accent, 2.4)
+        outer_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        painter.setPen(outer_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPolygon(_diamond(32, 32, 22))
 
-        # 十字手柄方向键核心标识
-        cross_pen = QPen(QColor("#F8FAFC"), 4.2)
-        cross_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        # 内层渐变实心菱形
+        grad = QLinearGradient(QPointF(32, 18), QPointF(32, 46))
+        grad.setColorAt(0.0, accent.lighter(130))
+        grad.setColorAt(1.0, accent.darker(150))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(grad))
+        painter.drawPolygon(_diamond(32, 32, 13))
+
+        # 黑芯 + 白色十字核
+        painter.setBrush(QBrush(QColor("#0B0E14")))
+        painter.drawPolygon(_diamond(32, 32, 6))
+        cross_pen = QPen(QColor("#F4F6F9"), 2.2)
+        cross_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         painter.setPen(cross_pen)
-        painter.drawLine(QPointF(23, 32), QPointF(41, 32))
-        painter.drawLine(QPointF(32, 23), QPointF(32, 41))
+        painter.drawLine(QPointF(28, 32), QPointF(36, 32))
+        painter.drawLine(QPointF(32, 28), QPointF(32, 36))
 
-        # 中心核心亮点
+        # 右下状态角标
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(accent))
-        painter.drawEllipse(QPointF(32, 32), 3.6, 3.6)
+        painter.drawPolygon(QPolygonF([QPointF(61, 50), QPointF(61, 61), QPointF(50, 61)]))
     finally:
         painter.end()
 
@@ -78,6 +136,7 @@ def create_prts_icon(active: bool = True, paused: bool = False) -> QIcon:
 class ControllerTray(QSystemTrayIcon):
     """ArkController 系统托盘控制器。"""
 
+    open_dashboard_requested = Signal()
     toggle_pause_requested = Signal()
     toggle_overlay_requested = Signal(bool)
     toggle_shortcuts_mode_requested = Signal(bool)
@@ -100,7 +159,16 @@ class ControllerTray(QSystemTrayIcon):
         super().__init__(self._icon_idle, parent)
 
         self._menu = QMenu(parent)
+        self._menu.setStyleSheet(TRAY_MENU_QSS)
         self.setToolTip("ArkController — 卫戍协议手柄控制")
+
+        # 顶部：打开 PRTS 主控台
+        self._action_dashboard = QAction("◆  打开 PRTS 主控台", self._menu)
+        bold = QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold)
+        self._action_dashboard.setFont(bold)
+        self._action_dashboard.triggered.connect(lambda _checked=False: self.open_dashboard_requested.emit())
+        self._menu.addAction(self._action_dashboard)
+        self._menu.addSeparator()
 
         # 状态展示项（只读）
         self._action_gamepad_status = QAction("手柄状态：未连接", self._menu)
@@ -162,6 +230,22 @@ class ControllerTray(QSystemTrayIcon):
 
         self.setContextMenu(self._menu)
         self._last_icon_state: tuple[bool, bool] | None = None
+
+        # 单击 / 双击托盘图标直接唤出 PRTS 主控台
+        self.activated.connect(self._on_activated)
+
+    @property
+    def menu(self) -> QMenu:
+        """返回托盘右键菜单（供测试与外部扩展）。"""
+        return self._menu
+
+    def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        """处理托盘图标激活：左键单击或双击唤出主控台，右键交由系统弹出菜单。"""
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self.open_dashboard_requested.emit()
 
     def update_status(
         self,

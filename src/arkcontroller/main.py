@@ -20,14 +20,17 @@ from PySide6.QtCore import QObject, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
+from arkcontroller import __version__ as APP_VERSION
 from arkcontroller.config.loader import ConfigLoader
 from arkcontroller.config.models import KeymapConfig, LayoutProfile
+from arkcontroller.control.deploy_fsm import DeployState
 from arkcontroller.control.dispatcher import ControlDispatcher, HUDStateSnapshot
 from arkcontroller.input.gesture_engine import GestureEngine
 from arkcontroller.input.virtual_hid import VirtualHID
 from arkcontroller.input.xinput_driver import GamepadState, XInputDriver
 from arkcontroller.overlay.calibration_ui import CalibrationDialog
-from arkcontroller.overlay.hud_window import HUDWindow
+from arkcontroller.overlay.dashboard_window import DashboardRuntimeStatus, PRTSDashboardWindow
+from arkcontroller.overlay.hud_window import SCENE_DISPLAY_NAMES, HUDWindow
 from arkcontroller.overlay.tray import ControllerTray
 from arkcontroller.platform.uac import (
     enable_per_monitor_dpi_awareness,
@@ -44,6 +47,32 @@ logger = logging.getLogger("arkcontroller")
 INPUT_TICK_INTERVAL_MS = 8      # ~125Hz 手柄轮询与调度
 WINDOW_POLL_INTERVAL_MS = 250   # 4Hz 窗口句柄与 16:9 视口刷新
 VISION_POLL_INTERVAL_MS = 200   # 5Hz 异步场景视觉识别读取
+
+# 主控台允许热切换并持久化的布尔型 KeymapConfig 开关
+DASHBOARD_KEYMAP_FLAGS: frozenset[str] = frozenset(
+    {"auto_toggle_shop", "vibration_enabled", "allow_retreat_chord"}
+)
+
+# 主控台「参数调校」允许写入的 KeymapConfig 手感字段
+DASHBOARD_TUNING_KEYS: frozenset[str] = frozenset(
+    {
+        "left_deadzone",
+        "right_deadzone",
+        "cursor_max_speed_px",
+        "cursor_gamma",
+        "scroll_speed",
+        "ready_hold_ms",
+        "trigger_threshold",
+    }
+)
+
+DEPLOY_STATE_DISPLAY_NAMES: dict[DeployState, str] = {
+    DeployState.IDLE: "空闲",
+    DeployState.HOLDING_UNIT: "抓取干员",
+    DeployState.HOLDING_EQUIP: "抓取装备",
+    DeployState.HOLDING_STRATEGY: "抓取策略",
+    DeployState.AIMING_DIRECTION: "定朝向",
+}
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -81,6 +110,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="自动化冒烟测试模式：完成全模块装配并运行数个主循环 tick 后优雅退出",
     )
     parser.add_argument(
+        "--minimized",
+        action="store_true",
+        help="启动时不弹出 PRTS 桌面主控台，仅驻留系统托盘（可单击/双击托盘图标唤出）",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -108,10 +142,12 @@ class ArkControllerApp(QObject):
         no_overlay: bool = False,
         dry_run: bool = False,
         dry_run_ticks: int = 5,
+        show_dashboard: bool = True,
     ) -> None:
         super().__init__()
         self._qt_app = qt_app
         self._dry_run = bool(dry_run)
+        self._show_dashboard_on_start = bool(show_dashboard) and not self._dry_run
         self._dry_run_target_ticks = max(1, int(dry_run_ticks))
         self._tick_count: int = 0
         self._running: bool = False
@@ -165,6 +201,27 @@ class ArkControllerApp(QObject):
         self.tray.open_calibration_requested.connect(self.open_calibration)
         self.tray.reload_config_requested.connect(self.reload_configs)
         self.tray.quit_requested.connect(self.request_quit)
+        self.tray.open_dashboard_requested.connect(self.show_dashboard)
+
+        # 6. 初始化罗德岛 PRTS 桌面主控台（普通窗口层级，关闭即隐藏至托盘）
+        self.dashboard = PRTSDashboardWindow()
+        self.dashboard.toggle_pause_requested.connect(self.toggle_pause)
+        self.dashboard.overlay_toggled.connect(self.set_overlay_enabled)
+        self.dashboard.native_shortcuts_toggled.connect(self.set_use_native_shortcuts)
+        self.dashboard.left_stick_dpad_toggled.connect(self.set_left_stick_as_dpad)
+        self.dashboard.keymap_flag_toggled.connect(self.set_keymap_flag)
+        self.dashboard.open_calibration_requested.connect(self.open_calibration)
+        self.dashboard.reload_config_requested.connect(self.reload_configs)
+        self.dashboard.tuning_apply_requested.connect(self.apply_tuning)
+        self.dashboard.quit_requested.connect(self.request_quit)
+        self.dashboard.hidden_to_tray.connect(self._on_dashboard_hidden_to_tray)
+        self.dashboard.sync_settings(
+            keymap=self.keymap,
+            overlay_enabled=self.hud.overlay_enabled,
+            paused=False,
+            refresh_tuning=True,
+        )
+        self._refresh_dashboard_system_info()
 
         # 运行时状态缓存
         self._viewport: ViewportRect | None = None
@@ -218,6 +275,9 @@ class ArkControllerApp(QObject):
         if open_calibration_on_start and not self._dry_run:
             QTimer.singleShot(120, self.open_calibration)
 
+        if self._show_dashboard_on_start:
+            self.show_dashboard()
+
         if self._dry_run:
             # 防止极端环境下 dry-run 卡死的安全兜底定时器
             QTimer.singleShot(2500, self._finish_dry_run)
@@ -256,6 +316,11 @@ class ArkControllerApp(QObject):
         try:
             self.hud.hide()
             self.hud.close()
+        except Exception:
+            pass
+
+        try:
+            self.dashboard.force_close()
         except Exception:
             pass
 
@@ -300,6 +365,137 @@ class ArkControllerApp(QObject):
             self._scene_result = None
 
         self._refresh_tray_status()
+        self._push_dashboard_status()
+
+    def _build_dashboard_status(self) -> DashboardRuntimeStatus:
+        """汇总窗口追踪、调度器与手柄状态为主控台运行态快照。"""
+        vp = self._viewport
+        snap = self._last_snapshot
+        scene = snap.scene if snap is not None else self.dispatcher.current_scene
+        deploy_state = snap.deploy_state if snap is not None else DeployState.IDLE
+        try:
+            shop_open = bool(self.dispatcher.shop_open)
+            shop_slots = int(self.dispatcher.shop_slot_count)
+        except Exception:
+            shop_open, shop_slots = False, 0
+        return DashboardRuntimeStatus(
+            gamepad_connected=bool(
+                self._last_gamepad_state is not None and self._last_gamepad_state.connected
+            ),
+            window_found=vp is not None,
+            window_title=vp.window_title if vp is not None else "",
+            client_rect=(
+                (vp.client_left, vp.client_top, vp.client_width, vp.client_height)
+                if vp is not None
+                else None
+            ),
+            active_rect=(
+                (vp.active_left, vp.active_top, vp.active_width, vp.active_height)
+                if vp is not None
+                else None
+            ),
+            is_foreground=bool(vp is not None and vp.is_foreground),
+            scene_name=SCENE_DISPLAY_NAMES.get(scene, scene.value),
+            scene_locked_manual=bool(snap.scene_locked_manual) if snap is not None else False,
+            paused=bool(getattr(self.dispatcher, "paused", False)),
+            shop_open=shop_open,
+            shop_slot_count=shop_slots,
+            focus_label=(snap.focus_label if snap is not None else ""),
+            deploy_state_name=DEPLOY_STATE_DISPLAY_NAMES.get(deploy_state, deploy_state.value),
+            template_count=int(getattr(self.scene_detector, "loaded_template_count", 0)),
+        )
+
+    def _push_dashboard_status(self) -> None:
+        """主控台可见时推送最新运行态（隐藏时跳过，零开销）。"""
+        if not self.dashboard.isVisible():
+            return
+        try:
+            self.dashboard.push_runtime_status(self._build_dashboard_status())
+        except Exception:
+            logger.debug("刷新主控台运行态失败", exc_info=True)
+
+    def _refresh_dashboard_system_info(self) -> None:
+        """刷新主控台「系统与配置」页档案摘要。"""
+        try:
+            self.dashboard.set_system_info(
+                version=APP_VERSION,
+                is_admin=bool(is_admin()),
+                config_dir=str(self.config_loader.config_dir.resolve()),
+                override_path=str(self.config_loader.override_path.resolve()),
+                template_count=int(getattr(self.scene_detector, "loaded_template_count", 0)),
+                layout=self.layout,
+            )
+        except Exception:
+            logger.debug("刷新主控台系统档案失败", exc_info=True)
+
+    def _sync_dashboard_settings(self, *, refresh_tuning: bool = False) -> None:
+        """将运行态开关与手感参数反向同步至主控台。"""
+        paused = bool(getattr(self.dispatcher, "paused", False))
+        self.dashboard.sync_settings(
+            keymap=self.keymap,
+            overlay_enabled=self.hud.overlay_enabled,
+            paused=paused,
+            refresh_tuning=refresh_tuning,
+        )
+
+    def show_dashboard(self) -> None:
+        """唤出并前置 PRTS 桌面主控台。"""
+        if self._last_gamepad_state is not None:
+            self.dashboard.push_gamepad_state(self._last_gamepad_state)
+        self.dashboard.push_runtime_status(self._build_dashboard_status())
+        self.dashboard.show_and_raise()
+
+    def _on_dashboard_hidden_to_tray(self) -> None:
+        """主控台首次关闭隐藏至托盘时弹出一次轻量提示。"""
+        self.tray.show_notification(
+            "ArkController 仍在后台运行",
+            "PRTS 主控台已隐藏至系统托盘，单击或双击托盘图标即可重新打开。",
+        )
+
+    def set_keymap_flag(self, name: str, enabled: bool) -> None:
+        """热切换并持久化主控台战术快捷矩阵中的布尔型 KeymapConfig 开关。"""
+        if name not in DASHBOARD_KEYMAP_FLAGS:
+            logger.warning("忽略未知的主控台开关字段：%s", name)
+            return
+        new_keymap = replace(self.keymap, **{name: bool(enabled)})
+        self._apply_updated_configs(new_keymap, self.layout)
+        try:
+            self.config_loader.save_user_override({"keymap": {name: bool(enabled)}})
+        except Exception:
+            logger.warning("保存开关 %s 至 user_override.json 失败", name, exc_info=True)
+        logger.info("主控台开关 %s 已切换为：%s", name, "开启" if enabled else "关闭")
+
+    def apply_tuning(self, values: dict) -> bool:
+        """应用主控台「参数调校」手感参数，持久化保存至 user_override.json 并立即热刷新。"""
+        filtered = {k: v for k, v in dict(values).items() if k in DASHBOARD_TUNING_KEYS}
+        if not filtered:
+            self.dashboard.set_tuning_feedback("没有可保存的手感参数。", ok=False)
+            return False
+        if "ready_hold_ms" in filtered:
+            filtered["ready_hold_ms"] = int(round(float(filtered["ready_hold_ms"])))
+        for key in list(filtered):
+            if key != "ready_hold_ms":
+                filtered[key] = float(filtered[key])
+        try:
+            new_keymap = replace(self.keymap, **filtered)
+        except (TypeError, ValueError) as exc:
+            logger.warning("手感参数校验失败：%s", exc)
+            self.dashboard.set_tuning_feedback(f"参数校验失败：{exc}", ok=False)
+            return False
+
+        try:
+            self.config_loader.save_user_override({"keymap": filtered})
+        except Exception as exc:
+            logger.error("保存手感参数失败：%s", exc, exc_info=True)
+            self.dashboard.set_tuning_feedback(f"保存失败：{exc}", ok=False)
+            return False
+
+        self._apply_updated_configs(new_keymap, self.layout, refresh_tuning=True)
+        self.dashboard.set_tuning_feedback(
+            f"已保存至 {self.config_loader.override_path.name} 并即时生效。", ok=True
+        )
+        logger.info("主控台手感参数已保存并热刷新：%s", filtered)
+        return True
 
     def _on_vision_tick(self) -> None:
         """每 200ms (~5Hz) 读取最新后台帧并刷新场景阶段识别结果。"""
@@ -321,6 +517,9 @@ class ArkControllerApp(QObject):
         try:
             state = self.xinput.poll()
             self._last_gamepad_state = state
+            if self.dashboard.isVisible():
+                # 仅缓存引用，主控台以 ~16Hz 节流绘制；窗口隐藏时零开销
+                self.dashboard.push_gamepad_state(state)
             events = self.gesture_engine.update(state, dt)
 
             # 校准面板打开期间暂停输出，避免手柄误操作游戏
@@ -375,6 +574,8 @@ class ArkControllerApp(QObject):
             paused=paused,
         )
         self._refresh_tray_status()
+        self._sync_dashboard_settings()
+        self._push_dashboard_status()
         logger.info("手柄控制状态已切换：%s", "已暂停" if paused else "已恢复")
 
     def set_overlay_enabled(self, enabled: bool) -> None:
@@ -388,6 +589,7 @@ class ArkControllerApp(QObject):
             use_native_shortcuts=self.keymap.use_native_keyboard_shortcuts,
             paused=paused,
         )
+        self._sync_dashboard_settings()
 
     def set_use_native_shortcuts(self, enabled: bool) -> None:
         """切换官方 PC 原生快捷键模式 / 纯鼠标坐标模式并立即生效。"""
@@ -424,15 +626,22 @@ class ArkControllerApp(QObject):
         """从磁盘热重载配置文件与场景识别模板。"""
         try:
             new_keymap, new_layout = self.config_loader.reload()
-            self._apply_updated_configs(new_keymap, new_layout)
+            self._apply_updated_configs(new_keymap, new_layout, refresh_tuning=True)
             self.scene_detector.reload_templates()
+            self._refresh_dashboard_system_info()
             logger.info("配置文件与视觉识别模板热重载完成。")
             self.tray.show_notification("ArkController 配置已重载", "键位、布局与视觉模板已即时生效。")
         except Exception as exc:
             logger.error("重新加载配置文件失败：%s", exc, exc_info=True)
             self.tray.show_notification("配置文件重载失败", str(exc))
 
-    def _apply_updated_configs(self, keymap: KeymapConfig, layout: LayoutProfile) -> None:
+    def _apply_updated_configs(
+        self,
+        keymap: KeymapConfig,
+        layout: LayoutProfile,
+        *,
+        refresh_tuning: bool = False,
+    ) -> None:
         """将新加载的 KeymapConfig 与 LayoutProfile 同步至所有运行时子模块。"""
         self.keymap = keymap
         self.layout = layout
@@ -452,6 +661,9 @@ class ArkControllerApp(QObject):
             paused=paused,
             left_stick_as_dpad=(keymap.left_stick_mode == "dpad"),
         )
+        dashboard = getattr(self, "dashboard", None)
+        if dashboard is not None:
+            self._sync_dashboard_settings(refresh_tuning=refresh_tuning)
 
     def open_calibration(self) -> None:
         """弹出交互式 16:9 可视化校准面板，关闭后自动恢复穿透操控。"""
@@ -481,6 +693,7 @@ class ArkControllerApp(QObject):
     def _on_calibration_saved(self, keymap: KeymapConfig, layout: LayoutProfile) -> None:
         """校准面板点击「保存并生效」后的热刷新回调。"""
         self._apply_updated_configs(keymap, layout)
+        self._refresh_dashboard_system_info()
         logger.info("可视化校准配置已保存并热刷新至调度器。")
         self.tray.show_notification("校准已保存生效", "棋盘透视网格与槽位坐标已立即应用。")
 
@@ -510,6 +723,8 @@ def _build_relaunch_args(args: argparse.Namespace) -> list[str]:
         forwarded.append("--no-overlay")
     if args.calibrate:
         forwarded.append("--calibrate")
+    if getattr(args, "minimized", False):
+        forwarded.append("--minimized")
     if args.log_level and args.log_level != "INFO":
         forwarded.extend(["--log-level", args.log_level])
     return forwarded
@@ -561,6 +776,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config_dir=args.config_dir,
         no_overlay=args.no_overlay,
         dry_run=args.dry_run,
+        show_dashboard=not (args.minimized or args.dry_run),
     )
 
     # 允许终端 Ctrl+C 优雅退出 Qt 事件循环
