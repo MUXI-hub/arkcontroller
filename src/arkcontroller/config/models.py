@@ -27,7 +27,6 @@ class LayoutViewState(str, Enum):
 
 REQUIRED_BUTTON_KEYS: tuple[str, ...] = (
     "back",
-    "start_action",
     "shop_refresh",
     "shop_upgrade",
     "shop_freeze",
@@ -42,10 +41,11 @@ REQUIRED_BUTTON_KEYS: tuple[str, ...] = (
     "teammate_2",
     "teammate_3",
     "teammate_4",
-    "squad_skill_1",
-    "squad_skill_2",
-    "squad_skill_3",
-    "squad_module",
+    "strategy_avatar",
+    "strategy_inspect",
+    "confirm_no",
+    "confirm_yes",
+    "confirm_dont_ask",
 )
 
 
@@ -71,6 +71,7 @@ def _default_keyboard_shortcuts() -> dict[str, str]:
         "shop_toggle": "a",
         "shop_freeze": "s",
         "shop_refresh": "d",
+        "shop_upgrade": "g",
         "battle_ready": "c",
         "enemy_preview": "w",
         "sell_board": "x",
@@ -91,15 +92,6 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "toggle_calibration": "BACK+START",
             "toggle_pause": "LT+BACK",
             "toggle_free_cursor": "LS",
-        },
-        "menu": {
-            "confirm": "A",
-            "back": "B",
-            "quick_squad": "X",
-            "quick_rewards": "Y",
-            "prev_tab": "LB",
-            "next_tab": "RB",
-            "start_action": "START",
         },
         "battle_prep": {
             "select_or_grab": "A",
@@ -124,6 +116,12 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "confirm_choice": "A",
             "fast_confirm_choice": "RT+A",
             "peek_board_hold": "LT",
+        },
+        "modal_confirm": {
+            "confirm": "A",
+            "cancel": "B",
+            "quick_confirm": "START",
+            "toggle_dont_ask": "X",
         },
         "lt_chords": {
             "covenant_panel": "LT+DPAD_LEFT",
@@ -494,18 +492,15 @@ def _default_choice_6_bottom_zone() -> LinearZone:
     )
 
 
-def _parse_node_map(raw: Mapping[str, Any]) -> dict[str, NavNode]:
-    """解析导航节点映射表。"""
-    nodes: dict[str, NavNode] = {}
-    for key, val in raw.items():
-        if isinstance(val, NavNode):
-            nodes[key] = val
-        elif isinstance(val, Mapping):
-            node = NavNode.from_dict(val, node_id=key)
-            nodes[node.id] = node
-        else:
-            raise TypeError(f"导航节点 '{key}' 类型错误: {type(val).__name__}")
-    return nodes
+def _default_fallback_buttons() -> dict[str, NormalizedPoint]:
+    """返回回合确认弹窗与策略头像的默认实测按钮锚点（兼容精简配置字典）。"""
+    return {
+        "strategy_avatar": NormalizedPoint(u=0.9605, v=0.3243, anchor="right_edge"),
+        "strategy_inspect": NormalizedPoint(u=0.9047, v=0.3236, anchor="right_edge"),
+        "confirm_no": NormalizedPoint(u=0.2496, v=0.6729, anchor="center_16_9"),
+        "confirm_yes": NormalizedPoint(u=0.7496, v=0.6729, anchor="center_16_9"),
+        "confirm_dont_ask": NormalizedPoint(u=0.4992, v=0.5597, anchor="center_16_9"),
+    }
 
 
 @dataclass
@@ -673,12 +668,8 @@ def _parse_view_overrides(raw: Any) -> dict[str, ViewLayoutOverride]:
 
 @dataclass
 class LayoutProfile:
-    """卫戍协议全流程 16:9 归一化布局配置集。"""
+    """卫戍协议局内 16:9 归一化布局配置集。"""
 
-    activity_hub_nodes: dict[str, NavNode]
-    pre_match_nodes: dict[str, NavNode]
-    squad_edit_nodes: dict[str, NavNode]
-    settlement_nodes: dict[str, NavNode]
     shop_zone: LinearZone
     bench_zone: LinearZone
     equip_zone: LinearZone
@@ -910,10 +901,6 @@ class LayoutProfile:
     def to_dict(self) -> dict[str, Any]:
         """序列化为完整 JSON 字典。"""
         data: dict[str, Any] = {
-            "activity_hub_nodes": {k: v.to_dict() for k, v in self.activity_hub_nodes.items()},
-            "pre_match_nodes": {k: v.to_dict() for k, v in self.pre_match_nodes.items()},
-            "squad_edit_nodes": {k: v.to_dict() for k, v in self.squad_edit_nodes.items()},
-            "settlement_nodes": {k: v.to_dict() for k, v in self.settlement_nodes.items()},
             "shop_zone": self.shop_zone.to_dict(),
             "bench_zone": self.bench_zone.to_dict(),
             "equip_zone": self.equip_zone.to_dict(),
@@ -930,20 +917,21 @@ class LayoutProfile:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> LayoutProfile:
-        """从合并后的字典反序列化 LayoutProfile 并校验完整性。"""
+        """从合并后的字典反序列化 LayoutProfile 并校验完整性。
+
+        自动静默忽略旧版残留的局外节点字段，并为新增的策略头像与回合确认按钮提供默认坐标兜底。
+        """
         buttons_raw = data.get("buttons", {})
         buttons: dict[str, NormalizedPoint] = {
             k: (v if isinstance(v, NormalizedPoint) else NormalizedPoint.from_dict(v))
             for k, v in buttons_raw.items()
         }
+        for key, default_pt in _default_fallback_buttons().items():
+            buttons.setdefault(key, default_pt)
         raw_c6_top = data.get("choice_6_top_zone")
         raw_c6_bot = data.get("choice_6_bottom_zone")
         raw_cov = data.get("covenant_zone")
         return cls(
-            activity_hub_nodes=_parse_node_map(data["activity_hub_nodes"]),
-            pre_match_nodes=_parse_node_map(data["pre_match_nodes"]),
-            squad_edit_nodes=_parse_node_map(data["squad_edit_nodes"]),
-            settlement_nodes=_parse_node_map(data["settlement_nodes"]),
             shop_zone=(
                 data["shop_zone"]
                 if isinstance(data["shop_zone"], LinearZone)

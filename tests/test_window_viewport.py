@@ -360,12 +360,60 @@ class TestConfigSystem:
         assert keymap.vibration_enabled is True
         assert keymap.left_stick_mode == "dpad"
         assert keymap.auto_toggle_shop is True
+        assert keymap.keyboard_shortcuts["shop_upgrade"] == "g"
+        assert keymap.keyboard_shortcuts == {
+            "shop_toggle": "a",
+            "shop_freeze": "s",
+            "shop_refresh": "d",
+            "shop_upgrade": "g",
+            "battle_ready": "c",
+            "enemy_preview": "w",
+            "sell_board": "x",
+            "sell_bench": "x",
+            "retreat_unit": "q",
+            "covenant_panel": "",
+            "emote_wheel": "z",
+            "back": "esc",
+            "pause_menu": "esc",
+        }
+        assert "menu" not in keymap.bindings
+        assert keymap.bindings["modal_confirm"] == {
+            "confirm": "A",
+            "cancel": "B",
+            "quick_confirm": "START",
+            "toggle_dont_ask": "X",
+        }
 
         for key in REQUIRED_BUTTON_KEYS:
             assert key in layout.buttons
             pt = layout.buttons[key]
             assert 0.0 <= pt.u <= 1.0
             assert 0.0 <= pt.v <= 1.0
+
+        # 验证已删除所有局外按钮与局外节点表
+        for removed_btn in (
+            "start_action",
+            "squad_skill_1",
+            "squad_skill_2",
+            "squad_skill_3",
+            "squad_module",
+        ):
+            assert removed_btn not in layout.buttons
+        for removed_attr in (
+            "activity_hub_nodes",
+            "pre_match_nodes",
+            "squad_edit_nodes",
+            "settlement_nodes",
+        ):
+            assert not hasattr(layout, removed_attr)
+            assert removed_attr not in layout.to_dict()
+
+        # 验证新增策略头像与回合确认弹窗实测按钮锚点
+        assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
+        assert layout.buttons["strategy_inspect"] == NormalizedPoint(0.9047, 0.3236, "right_edge")
+        assert layout.buttons["confirm_no"] == NormalizedPoint(0.2496, 0.6729, "center_16_9")
+        assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
+        assert layout.buttons["confirm_dont_ask"] == NormalizedPoint(0.4992, 0.5597, "center_16_9")
 
         assert "shop_toggle" in layout.buttons
         assert "safe_blank" in layout.buttons
@@ -428,10 +476,59 @@ class TestConfigSystem:
         assert upg4 is not None and upg5 is not None and upg6 is not None
         assert upg5.u == pytest.approx(upg4.u - step4)
         assert upg6.u == pytest.approx(upg4.u - 2 * step4)
-        assert len(layout.activity_hub_nodes) >= 5
-        assert len(layout.pre_match_nodes) >= 4
-        assert len(layout.squad_edit_nodes) >= 12
-        assert len(layout.settlement_nodes) >= 2
+
+    def test_layout_from_dict_ignores_legacy_nodes_and_fills_default_new_buttons(
+        self, tmp_path: Path
+    ) -> None:
+        repo_configs = Path(__file__).resolve().parents[1] / "configs"
+        raw_layout = json.loads(
+            (repo_configs / "stronghold_layout_16_9.json").read_text(encoding="utf-8")
+        )
+        # 模拟旧配置字典：残留局外节点键且缺少新增的 5 个策略/确认弹窗按钮
+        raw_layout["activity_hub_nodes"] = {
+            "back": {"id": "back", "label": "返回", "u": 0.05, "v": 0.06}
+        }
+        raw_layout["pre_match_nodes"] = {}
+        raw_layout["squad_edit_nodes"] = {}
+        raw_layout["settlement_nodes"] = {}
+        for new_key in (
+            "strategy_avatar",
+            "strategy_inspect",
+            "confirm_no",
+            "confirm_yes",
+            "confirm_dont_ask",
+        ):
+            raw_layout["buttons"].pop(new_key, None)
+
+        layout = LayoutProfile.from_dict(raw_layout)
+        assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
+        assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
+
+        # 模拟旧 user_override.json 残留局外节点键时 ConfigLoader 正常加载不报错
+        (tmp_path / "default_bindings.json").write_text(
+            (repo_configs / "default_bindings.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (tmp_path / "stronghold_layout_16_9.json").write_text(
+            (repo_configs / "stronghold_layout_16_9.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (tmp_path / "user_override.json").write_text(
+            json.dumps(
+                {
+                    "layout": {
+                        "activity_hub_nodes": {"back": {"id": "back", "u": 0.1, "v": 0.1}},
+                        "settlement_nodes": {},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        loader = ConfigLoader(config_dir=tmp_path)
+        _, loaded_layout = loader.load()
+        assert loaded_layout.buttons["confirm_dont_ask"] == NormalizedPoint(
+            0.4992, 0.5597, "center_16_9"
+        )
 
     def test_save_user_override_merge_and_reload(self, tmp_path: Path) -> None:
         repo_configs = Path(__file__).resolve().parents[1] / "configs"
