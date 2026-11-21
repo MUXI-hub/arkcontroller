@@ -5,6 +5,9 @@
 ## [0.1.2] - 2026-11-21
 
 ### 变更与修复 (Changed & Fixed)
+- **动态商店栏位向左延伸与升级按钮同步左移 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 支持卫戍协议商店升至二本（5 槽）与四本（6 槽）时卡片尺寸、步距与最右锚点保持不变、向左侧等距延伸：`LayoutProfile.resolve_shop_zone(..., slot_count=...)` 自动扩展槽位，`LayoutProfile.resolve_shop_upgrade_point(...)` 同步左移升级商店灰卡坐标，避免升本后按 `Y` 误点新增商品卡。
+  - `SceneDetector` 新增零模板实机商店栏位数检测（`SceneDetectionResult.shop_slot_count`），实时识别 4 / 5 / 6 槽（含 6 本满级无升级卡边框兜底）；`ControlDispatcher` 在槽位扩展时自动顺移焦点索引咬住原卡片不乱跳，退局后自动重置为 4 槽。
 - **实机官方 PC 端快捷键校准 (`arkcontroller.config` & `arkcontroller.control`)**：
   - 经管理员权限实机全链路验证，对齐官方 PC 端卫戍协议真实原生快捷键：`A`（展开/收起商店）、`S`（冻结商店）、`D`（刷新商店）、`C`（准备就绪）、`W`（敌方路线预览）、`Q`（撤回场上干员）、`X`（场上/整备通用出售）、`Esc`（返回/暂停菜单）。
   - 休整期按 `X`（刷新）、`Y`（升本）、`RS`（冻结）时若商店未展开且启用了 `auto_toggle_shop`，自动先按 `A` 展开商店；同时更新底部商店按 `DPAD_UP` 向上精准切入紧贴正上方的缩放整备区，垂直跨区链路严格吻合 `棋盘 ↔ 装备栏 ↔ 整备区 ↔ 商店`。

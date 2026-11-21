@@ -77,6 +77,7 @@ class SceneDetectionResult:
     shop_open: bool = True
     choice_count: int = 3
     unit_selected: bool = False
+    shop_slot_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -417,9 +418,12 @@ class SceneDetector:
             shop_open = True
             choice_count = 3
             unit_selected = False
+            shop_slot_count: int | None = None
             if best_scene == GameScene.BATTLE_PREP:
                 shop_open = self._detect_shop_open(frame, shop_template)
                 unit_selected = self._detect_unit_selected(frame, unit_template)
+                if shop_open:
+                    shop_slot_count = self._detect_shop_slot_count_heuristic(frame)
             elif best_scene == GameScene.MODAL_CHOICE:
                 shop_open = False
                 choice_count = self._estimate_choice_count(frame)
@@ -432,6 +436,7 @@ class SceneDetector:
                 shop_open=shop_open,
                 choice_count=choice_count,
                 unit_selected=unit_selected,
+                shop_slot_count=shop_slot_count,
             )
 
         # (b) 第二层：启发式视觉特征回退
@@ -567,6 +572,68 @@ class SceneDetector:
 
         return True
 
+    @staticmethod
+    def _measure_vertical_edge_strength(v_channel: np.ndarray, x: int) -> float:
+        """测量 1280x720 商店卡片高度带 (y=540..695) 在指定 x 处的垂直边界梯度强度。"""
+        width = v_channel.shape[1]
+        x_start = max(0, x - 2)
+        x_end = min(width, x + 3)
+        if x_end - x_start < 2:
+            return 0.0
+        strip = v_channel[540:695, x_start:x_end].astype(np.float32)
+        return float(np.abs(np.diff(strip, axis=1)).max(axis=1).mean())
+
+    @classmethod
+    def _has_shop_upgrade_card(cls, v_channel: np.ndarray, x1: int, x2: int) -> bool:
+        """判断给定横向区间是否存在高亮「升级商店 (LEVEL)」卡片（兼容灰/亮可点双色）。"""
+        v_top = v_channel[535:635, x1:x2]
+        v_all = v_channel[535:695, x1:x2]
+        if v_top.size == 0 or v_all.size == 0:
+            return False
+        top_bright = float((v_top > 120).mean())
+        all_bright = float((v_all > 110).mean())
+        if top_bright < 0.25 or all_bright < 0.20:
+            return False
+        edge_l = cls._measure_vertical_edge_strength(v_channel, x1)
+        edge_r = cls._measure_vertical_edge_strength(v_channel, x2)
+        return edge_l >= 10.0 and edge_r >= 10.0
+
+    @classmethod
+    def _detect_shop_slot_count_heuristic(cls, frame: np.ndarray) -> int | None:
+        """检测展开后的卫戍协议商店栏位数（1 本 4 槽 / 2~3 本 5 槽 / 4~6 本 6 槽）。
+
+        依据实机精确布局：最右卡槽固定于 x=936..1090，卡片步距 162px，升级卡宽 109px
+        紧贴最左商品卡左侧。升级时向左侧延伸：
+        - 4 槽：升级卡 x=332..441，卡槽 450..1090
+        - 5 槽：升级卡 x=170..279，卡槽 288..1090
+        - 6 槽：升级卡 x=8..117（或满级时第 6 张卡槽 x=126..280 存在左右边框），卡槽 126..1090
+        """
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        ready_pink = cls._measure_top_right_ready_pink_ratio(hsv)
+        if ready_pink < 0.28:
+            return None
+        refresh_yellow, freeze_blue = cls._measure_shop_action_buttons(hsv)
+        if refresh_yellow < 0.25 or freeze_blue < 0.25:
+            return None
+
+        v_ch = hsv[:, :, 2]
+
+        # 1. 优先判定 6 槽（4~6 本）：最左升级卡 [8..117] 出现，或满级无升级卡但第 6 槽边框 [126..280] 出现
+        if cls._has_shop_upgrade_card(v_ch, 8, 117):
+            return 6
+        if (
+            cls._measure_vertical_edge_strength(v_ch, 126) >= 8.0
+            and cls._measure_vertical_edge_strength(v_ch, 280) >= 8.0
+        ):
+            return 6
+
+        # 2. 次优判定 5 槽（2~3 本）：升级卡左移至 [170..279]
+        if cls._has_shop_upgrade_card(v_ch, 170, 279):
+            return 5
+
+        # 3. 默认 1 本 4 槽
+        return 4
+
     def _detect_unit_selected(
         self, frame: np.ndarray, unit_template: _SceneTemplate | None
     ) -> bool:
@@ -604,6 +671,9 @@ class SceneDetector:
         if top_ready_pink >= 0.28:
             shop_open = self._detect_shop_open(frame, shop_template)
             unit_selected = self._detect_unit_selected(frame, unit_template)
+            shop_slot_count = (
+                self._detect_shop_slot_count_heuristic(frame) if shop_open else None
+            )
             confidence = min(0.90, 0.72 + 0.30 * min(top_ready_pink, 0.60))
             return SceneDetectionResult(
                 scene=GameScene.BATTLE_PREP,
@@ -611,6 +681,7 @@ class SceneDetector:
                 shop_open=shop_open,
                 choice_count=3,
                 unit_selected=unit_selected,
+                shop_slot_count=shop_slot_count,
             )
 
         # 2b. 通用底部整备槽位条纹特征（兼容旧主题与合成测试帧）

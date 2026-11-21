@@ -478,11 +478,11 @@
   "shop_zone": {
     "name": "shop",
     "count": 4,
-    "start_u": 0.4125,
+    "start_u": 0.41172,
     "start_v": 0.855,
-    "end_u": 0.7922,
+    "end_u": 0.7918,
     "end_v": 0.855,
-    "slot_w": 0.122,
+    "slot_w": 0.1203,
     "slot_h": 0.245
   },
   "bench_zone": {
@@ -528,7 +528,7 @@
     "start_action": { "u": 0.875, "v": 0.87, "anchor": "right_edge" },
     "shop_toggle": { "u": 0.930, "v": 0.935, "anchor": "right_edge" },
     "shop_refresh": { "u": 0.930, "v": 0.635, "anchor": "right_edge" },
-    "shop_upgrade": { "u": 0.3027, "v": 0.855, "anchor": "center_16_9" },
+    "shop_upgrade": { "u": 0.30195, "v": 0.855, "anchor": "center_16_9" },
     "shop_freeze": { "u": 0.812, "v": 0.635, "anchor": "right_edge" },
     "battle_ready": { "u": 0.928, "v": 0.165, "anchor": "right_edge" },
     "covenant_panel": { "u": 0.265, "v": 0.045, "anchor": "center_16_9" },

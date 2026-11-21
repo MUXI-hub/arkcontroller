@@ -479,6 +479,50 @@ def test_heuristic_real_pc_stronghold_prep_shop_and_unit_selected(tmp_path: Path
     assert res_drag.unit_selected is False
 
 
+def test_heuristic_dynamic_shop_slot_count_4_5_6_and_max_level(tmp_path: Path) -> None:
+    """验证商店升至二本(5槽)/四本(6槽)向左侧延伸及满级无升级卡时栏位数自动检测。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    base_shop = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 38, dtype=np.uint8)
+    cv2.rectangle(base_shop, (200, 120), (1040, 480), (88, 92, 98), -1)
+    # 右上角粉红准备按钮 + 右侧黄刷新与蓝冻结双按钮
+    cv2.rectangle(base_shop, (1120, 100), (1255, 140), (110, 70, 235), -1)
+    cv2.rectangle(base_shop, (1125, 430), (1260, 480), (30, 210, 240), -1)
+    cv2.rectangle(base_shop, (970, 430), (1105, 480), (230, 140, 20), -1)
+
+    # 1. 1 本 4 槽：升级卡位于 x=332..441，左侧 x<325 为暗背景
+    f4 = base_shop.copy()
+    cv2.rectangle(f4, (332, 535), (441, 695), (185, 185, 185), -1)
+    res4 = detector.detect(f4)
+    assert res4.scene == GameScene.BATTLE_PREP
+    assert res4.shop_open is True
+    assert res4.shop_slot_count == 4
+
+    # 2. 2~3 本 5 槽：升级卡左移至 x=170..279（即使资金充足变为亮蓝/亮黄高亮色也能检出）
+    f5 = base_shop.copy()
+    cv2.rectangle(f5, (170, 535), (279, 695), (220, 210, 140), -1)
+    cv2.rectangle(f5, (288, 535), (442, 695), (90, 80, 110), -1)
+    res5 = detector.detect(f5)
+    assert res5.shop_open is True
+    assert res5.shop_slot_count == 5
+
+    # 3. 4~5 本 6 槽：升级卡左移至 x=8..117
+    f6 = base_shop.copy()
+    cv2.rectangle(f6, (8, 535), (117, 695), (190, 190, 190), -1)
+    cv2.rectangle(f6, (126, 535), (280, 695), (90, 80, 110), -1)
+    res6 = detector.detect(f6)
+    assert res6.shop_open is True
+    assert res6.shop_slot_count == 6
+
+    # 4. 6 本满级兜底：即便左侧升级卡消失，仅凭第 6 槽商品卡边框 [126..280] 仍精准检出 6 槽
+    f6_max = base_shop.copy()
+    cv2.rectangle(f6_max, (126, 535), (280, 695), (75, 70, 95), -1)
+    cv2.rectangle(f6_max, (126, 535), (280, 695), (150, 140, 180), 2)
+    res6_max = detector.detect(f6_max)
+    assert res6_max.shop_open is True
+    assert res6_max.shop_slot_count == 6
+
+
 # =====================================================================
 # 4. 连续帧防抖测试
 # =====================================================================

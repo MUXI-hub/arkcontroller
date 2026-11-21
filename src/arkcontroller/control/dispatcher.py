@@ -205,9 +205,10 @@ class ControlDispatcher:
 
         self.deploy_fsm = DeployFSM(keymap, layout, hid, rumble_cb=rumble_cb)
 
-        # 界面镜头/缩放视图态（normal / shop_open / unit_selected）
+        # 界面镜头/缩放视图态（normal / shop_open / unit_selected）与商店动态栏位数（1本4槽/2本5槽/4本6槽）
         self._view_state: LayoutViewState = LayoutViewState.NORMAL
         self._shop_open: bool = False
+        self._shop_slot_count: int = self.layout.shop_zone.count
         self._unit_selected: bool = False
         self._shop_override_until: float = 0.0
         self._unit_override_until: float = 0.0
@@ -292,13 +293,22 @@ class ControlDispatcher:
         return self._shop_open
 
     @property
+    def shop_slot_count(self) -> int:
+        return self._shop_slot_count
+
+    @property
     def unit_selected(self) -> bool:
         return self._unit_selected
+
+    def set_shop_slot_count(self, count: int) -> None:
+        """设置当前商店栏位数（支持 4/5/6 槽向左等距延伸）并同步重建商店映射器。"""
+        self._apply_shop_slot_count(count)
 
     def update_configs(self, keymap: KeymapConfig, layout: LayoutProfile) -> None:
         """热重载键位配置与 16:9 布局配置，并安全裁剪全部槽位索引。"""
         self.keymap = keymap
         self.layout = layout
+        self._shop_slot_count = layout.shop_zone.count
         self.deploy_fsm.update_configs(keymap, layout)
         self._rebuild_mappers()
 
@@ -374,7 +384,9 @@ class ControlDispatcher:
         self._equip_mappers = {}
         self._board_mappers = {}
         for vs in LayoutViewState:
-            self._shop_mappers[vs] = LinearZoneMapper(self.layout.resolve_shop_zone(vs))
+            self._shop_mappers[vs] = LinearZoneMapper(
+                self.layout.resolve_shop_zone(vs, slot_count=self._shop_slot_count)
+            )
             self._bench_mappers[vs] = LinearZoneMapper(self.layout.resolve_bench_zone(vs))
             self._equip_mappers[vs] = LinearZoneMapper(self.layout.resolve_equip_zone(vs))
             self._board_mappers[vs] = PerspectiveBoardMapper(
@@ -388,6 +400,20 @@ class ControlDispatcher:
             GameScene.SETTLEMENT: NodeGraphMapper(self.layout.settlement_nodes),
         }
         self._sync_active_mappers()
+
+    def _apply_shop_slot_count(self, new_count: int) -> None:
+        """更新商店栏位数（4/5/6 槽向左延伸），顺移当前焦点索引以咬住原卡片位置。"""
+        clamped = max(1, min(8, int(new_count)))
+        if clamped == self._shop_slot_count:
+            return
+        delta = clamped - self._shop_slot_count
+        self._shop_slot_count = clamped
+        for vs in LayoutViewState:
+            self._shop_mappers[vs] = LinearZoneMapper(
+                self.layout.resolve_shop_zone(vs, slot_count=self._shop_slot_count)
+            )
+        self._shop_mapper = self._shop_mappers[self._view_state]
+        self._shop_idx = max(0, min(self._shop_slot_count - 1, self._shop_idx + delta))
 
     def _sync_active_mappers(self) -> None:
         """将当前生效的槽位与棋盘映射器指向对应缩放视图态缓存。"""
@@ -479,6 +505,21 @@ class ControlDispatcher:
             (cu - hw, cv + hh),
         ]
 
+    def _trigger_shop_upgrade(self, viewport: ViewportRect) -> bool:
+        """触发商店升级：若配置了原生快捷键则按键，否则点击随栏位数同步左移的升级灰卡。"""
+        if self.keymap.use_native_keyboard_shortcuts:
+            key = self._get_shortcut("shop_upgrade", None)
+            if key:
+                self.hid.tap_key(key)
+                return True
+        pt = self.layout.resolve_shop_upgrade_point(
+            self._view_state, slot_count=self._shop_slot_count
+        )
+        if pt is None:
+            return False
+        self._click_norm(pt.u, pt.v, viewport, anchor=pt.anchor, button="left")
+        return True
+
     def _trigger_action(
         self,
         button_key: str,
@@ -508,6 +549,16 @@ class ControlDispatcher:
         if now >= self._unit_override_until:
             self._unit_selected = bool(getattr(scene_result, "unit_selected", False))
 
+        detected_slots = getattr(scene_result, "shop_slot_count", None)
+        if (
+            scene_result.scene == GameScene.BATTLE_PREP
+            and scene_result.shop_open
+            and self._shop_open
+            and isinstance(detected_slots, int)
+            and detected_slots >= 1
+        ):
+            self._apply_shop_slot_count(detected_slots)
+
         new_choice_count = max(1, int(scene_result.choice_count))
         if new_choice_count != self._choice_count:
             self._choice_count = new_choice_count
@@ -536,6 +587,8 @@ class ControlDispatcher:
             self._unit_override_until = 0.0
         if target_scene != GameScene.BATTLE_PREP:
             self._shop_override_until = 0.0
+        if target_scene in _MENU_SCENES:
+            self._apply_shop_slot_count(self.layout.shop_zone.count)
 
         self._current_scene = target_scene
         self._ready_hold_progress = 0.0
@@ -1117,7 +1170,7 @@ class ControlDispatcher:
                 self._trigger_action("shop_refresh", "shop_refresh", "d", viewport)
                 self._set_toast("刷新商店")
             elif button == GamepadButton.Y:
-                self._trigger_action("shop_upgrade", "shop_upgrade", None, viewport)
+                self._trigger_shop_upgrade(viewport)
                 self._set_toast("升级商店等级")
             elif button == GamepadButton.RS:
                 self._trigger_action("shop_freeze", "shop_freeze", "s", viewport)
@@ -1437,7 +1490,7 @@ class ControlDispatcher:
             if not self._shop_open and getattr(self.keymap, "auto_toggle_shop", True):
                 self._set_shop_open(True, viewport, announce=False)
                 self._wait_ui_transition(220)
-            self._trigger_action("shop_upgrade", "shop_upgrade", None, viewport)
+            self._trigger_shop_upgrade(viewport)
             self._emit_rumble(0.25, 0.30, 45)
             self._set_toast("升级商店等级")
         elif button == GamepadButton.RS:

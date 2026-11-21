@@ -646,13 +646,78 @@ class LayoutProfile:
         return self.equip_zone
 
     def resolve_shop_zone(
-        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+        self,
+        view_state: LayoutViewState | str = LayoutViewState.NORMAL,
+        *,
+        slot_count: int | None = None,
     ) -> LinearZone:
-        """按当前镜头缩放态解析生效的商店线性槽位。"""
+        """按当前镜头缩放态与商店栏位数解析生效的商店线性槽位。
+
+        当商店升至二本（5 槽）或四本（6 槽）增加栏位时，严格保持卡片尺寸、
+        槽位间距与最右侧锚点不变，向左侧等距延伸。
+        """
         override = self._get_view_override(view_state)
-        if override is not None and override.shop_zone is not None:
-            return override.shop_zone
-        return self.shop_zone
+        base_zone = (
+            override.shop_zone
+            if (override is not None and override.shop_zone is not None)
+            else self.shop_zone
+        )
+        if slot_count is None:
+            return base_zone
+
+        target_count = max(1, int(slot_count))
+        if target_count == base_zone.count:
+            return base_zone
+
+        if base_zone.count >= 2:
+            step_u = (base_zone.end_u - base_zone.start_u) / (base_zone.count - 1)
+            step_v = (base_zone.end_v - base_zone.start_v) / (base_zone.count - 1)
+        else:
+            step_u = base_zone.slot_w
+            step_v = 0.0
+
+        new_start_u = max(0.0, min(1.0, base_zone.end_u - step_u * (target_count - 1)))
+        new_start_v = max(0.0, min(1.0, base_zone.end_v - step_v * (target_count - 1)))
+        return LinearZone(
+            name=base_zone.name,
+            count=target_count,
+            start_u=new_start_u,
+            start_v=new_start_v,
+            end_u=base_zone.end_u,
+            end_v=base_zone.end_v,
+            slot_w=base_zone.slot_w,
+            slot_h=base_zone.slot_h,
+        )
+
+    def resolve_shop_upgrade_point(
+        self,
+        view_state: LayoutViewState | str = LayoutViewState.NORMAL,
+        *,
+        slot_count: int | None = None,
+    ) -> NormalizedPoint | None:
+        """解析随商店栏位向左延伸而同步左移的「升级商店」按钮归一化坐标。"""
+        base_pt = self.buttons.get("shop_upgrade")
+        if base_pt is None:
+            return None
+        if slot_count is None:
+            return base_pt
+
+        base_zone = self.resolve_shop_zone(view_state, slot_count=None)
+        target_count = max(1, int(slot_count))
+        delta_slots = target_count - base_zone.count
+        if delta_slots == 0:
+            return base_pt
+
+        if base_zone.count >= 2:
+            step_u = (base_zone.end_u - base_zone.start_u) / (base_zone.count - 1)
+            step_v = (base_zone.end_v - base_zone.start_v) / (base_zone.count - 1)
+        else:
+            step_u = base_zone.slot_w
+            step_v = 0.0
+
+        new_u = max(0.0, min(1.0, base_pt.u - step_u * delta_slots))
+        new_v = max(0.0, min(1.0, base_pt.v - step_v * delta_slots))
+        return NormalizedPoint(u=new_u, v=new_v, anchor=base_pt.anchor)
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为完整 JSON 字典。"""

@@ -380,6 +380,30 @@ class TestConfigSystem:
         assert layout.choice_zone.count == 3
         assert layout.board_quad.rows == 4
         assert layout.board_quad.cols == 7
+
+        # 验证商店升至二本(5槽) / 四本(6槽)时间距与尺寸不变、向左侧延伸且升级按钮同步左移
+        z4 = layout.resolve_shop_zone("shop_open", slot_count=4)
+        z5 = layout.resolve_shop_zone("shop_open", slot_count=5)
+        z6 = layout.resolve_shop_zone("shop_open", slot_count=6)
+        step4 = (z4.end_u - z4.start_u) / 3
+        assert z5.count == 5 and z6.count == 6
+        assert z5.end_u == pytest.approx(z4.end_u)
+        assert z6.end_u == pytest.approx(z4.end_u)
+        assert z5.slot_w == pytest.approx(z4.slot_w)
+        assert z6.slot_h == pytest.approx(z4.slot_h)
+        assert z5.start_u == pytest.approx(z4.start_u - step4)
+        assert z6.start_u == pytest.approx(z4.start_u - 2 * step4)
+        # 扩展后右侧原有槽位中心严格重合
+        for i in range(4):
+            assert z5.slot_center(i + 1) == pytest.approx(z4.slot_center(i))
+            assert z6.slot_center(i + 2) == pytest.approx(z4.slot_center(i))
+        # 升级按钮同步左移相同步距
+        upg4 = layout.resolve_shop_upgrade_point("shop_open", slot_count=4)
+        upg5 = layout.resolve_shop_upgrade_point("shop_open", slot_count=5)
+        upg6 = layout.resolve_shop_upgrade_point("shop_open", slot_count=6)
+        assert upg4 is not None and upg5 is not None and upg6 is not None
+        assert upg5.u == pytest.approx(upg4.u - step4)
+        assert upg6.u == pytest.approx(upg4.u - 2 * step4)
         assert len(layout.activity_hub_nodes) >= 5
         assert len(layout.pre_match_nodes) >= 4
         assert len(layout.squad_edit_nodes) >= 12

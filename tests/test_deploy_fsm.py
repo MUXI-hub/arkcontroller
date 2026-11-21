@@ -1224,3 +1224,67 @@ class TestLeftStickNavShopToggleAndZoomCompensation:
         )
         assert snap_hold.deploy_state == DeployState.HOLDING_UNIT
         assert snap_hold.focus_zone == FocusZone.BOARD
+
+    def test_dynamic_shop_slot_expansion_cursor_stability_and_upgrade_button(self) -> None:
+        """验证商店升至二本(5槽)/四本(6槽)向左延伸时焦点顺移保稳、升级按钮同步左移与退局重置。"""
+        dispatcher, hid, _, _, layout, vp = _make_env()
+
+        # 1. 1 本 4 槽：进入商店并右移到索引 1（第 2 张卡）
+        prep4 = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=True, shop_slot_count=4
+        )
+        dispatcher.process_tick(vp, prep4, [])
+        snap4 = dispatcher.process_tick(vp, prep4, [ButtonTap(GamepadButton.DPAD_RIGHT)])
+        assert snap4.focus_zone == FocusZone.SHOP
+        assert snap4.focus_label == "商店 [2/4]"
+        card_before = snap4.cursor_norm
+
+        # 2. 升至二本（5 槽向左侧延伸）：焦点顺移至索引 2，光标牢牢咬住同一张卡不乱跳
+        prep5 = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=True, shop_slot_count=5
+        )
+        snap5 = dispatcher.process_tick(vp, prep5, [])
+        assert dispatcher.shop_slot_count == 5
+        assert snap5.focus_label == "商店 [3/5]"
+        assert snap5.cursor_norm == pytest.approx(card_before)
+
+        # 左移两步可直达二本新增的最左商品卡（槽 1/5）
+        snap5_left = dispatcher.process_tick(
+            vp,
+            prep5,
+            [ButtonTap(GamepadButton.DPAD_LEFT), ButtonTap(GamepadButton.DPAD_LEFT)],
+        )
+        z5 = layout.resolve_shop_zone(LayoutViewState.SHOP_OPEN, slot_count=5)
+        assert snap5_left.focus_label == "商店 [1/5]"
+        assert snap5_left.cursor_norm == pytest.approx(z5.slot_center(0))
+
+        # 在 5 槽态按 Y 升级商店：应点击同步左移后的升级灰卡坐标，绝不误点新商品卡
+        hid.clear()
+        dispatcher.process_tick(vp, prep5, [ButtonTap(GamepadButton.Y)])
+        upg5 = layout.resolve_shop_upgrade_point(LayoutViewState.SHOP_OPEN, slot_count=5)
+        assert upg5 is not None
+        assert hid.calls == [("click", *vp.norm_to_screen(upg5.u, upg5.v, upg5.anchor), "left")]
+
+        # 3. 升至四本（6 槽再向左侧延伸）：按 Y 升级再左移一格，且收起后保留 6 槽记忆
+        prep6 = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=True, shop_slot_count=6
+        )
+        snap6 = dispatcher.process_tick(vp, prep6, [])
+        assert dispatcher.shop_slot_count == 6
+        assert snap6.focus_label == "商店 [2/6]"
+        hid.clear()
+        dispatcher.process_tick(vp, prep6, [ButtonTap(GamepadButton.Y)])
+        upg6 = layout.resolve_shop_upgrade_point(LayoutViewState.SHOP_OPEN, slot_count=6)
+        assert upg6 is not None
+        assert hid.calls == [("click", *vp.norm_to_screen(upg6.u, upg6.v, upg6.anchor), "left")]
+
+        # 商店收起（shop_slot_count=None）期间保持已识别的 6 槽状态不回退
+        prep_closed = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=False, shop_slot_count=None
+        )
+        dispatcher.process_tick(vp, prep_closed, [ButtonTap(GamepadButton.B)])
+        assert dispatcher.shop_slot_count == 6
+
+        # 4. 对局结束切回结算/活动主界面时自动重置回默认 4 槽
+        dispatcher.process_tick(vp, SceneDetectionResult(GameScene.SETTLEMENT, 0.95), [])
+        assert dispatcher.shop_slot_count == 4
