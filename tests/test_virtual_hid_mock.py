@@ -229,6 +229,75 @@ class TestMouseOperations:
         assert fake.sent_packets[-1].mi.dwFlags == MOUSEEVENTF_LEFTUP
 
     @pytest.mark.parametrize(
+        ("origin", "offset"),
+        [
+            ((500, 400), (60, 0)),
+            ((800, 400), (-60, 20)),
+        ],
+    )
+    def test_smooth_drag_loopback_roundtrip_and_optional_release(
+        self,
+        origin: tuple[int, int],
+        offset: tuple[int, int],
+    ) -> None:
+        hid, fake, sleeps = _make_hid(0, 0, 1001, 1001)
+        waypoint = (origin[0] + offset[0], origin[1] + offset[1])
+
+        hid.smooth_drag_loopback(
+            origin=origin,
+            offset=offset,
+            duration_ms=120,
+            steps_each_way=6,
+            release_at_end=True,
+        )
+
+        # 序列：move(origin) + left_down + 6 步去程 + 6 步回程 + left_up = 15 包
+        assert len(fake.sent_packets) == 15
+        origin_abs = hid.screen_to_absolute(*origin)
+        waypoint_abs = hid.screen_to_absolute(*waypoint)
+
+        assert (fake.sent_packets[0].mi.dx, fake.sent_packets[0].mi.dy) == origin_abs
+        assert fake.sent_packets[1].mi.dwFlags == MOUSEEVENTF_LEFTDOWN
+        # 第 6 步去程（索引 7）应精确抵达折返点 waypoint
+        assert (fake.sent_packets[7].mi.dx, fake.sent_packets[7].mi.dy) == waypoint_abs
+        # 第 6 步回程（索引 13）应精确回到原点 origin
+        assert (fake.sent_packets[13].mi.dx, fake.sent_packets[13].mi.dy) == origin_abs
+        assert fake.sent_packets[14].mi.dwFlags == MOUSEEVENTF_LEFTUP
+
+        # 延时：pre_hover(30ms) + 12 步插值(120ms) + post_hold(30ms) = 14 次，共 180ms
+        assert len(sleeps) == 14
+        assert sleeps[0] == pytest.approx(0.030)
+        assert sleeps[-1] == pytest.approx(0.030)
+        assert sum(sleeps[1:-1]) == pytest.approx(0.120)
+        assert sum(sleeps) == pytest.approx(0.180)
+
+        # 验证 release_at_end=False 不自动松开左键，也不触发 post_hold 延时
+        fake.sent_packets.clear()
+        sleeps.clear()
+        hid.smooth_drag_loopback(
+            origin=origin,
+            offset=offset,
+            duration_ms=80,
+            steps_each_way=4,
+            release_at_end=False,
+        )
+        # move(origin) + left_down + 4 去程 + 4 回程 = 10 包
+        assert len(fake.sent_packets) == 10
+        assert fake.sent_packets[1].mi.dwFlags == MOUSEEVENTF_LEFTDOWN
+        assert (fake.sent_packets[5].mi.dx, fake.sent_packets[5].mi.dy) == waypoint_abs
+        assert (fake.sent_packets[-1].mi.dx, fake.sent_packets[-1].mi.dy) == origin_abs
+        assert fake.sent_packets[-1].mi.dwFlags == (
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+        )
+        assert not any(pkt.mi.dwFlags == MOUSEEVENTF_LEFTUP for pkt in fake.sent_packets)
+        assert len(sleeps) == 9
+        assert sleeps[0] == pytest.approx(0.030)
+        assert sum(sleeps[1:]) == pytest.approx(0.080)
+
+        hid.mouse_up("left")
+        assert fake.sent_packets[-1].mi.dwFlags == MOUSEEVENTF_LEFTUP
+
+    @pytest.mark.parametrize(
         ("direction", "expected_end"),
         [
             ("up", (500, 400)),
@@ -292,12 +361,17 @@ class TestKeyboardOperationsAndWindllPatch:
         "key_name",
         [
             "space",
-            "d",
-            "f",
-            "r",
-            "e",
-            "q",
             "a",
+            "c",
+            "d",
+            "e",
+            "f",
+            "g",
+            "q",
+            "r",
+            "s",
+            "w",
+            "x",
             "z",
             "tab",
             "grave",
