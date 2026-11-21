@@ -71,6 +71,16 @@ class MockVirtualHID:
     ) -> None:
         self.calls.append(("smooth_drag", start, end, release_at_end))
 
+    def smooth_drag_loopback(
+        self,
+        origin: tuple[int, int],
+        offset: tuple[int, int],
+        duration_ms: int = 130,
+        steps_each_way: int = 6,
+        release_at_end: bool = True,
+    ) -> None:
+        self.calls.append(("smooth_drag_loopback", origin, offset, release_at_end))
+
     def mouse_up(self, button: str = "left") -> None:
         self.calls.append(("mouse_up", button))
 
@@ -206,23 +216,20 @@ class TestForegroundAndGlobalControls:
         )
         assert snap_resumed.paused is False
 
-        # 3. Back 单击手动循环锁层，锁层后忽略自动场景覆盖，循环一圈后恢复自动
+        # 3. Back 单击手动循环锁层：BATTLE_PREP -> MODAL_CHOICE -> MODAL_CONFIRM -> UNKNOWN_FREE_CURSOR -> AUTO
         snap_lock1 = dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.BACK)])
         assert snap_lock1.scene_locked_manual is True
-        assert snap_lock1.scene == GameScene.ACTIVITY_HUB
+        assert snap_lock1.scene == GameScene.BATTLE_PREP
 
-        # 视觉仍报 BATTLE_PREP，但因为手动锁层不会被覆盖
+        # 切到 MODAL_CHOICE 后视觉仍报 BATTLE_PREP，因手动锁层不会被覆盖
+        snap_lock2 = dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.BACK)])
+        assert snap_lock2.scene_locked_manual is True
+        assert snap_lock2.scene == GameScene.MODAL_CHOICE
         snap_still_locked = dispatcher.process_tick(vp, prep, [])
-        assert snap_still_locked.scene == GameScene.ACTIVITY_HUB
+        assert snap_still_locked.scene == GameScene.MODAL_CHOICE
 
-        # 继续按 Back 依次走完 SQUAD_EDIT -> BATTLE_PREP -> MODAL_CHOICE -> UNKNOWN_FREE_CURSOR -> AUTO
-        expected_scenes = [
-            GameScene.SQUAD_EDIT,
-            GameScene.BATTLE_PREP,
-            GameScene.MODAL_CHOICE,
-            GameScene.UNKNOWN_FREE_CURSOR,
-        ]
-        for expected in expected_scenes:
+        # 继续按 Back 依次走完 MODAL_CONFIRM -> UNKNOWN_FREE_CURSOR
+        for expected in (GameScene.MODAL_CONFIRM, GameScene.UNKNOWN_FREE_CURSOR):
             snap_step = dispatcher.process_tick(
                 vp, prep, [ButtonTap(GamepadButton.BACK)]
             )
@@ -303,13 +310,13 @@ class TestForegroundAndGlobalControls:
         dispatcher_med, hid_med, _, _, _, _ = _make_env()
         ge_light = GestureEngine(keymap)
         ge_med = GestureEngine(keymap)
-        squad = SceneDetectionResult(GameScene.SQUAD_EDIT, 0.95)
+        free_scene = SceneDetectionResult(GameScene.UNKNOWN_FREE_CURSOR, 0.0)
         dt = 0.008  # 125Hz 主循环帧间隔
 
         # 1. 显式亚像素零增量帧不得触发任何滚轮事件
         dispatcher_light.process_tick(
             vp,
-            squad,
+            free_scene,
             [StickMotion("right", 0.0, 0.30, 0.0, 0.0) for _ in range(20)],
         )
         assert hid_light.calls == []
@@ -338,8 +345,8 @@ class TestForegroundAndGlobalControls:
                 lt=0.0,
                 rt=0.0,
             )
-            dispatcher_light.process_tick(vp, squad, ge_light.update(st_light, dt))
-            dispatcher_med.process_tick(vp, squad, ge_med.update(st_med, dt))
+            dispatcher_light.process_tick(vp, free_scene, ge_light.update(st_light, dt))
+            dispatcher_med.process_tick(vp, free_scene, ge_med.update(st_med, dt))
 
         light_v_scroll = sum(
             call[1] for call in hid_light.calls if call[0] == "scroll" and not call[2]
@@ -366,7 +373,7 @@ class TestForegroundAndGlobalControls:
                 lt=0.0,
                 rt=0.0,
             )
-            dispatcher_h.process_tick(vp, squad, ge_h.update(st_h, dt))
+            dispatcher_h.process_tick(vp, free_scene, ge_h.update(st_h, dt))
 
         h_scrolls = [c for c in hid_h.calls if c[0] == "scroll" and c[2] is True]
         v_scrolls = [c for c in hid_h.calls if c[0] == "scroll" and c[2] is False]
@@ -670,7 +677,7 @@ class TestDeployFSMAndBattlePrep:
         dispatcher.process_tick(vp, prep, [])
         hid.clear()
 
-        # 商店选买 A、极速连买 RT+A、刷新 X(D)、升本 Y(点按钮)、冻结 RS(S)
+        # 商店选买 A、极速连买 RT+A、刷新 X(D)、升本 Y(G)、冻结 RS(S)
         dispatcher.process_tick(
             vp,
             prep,
@@ -683,12 +690,10 @@ class TestDeployFSMAndBattlePrep:
             ],
         )
         shop0_xy = vp.norm_to_screen(*shop_mapper.slot_center(0))
-        upg_pt = layout.buttons["shop_upgrade"]
-        upg_xy = vp.norm_to_screen(upg_pt.u, upg_pt.v, upg_pt.anchor)
         assert ("click", shop0_xy[0], shop0_xy[1], "left") in hid.calls
         assert ("double_click", shop0_xy[0], shop0_xy[1]) in hid.calls
         assert ("tap_key", "d") in hid.calls
-        assert ("click", upg_xy[0], upg_xy[1], "left") in hid.calls
+        assert ("tap_key", "g") in hid.calls
         assert ("tap_key", "s") in hid.calls
 
         # 商店收起态按 X / RS 会自动先按 A 展开商店
@@ -803,122 +808,57 @@ class TestModalChoiceAndOutOfBattleScenes:
             ("click", confirm0_xy[0], confirm0_xy[1], "left"),
         ]
 
-    def test_full_out_of_battle_scenes_flow(self) -> None:
-        """验证活动主界面 -> 模式分队 -> 战前编队（技能/模组/助战/滚轮） -> 结算页全流程。"""
-        dispatcher, hid, _, keymap, layout, vp = _make_env()
+    def test_out_of_battle_unknown_free_cursor_mode_and_state_retention(self) -> None:
+        """验证默认与局外 UNKNOWN_FREE_CURSOR 仅使用模拟自由鼠标，且不清空局内记住的槽数与队友状态。"""
+        dispatcher, hid, _, keymap, layout, vp = _make_env(left_stick_mode="dpad")
 
-        # 1. 活动主界面：X 跳编队、Y 跳奖励、Start 点击开始模拟、B 返回
-        hub = SceneDetectionResult(GameScene.ACTIVITY_HUB, 0.95)
-        snap_hub = dispatcher.process_tick(
-            vp,
-            hub,
-            [
-                ButtonTap(GamepadButton.DPAD_RIGHT),
-                ButtonTap(GamepadButton.X),
-                ButtonTap(GamepadButton.Y),
-                ButtonTap(GamepadButton.START),
-                ButtonTap(GamepadButton.B),
-            ],
-        )
-        assert snap_hub.scene == GameScene.ACTIVITY_HUB
-        squad_node = layout.activity_hub_nodes["squad_entry"]
-        reward_node = layout.activity_hub_nodes["rewards"]
-        start_pt = layout.buttons["start_action"]
-        assert (
-            "click",
-            *vp.norm_to_screen(squad_node.u, squad_node.v),
-            "left",
-        ) in hid.calls
-        assert (
-            "click",
-            *vp.norm_to_screen(reward_node.u, reward_node.v),
-            "left",
-        ) in hid.calls
-        assert (
-            "click",
-            *vp.norm_to_screen(start_pt.u, start_pt.v, start_pt.anchor),
-            "left",
-        ) in hid.calls
-        assert ("tap_key", "esc") in hid.calls
+        # 1. 初始即处于局外自由鼠标态（无需局外菜单节点）
+        snap_init = dispatcher.process_tick(vp, None, [])
+        assert snap_init.scene == GameScene.UNKNOWN_FREE_CURSOR
+        assert snap_init.focus_zone == FocusZone.FREE_CURSOR
+        assert snap_init.free_cursor_active is True
 
-        # 2. 模式与分队准备界面
+        # 2. 在 UNKNOWN_FREE_CURSOR 下，即便 left_stick_mode="dpad"，推左摇杆也始终直接平滑驱动鼠标
+        unknown = SceneDetectionResult(GameScene.UNKNOWN_FREE_CURSOR, 0.0)
         hid.clear()
-        pre_match = SceneDetectionResult(GameScene.PRE_MATCH_SETUP, 0.93)
-        dispatcher.process_tick(
+        snap_move = dispatcher.process_tick(
             vp,
-            pre_match,
+            unknown,
             [
-                ButtonTap(GamepadButton.DPAD_RIGHT),
+                StickMotion("left", 0.85, -0.30, 120.0, 40.0),
                 ButtonTap(GamepadButton.A),
-                ButtonTap(GamepadButton.START),
+                ChordTriggered(GamepadButton.RT, GamepadButton.A),
+                ButtonTap(GamepadButton.B),
+                StickMotion("right", 0.0, -0.8, 0.0, 48.0),
             ],
         )
-        faction2 = layout.pre_match_nodes["faction_2"]
-        assert ("click", *vp.norm_to_screen(faction2.u, faction2.v), "left") in hid.calls
-
-        # 3. 战前编队：LB/RB 循环切换技能 1/2/3 与模组槽位、Y 好友助战、RS 滚轮浏览卡池、Start 确认出击
-        hid.clear()
-        squad_edit = SceneDetectionResult(GameScene.SQUAD_EDIT, 0.96)
-        dispatcher.process_tick(
-            vp,
-            squad_edit,
-            [
-                ButtonTap(GamepadButton.RB),  # 技能 2
-                ButtonTap(GamepadButton.RB),  # 技能 3
-                ButtonTap(GamepadButton.RB),  # 模组
-                ButtonTap(GamepadButton.Y),  # 好友助战
-                StickMotion("right", 0.0, -0.9, 0.0, 48.0),  # 向下滚动卡池
-                ButtonTap(GamepadButton.START),  # 确认编队出击
-            ],
-        )
-        skill2_pt = layout.buttons["squad_skill_2"]
-        skill3_pt = layout.buttons["squad_skill_3"]
-        mod_pt = layout.buttons["squad_module"]
-        friend_node = layout.squad_edit_nodes["friend_support"]
-        assert (
-            "click",
-            *vp.norm_to_screen(skill2_pt.u, skill2_pt.v, skill2_pt.anchor),
-            "left",
-        ) in hid.calls
-        assert (
-            "click",
-            *vp.norm_to_screen(skill3_pt.u, skill3_pt.v, skill3_pt.anchor),
-            "left",
-        ) in hid.calls
-        assert (
-            "click",
-            *vp.norm_to_screen(mod_pt.u, mod_pt.v, mod_pt.anchor),
-            "left",
-        ) in hid.calls
-        assert (
-            "click",
-            *vp.norm_to_screen(friend_node.u, friend_node.v),
-            "left",
-        ) in hid.calls
+        assert snap_move.free_cursor_active is True
+        assert hid.calls[0][0] == "move_cursor"
+        assert hid.calls[1] == ("click", hid.calls[0][1], hid.calls[0][2], "left")
+        assert hid.calls[2] == ("double_click", hid.calls[0][1], hid.calls[0][2])
+        assert ("tap_key", "esc") in hid.calls
         assert ("scroll", -240, False) in hid.calls
 
-        # 4. 结算页：继续确认与返回
-        hid.clear()
-        settlement = SceneDetectionResult(GameScene.SETTLEMENT, 0.94)
-        dispatcher.process_tick(
-            vp,
-            settlement,
-            [
-                ButtonTap(GamepadButton.START),
-                ButtonTap(GamepadButton.B),
-            ],
+        # 3. 局内进入 6 槽联机休整期后再短暂回到 UNKNOWN_FREE_CURSOR（如打开覆盖页），保留槽数与队友状态
+        prep6_coop = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=True,
+            shop_slot_count=6,
+            has_teammates=True,
         )
-        claim_node = layout.settlement_nodes["claim_continue"]
-        assert (
-            "click",
-            *vp.norm_to_screen(claim_node.u, claim_node.v),
-            "left",
-        ) in hid.calls
-        assert ("tap_key", "esc") in hid.calls
+        dispatcher.process_tick(vp, prep6_coop, [])
+        assert dispatcher.shop_slot_count == 6
+        assert dispatcher.has_teammates is True
 
-        # 5. 热重载配置不报错且保持状态健康
+        dispatcher.process_tick(vp, unknown, [])
+        assert dispatcher.current_scene == GameScene.UNKNOWN_FREE_CURSOR
+        assert dispatcher.shop_slot_count == 6
+        assert dispatcher.has_teammates is True
+
+        # 4. 热重载配置不报错且保持状态健康
         dispatcher.update_configs(keymap, layout)
-        snap_reloaded = dispatcher.process_tick(vp, settlement, [])
+        snap_reloaded = dispatcher.process_tick(vp, unknown, [])
         assert snap_reloaded.visible is True
 
     def test_combat_scene_cross_zones_and_extra_shortcuts(self) -> None:
@@ -1026,11 +966,11 @@ class TestLeftStickNavShopToggleAndZoomCompensation:
     def test_left_stick_replaces_dpad_across_scenes_and_ls_toggles_cursor(self) -> None:
         dispatcher, hid, _, keymap, layout, vp = _make_env(left_stick_mode="dpad")
         ge = GestureEngine(keymap)
-        hub = SceneDetectionResult(GameScene.ACTIVITY_HUB, 0.95)
-        dispatcher.process_tick(vp, hub, [])
+        prep = SceneDetectionResult(GameScene.BATTLE_PREP, 0.96, shop_open=False)
+        dispatcher.process_tick(vp, prep, [])
         hid.clear()
 
-        # 活动主界面：左摇杆向右推动直接跳转至下一个菜单节点并按 A 点击
+        # 局内休整期：左摇杆向右推动经 GestureEngine 生成 StickDirection 直接整备区跳格
         st_right = GamepadState(
             connected=True,
             packet_number=1,
@@ -1044,22 +984,15 @@ class TestLeftStickNavShopToggleAndZoomCompensation:
         )
         ev1 = ge.update(st_right, dt=0.016)
         assert any(isinstance(e, StickDirection) and e.direction == "right" for e in ev1)
-        snap_hub = dispatcher.process_tick(vp, hub, ev1 + [ButtonTap(GamepadButton.A)])
-        assert snap_hub.free_cursor_active is False
-        assert snap_hub.focus_label == layout.activity_hub_nodes["mode_coop"].label
-        coop = layout.activity_hub_nodes["mode_coop"]
-        assert ("click", *vp.norm_to_screen(coop.u, coop.v), "left") in hid.calls
+        snap_b1 = dispatcher.process_tick(vp, prep, ev1)
+        assert snap_b1.free_cursor_active is False
+        assert snap_b1.focus_zone == FocusZone.BENCH
+        assert snap_b1.focus_label == "整备区 [2/10]"
 
-        # 局内休整期：左摇杆在整备区跳格并跨上棋盘
-        prep = SceneDetectionResult(GameScene.BATTLE_PREP, 0.96, shop_open=False)
-        dispatcher.process_tick(vp, prep, [])
         snap_b = dispatcher.process_tick(
             vp,
             prep,
-            [
-                StickDirection("left", "right"),
-                StickDirection("left", "right"),
-            ],
+            [StickDirection("left", "right")],
         )
         assert snap_b.focus_zone == FocusZone.BENCH
         assert snap_b.focus_label == "整备区 [3/10]"
@@ -1230,10 +1163,21 @@ class TestLeftStickNavShopToggleAndZoomCompensation:
         assert snap_hold.focus_zone == FocusZone.BOARD
 
     def test_dynamic_shop_slot_expansion_cursor_stability_and_upgrade_button(self) -> None:
-        """验证商店升至二本(5槽)/四本(6槽)向左延伸时焦点顺移保稳、升级按钮同步左移与退局重置。"""
-        dispatcher, hid, _, _, layout, vp = _make_env()
+        """验证商店升至二本(5槽)/四本(6槽)向左延伸时焦点顺移保稳、原生 G 键/纯鼠标升本与自由层记忆保留。"""
+        # 1. 原生快捷键开启：按 Y 发送官方升本快捷键 G（绝不误触商品卡）
+        dispatcher_key, hid_key, _, _, _, vp_key = _make_env(use_native_shortcuts=True)
+        prep5_key = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=True, shop_slot_count=5
+        )
+        dispatcher_key.process_tick(vp_key, prep5_key, [])
+        hid_key.clear()
+        dispatcher_key.process_tick(vp_key, prep5_key, [ButtonTap(GamepadButton.Y)])
+        assert hid_key.calls == [("tap_key", "g")]
 
-        # 1. 1 本 4 槽：进入商店并右移到索引 1（第 2 张卡）
+        # 2. 纯鼠标模式（use_native_shortcuts=False）：点击随栏位数同步左移的升级卡坐标
+        dispatcher, hid, _, _, layout, vp = _make_env(use_native_shortcuts=False)
+
+        # 1 本 4 槽：进入商店并右移到索引 1（第 2 张卡）
         prep4 = SceneDetectionResult(
             GameScene.BATTLE_PREP, 0.96, shop_open=True, shop_slot_count=4
         )
@@ -1243,7 +1187,7 @@ class TestLeftStickNavShopToggleAndZoomCompensation:
         assert snap4.focus_label == "商店 [2/4]"
         card_before = snap4.cursor_norm
 
-        # 2. 升至二本（5 槽向左侧延伸）：焦点顺移至索引 2，光标牢牢咬住同一张卡不乱跳
+        # 升至二本（5 槽向左侧延伸）：焦点顺移至索引 2，光标牢牢咬住同一张卡不乱跳
         prep5 = SceneDetectionResult(
             GameScene.BATTLE_PREP, 0.96, shop_open=True, shop_slot_count=5
         )
@@ -1262,14 +1206,14 @@ class TestLeftStickNavShopToggleAndZoomCompensation:
         assert snap5_left.focus_label == "商店 [1/5]"
         assert snap5_left.cursor_norm == pytest.approx(z5.slot_center(0))
 
-        # 在 5 槽态按 Y 升级商店：应点击同步左移后的升级灰卡坐标，绝不误点新商品卡
+        # 纯鼠标模式下按 Y 升级商店：应点击同步左移后的升级卡坐标，绝不误点新商品卡
         hid.clear()
         dispatcher.process_tick(vp, prep5, [ButtonTap(GamepadButton.Y)])
         upg5 = layout.resolve_shop_upgrade_point(LayoutViewState.SHOP_OPEN, slot_count=5)
         assert upg5 is not None
         assert hid.calls == [("click", *vp.norm_to_screen(upg5.u, upg5.v, upg5.anchor), "left")]
 
-        # 3. 升至四本（6 槽再向左侧延伸）：按 Y 升级再左移一格，且收起后保留 6 槽记忆
+        # 升至四本（6 槽再向左侧延伸）：按 Y 升级再左移一格，且收起后保留 6 槽记忆
         prep6 = SceneDetectionResult(
             GameScene.BATTLE_PREP, 0.96, shop_open=True, shop_slot_count=6
         )
@@ -1289,9 +1233,9 @@ class TestLeftStickNavShopToggleAndZoomCompensation:
         dispatcher.process_tick(vp, prep_closed, [ButtonTap(GamepadButton.B)])
         assert dispatcher.shop_slot_count == 6
 
-        # 4. 对局结束切回结算/活动主界面时自动重置回默认 4 槽
-        dispatcher.process_tick(vp, SceneDetectionResult(GameScene.SETTLEMENT, 0.95), [])
-        assert dispatcher.shop_slot_count == 4
+        # 短暂退回 UNKNOWN_FREE_CURSOR 时不清空记住的 6 槽状态
+        dispatcher.process_tick(vp, SceneDetectionResult(GameScene.UNKNOWN_FREE_CURSOR, 0.0), [])
+        assert dispatcher.shop_slot_count == 6
 
 
 class TestModal6ChoiceEquipReorderCovenantAndTeammates:
@@ -1575,3 +1519,386 @@ class TestModal6ChoiceEquipReorderCovenantAndTeammates:
             vp, prep_coop, [ButtonTap(GamepadButton.DPAD_RIGHT)]
         )
         assert s_back_board.focus_zone == FocusZone.BOARD
+
+
+class TestPhase2InplaceTurnConfirmStrategyAndLockSync:
+    """阶段二专项验证：棋盘原地回环转向、回合确认弹窗、右侧策略头像与手动锁层槽数同步。"""
+
+    def test_board_operator_inplace_loopback_reorient_and_fallback(self) -> None:
+        """需求 1：棋盘干员同格二次按 A 执行回环拖拽进入 AIMING_DIRECTION 完成原地转向，右列向左偏移防越界。"""
+        dispatcher, hid, rumbles, keymap, layout, vp = _make_env()
+        board_mapper = PerspectiveBoardMapper(layout.board_quad)
+        prep = SceneDetectionResult(GameScene.BATTLE_PREP, 0.96, shop_open=False)
+
+        # 切到棋盘中心格（u <= 0.65 -> 正向偏移 dx > 0）
+        dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.RB)])
+        center_cell = (board_mapper.rows // 2, board_mapper.cols // 2)
+        center_norm = board_mapper.cell_center(*center_cell)
+        center_xy = vp.norm_to_screen(*center_norm)
+        expected_offset = max(36, int(round(vp.active_width * 0.035)))
+        expected_dx = -expected_offset if center_norm[0] > 0.65 else expected_offset
+
+        hid.clear()
+        snap_hold = dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.A)])
+        assert snap_hold.deploy_state == DeployState.HOLDING_UNIT
+        assert any(p.label == "原地转向" for p in snap_hold.prompts)
+
+        # 在同一棋盘格再按 A：不再 reset，而是调用 smooth_drag_loopback 并进入 AIMING_DIRECTION
+        snap_aim = dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.A)])
+        assert snap_aim.deploy_state == DeployState.AIMING_DIRECTION
+        assert snap_aim.aim_origin_norm == pytest.approx(center_norm)
+        assert hid.calls == [
+            ("smooth_drag_loopback", center_xy, (expected_dx, 0), True)
+        ]
+
+        # 推摇杆向上确认朝向
+        hid.clear()
+        snap_done = dispatcher.process_tick(
+            vp, prep, [StickMotion("left", 0.0, 0.90, 0.0, -30.0)]
+        )
+        expected_flick = max(48, int(round(vp.active_width * keymap.flick_distance_ratio)))
+        assert snap_done.deploy_state == DeployState.IDLE
+        assert hid.calls == [("directional_flick", center_xy, "up", expected_flick)]
+
+        # 最右列干员（u > 0.65）原地转向：应向左偏移 dx < 0 防止拖出棋盘右边界
+        steps_to_rightmost = (board_mapper.cols - 1) - (board_mapper.cols // 2)
+        snap_rightmost = dispatcher.process_tick(
+            vp, prep, [ButtonTap(GamepadButton.DPAD_RIGHT)] * steps_to_rightmost
+        )
+        assert snap_rightmost.focus_zone == FocusZone.BOARD
+        right_cell = (board_mapper.rows // 2, board_mapper.cols - 1)
+        right_norm = board_mapper.cell_center(*right_cell)
+        assert right_norm[0] > 0.65
+        right_xy = vp.norm_to_screen(*right_norm)
+        hid.clear()
+        dispatcher.process_tick(
+            vp, prep, [ButtonTap(GamepadButton.A), ButtonTap(GamepadButton.A)]
+        )
+        assert hid.calls == [
+            ("smooth_drag_loopback", right_xy, (-expected_offset, 0), True)
+        ]
+
+        # 取消刚唤出的定朝向态，再验证按 B 可在 HOLDING_UNIT 态无点击取消原地抓取
+        dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.B)])
+        hid.clear()
+        dispatcher.process_tick(
+            vp, prep, [ButtonTap(GamepadButton.A), ButtonTap(GamepadButton.B)]
+        )
+        assert hid.calls == []
+        assert dispatcher.deploy_fsm.state == DeployState.IDLE
+
+        # 缺少 smooth_drag_loopback 的简化 HID 自动回退两段 smooth_drag
+        class MinimalDragHID:
+            def __init__(self) -> None:
+                self.calls: list[tuple[Any, ...]] = []
+
+            def click(self, x: int, y: int, button: str = "left", hold_ms: int = 30) -> None:
+                self.calls.append(("click", x, y, button))
+
+            def smooth_drag(
+                self,
+                start: tuple[int, int],
+                end: tuple[int, int],
+                duration_ms: int = 110,
+                steps: int = 10,
+                release_at_end: bool = True,
+            ) -> None:
+                self.calls.append(("smooth_drag", start, end, release_at_end))
+
+            def directional_flick(
+                self, origin: tuple[int, int], direction: str, distance_px: int
+            ) -> None:
+                self.calls.append(("directional_flick", origin, direction, distance_px))
+
+            def tap_key(self, key_name: str, hold_ms: int = 30) -> None:
+                self.calls.append(("tap_key", key_name))
+
+        min_hid = MinimalDragHID()
+        min_disp = ControlDispatcher(keymap, layout, min_hid)  # type: ignore[arg-type]
+        min_disp.process_tick(vp, prep, [ButtonTap(GamepadButton.RB)])
+        min_hid.calls.clear()
+        min_disp.process_tick(
+            vp, prep, [ButtonTap(GamepadButton.A), ButtonTap(GamepadButton.A)]
+        )
+        assert min_disp.deploy_fsm.state == DeployState.AIMING_DIRECTION
+        wp_xy = (center_xy[0] + expected_dx, center_xy[1])
+        assert min_hid.calls == [
+            ("smooth_drag", center_xy, wp_xy, False),
+            ("smooth_drag", wp_xy, center_xy, True),
+        ]
+        assert len(rumbles) >= 3
+
+    def test_modal_confirm_dialog_navigation_and_shortcuts(self) -> None:
+        """需求 2：回合结束未用完资金/策略确认弹窗（MODAL_CONFIRM）导航、默认聚焦确认与快捷按键。"""
+        dispatcher, hid, _, _, layout, vp = _make_env()
+        prep = SceneDetectionResult(GameScene.BATTLE_PREP, 0.96, shop_open=False)
+        confirm = SceneDetectionResult(GameScene.MODAL_CONFIRM, 0.95, shop_open=False)
+
+        yes_pt = layout.buttons["confirm_yes"]
+        no_pt = layout.buttons["confirm_no"]
+        dont_pt = layout.buttons["confirm_dont_ask"]
+        yes_xy = vp.norm_to_screen(yes_pt.u, yes_pt.v, yes_pt.anchor)
+        no_xy = vp.norm_to_screen(no_pt.u, no_pt.v, no_pt.anchor)
+        dont_xy = vp.norm_to_screen(dont_pt.u, dont_pt.v, dont_pt.anchor)
+
+        # 在休整期触发开战（即使此前处于抓取态），视觉弹出 MODAL_CONFIRM 时立即无阻塞切入
+        dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.A)])
+        assert dispatcher.deploy_fsm.state == DeployState.HOLDING_UNIT
+        snap_confirm = dispatcher.process_tick(vp, confirm, [])
+        assert snap_confirm.scene == GameScene.MODAL_CONFIRM
+        assert snap_confirm.focus_zone == FocusZone.CONFIRM_DIALOG
+        assert snap_confirm.focus_label == "回合确认 · 确认"
+        assert snap_confirm.cursor_norm == pytest.approx((yes_pt.u, yes_pt.v))
+        assert snap_confirm.focus_polygon_norm == [
+            (0.50, 0.623),
+            (1.0, 0.623),
+            (1.0, 0.723),
+            (0.50, 0.723),
+        ]
+
+        # 左选取消、上选本局不再提示、按 A 勾选后焦点自动回移至确认
+        snap_left = dispatcher.process_tick(vp, confirm, [ButtonTap(GamepadButton.DPAD_LEFT)])
+        assert snap_left.focus_label == "回合确认 · 取消"
+        assert snap_left.focus_polygon_norm == [
+            (0.0, 0.623),
+            (0.50, 0.623),
+            (0.50, 0.723),
+            (0.0, 0.723),
+        ]
+
+        hid.clear()
+        snap_up = dispatcher.process_tick(vp, confirm, [ButtonTap(GamepadButton.DPAD_UP)])
+        assert snap_up.focus_label == "回合确认 · 本局不再提示"
+        snap_after_dont = dispatcher.process_tick(vp, confirm, [ButtonTap(GamepadButton.A)])
+        assert hid.calls == [("click", dont_xy[0], dont_xy[1], "left")]
+        assert snap_after_dont.focus_label == "回合确认 · 确认"
+
+        # 验证 B 直接点取消、START / RT+A 直接点确认、X 直接点本局不再提示
+        hid.clear()
+        dispatcher.process_tick(
+            vp,
+            confirm,
+            [
+                ButtonTap(GamepadButton.B),
+                ButtonTap(GamepadButton.START),
+                ChordTriggered(GamepadButton.RT, GamepadButton.A),
+                ButtonTap(GamepadButton.X),
+                ButtonHoldTriggered(GamepadButton.START),
+            ],
+        )
+        assert hid.calls == [
+            ("click", no_xy[0], no_xy[1], "left"),
+            ("click", yes_xy[0], yes_xy[1], "left"),
+            ("click", yes_xy[0], yes_xy[1], "left"),
+            ("click", dont_xy[0], dont_xy[1], "left"),
+            ("click", yes_xy[0], yes_xy[1], "left"),
+        ]
+
+    def test_strategy_avatar_spatial_nav_click_inspect_and_drag_targets(self) -> None:
+        """需求 5：右侧策略头像空间导航、RT+A 直接点击、X 查看说明、拖拽至棋盘/整备/商店与安全取消。"""
+        dispatcher, hid, _, _, layout, vp = _make_env(auto_toggle_shop=True)
+        board_mapper = PerspectiveBoardMapper(layout.board_quad)
+        bench_mapper = LinearZoneMapper(layout.bench_zone)
+        shop_open_mapper = LinearZoneMapper(
+            layout.resolve_shop_zone(LayoutViewState.SHOP_OPEN, slot_count=4)
+        )
+        av_pt = layout.buttons["strategy_avatar"]
+        ins_pt = layout.buttons["strategy_inspect"]
+        safe_pt = layout.buttons["safe_blank"]
+        av_xy = vp.norm_to_screen(av_pt.u, av_pt.v, av_pt.anchor)
+        ins_xy = vp.norm_to_screen(ins_pt.u, ins_pt.v, ins_pt.anchor)
+        safe_xy = vp.norm_to_screen(safe_pt.u, safe_pt.v, safe_pt.anchor)
+
+        prep = SceneDetectionResult(GameScene.BATTLE_PREP, 0.96, shop_open=False)
+        dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.RB)])  # -> BOARD
+
+        # 1. 从棋盘最右列按右跨入 FocusZone.STRATEGY
+        snap_st = dispatcher.process_tick(
+            vp, prep, [ButtonTap(GamepadButton.DPAD_RIGHT)] * board_mapper.cols
+        )
+        assert snap_st.focus_zone == FocusZone.STRATEGY
+        assert snap_st.focus_label == "右侧策略"
+
+        # 上进 TOP_INFO 右放大镜「查看本轮出怪」
+        snap_top = dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.DPAD_UP)])
+        assert snap_top.focus_zone == FocusZone.TOP_INFO
+        assert "查看本轮出怪" in snap_top.focus_label
+
+        # 回棋盘最右列 -> 右进 STRATEGY -> 下进 EQUIPMENT -> 上回棋盘 -> 右回 STRATEGY -> 左回棋盘最右列
+        dispatcher.process_tick(
+            vp,
+            prep,
+            [
+                ButtonTap(GamepadButton.DPAD_DOWN),
+                *[ButtonTap(GamepadButton.DPAD_RIGHT)] * board_mapper.cols,
+            ],
+        )
+        snap_eq = dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.DPAD_DOWN)])
+        assert snap_eq.focus_zone == FocusZone.EQUIPMENT
+
+        dispatcher.process_tick(
+            vp,
+            prep,
+            [
+                ButtonTap(GamepadButton.DPAD_UP),
+                *[ButtonTap(GamepadButton.DPAD_RIGHT)] * board_mapper.cols,
+            ],
+        )
+        snap_back_board = dispatcher.process_tick(
+            vp, prep, [ButtonTap(GamepadButton.DPAD_LEFT)]
+        )
+        assert snap_back_board.focus_zone == FocusZone.BOARD
+
+        # 回到 STRATEGY
+        dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.DPAD_RIGHT)])
+
+        # 2. STRATEGY 空闲态：RT+A 一键点击使用；X 点击左侧查看按钮（不刷新商店）；B 点安全空白关闭
+        hid.clear()
+        dispatcher.process_tick(
+            vp,
+            prep,
+            [
+                ChordTriggered(GamepadButton.RT, GamepadButton.A),
+                ButtonTap(GamepadButton.X),
+                ButtonTap(GamepadButton.B),
+            ],
+        )
+        assert hid.calls == [
+            ("click", av_xy[0], av_xy[1], "left"),
+            ("click", ins_xy[0], ins_xy[1], "left"),
+            ("click", safe_xy[0], safe_xy[1], "left"),
+        ]
+
+        # 3. 按 A 锁定 HOLDING_STRATEGY：按 B 无点击取消；二次按 A 直接点击使用
+        hid.clear()
+        snap_lock = dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.A)])
+        assert snap_lock.deploy_state == DeployState.HOLDING_STRATEGY
+        assert hid.calls == []
+        snap_cancel = dispatcher.process_tick(vp, prep, [ButtonTap(GamepadButton.B)])
+        assert snap_cancel.deploy_state == DeployState.IDLE
+        assert hid.calls == []
+
+        dispatcher.process_tick(
+            vp, prep, [ButtonTap(GamepadButton.A), ButtonTap(GamepadButton.A)]
+        )
+        assert hid.calls == [("click", av_xy[0], av_xy[1], "left")]
+        assert dispatcher.deploy_fsm.state == DeployState.IDLE
+
+        # 4. 锁定策略后经 LB/RB（STRATEGY -> BOARD -> BENCH -> SHOP）拖至棋盘干员格
+        hid.clear()
+        dispatcher.process_tick(
+            vp,
+            prep,
+            [
+                ButtonTap(GamepadButton.A),  # 锁定策略
+                ButtonTap(GamepadButton.RB),  # -> BOARD
+                ButtonTap(GamepadButton.A),  # 拖至棋盘干员释放
+            ],
+        )
+        assert len(hid.calls) == 1
+        assert hid.calls[0][0] == "smooth_drag"
+        assert hid.calls[0][1] == av_xy
+        assert dispatcher.deploy_fsm.state == DeployState.IDLE
+
+        # 5. 锁定策略后经 RB -> BOARD -> BENCH 拖至整备区干员槽
+        dispatcher.process_tick(
+            vp, prep, [ButtonTap(GamepadButton.DPAD_RIGHT)] * board_mapper.cols
+        )
+        hid.clear()
+        dispatcher.process_tick(
+            vp,
+            prep,
+            [
+                ButtonTap(GamepadButton.A),  # 锁定策略
+                ButtonTap(GamepadButton.RB),  # -> BOARD
+                ButtonTap(GamepadButton.RB),  # -> BENCH
+                ButtonTap(GamepadButton.A),  # 拖至整备槽释放
+            ],
+        )
+        bench0_xy = vp.norm_to_screen(*bench_mapper.slot_center(0))
+        assert hid.calls == [("smooth_drag", av_xy, bench0_xy, True)]
+
+        # 6. 锁定策略后经 RB 切至 SHOP（商店原为收起态，自动按 A 展开后从固定 strategy_avatar 拖向商店卡槽）
+        dispatcher.process_tick(
+            vp,
+            prep,
+            [
+                ButtonTap(GamepadButton.RB),  # BENCH -> BOARD
+                *[ButtonTap(GamepadButton.DPAD_RIGHT)] * board_mapper.cols,  # -> STRATEGY
+            ],
+        )
+        assert dispatcher.shop_open is False
+        hid.clear()
+        snap_shop_used = dispatcher.process_tick(
+            vp,
+            prep,
+            [
+                ButtonTap(GamepadButton.A),   # 锁定策略
+                ButtonTap(GamepadButton.LB),  # 循环回 SHOP 并自动按 A 展开商店
+                ButtonTap(GamepadButton.A),   # 从固定右侧 strategy_avatar 拖至商店 0 号卡
+            ],
+        )
+        shop0_xy = vp.norm_to_screen(*shop_open_mapper.slot_center(0))
+        assert snap_shop_used.deploy_state == DeployState.IDLE
+        assert snap_shop_used.shop_open is True
+        assert hid.calls == [
+            ("tap_key", "a"),
+            ("smooth_drag", av_xy, shop0_xy, True),
+        ]
+
+        # 7. 作战期（BATTLE_COMBAT）从棋盘最右列也可按右进入 STRATEGY 并点击/查看说明
+        combat = SceneDetectionResult(GameScene.BATTLE_COMBAT, 0.94)
+        dispatcher.process_tick(vp, combat, [])
+        hid.clear()
+        snap_cb_st = dispatcher.process_tick(
+            vp,
+            combat,
+            [
+                *[ButtonTap(GamepadButton.DPAD_RIGHT)] * board_mapper.cols,
+                ButtonTap(GamepadButton.X),
+                ButtonTap(GamepadButton.A),
+            ],
+        )
+        assert snap_cb_st.focus_zone == FocusZone.STRATEGY
+        assert hid.calls == [
+            ("click", ins_xy[0], ins_xy[1], "left"),
+            ("click", av_xy[0], av_xy[1], "left"),
+        ]
+
+    def test_manual_lock_battle_prep_still_syncs_shop_slots_and_metadata(self) -> None:
+        """需求 6：手动锁层在 BATTLE_PREP 时仍实时同步 shop_open / shop_slot_count / unit_selected / covenant / teammates。"""
+        dispatcher, _, _, _, _, vp = _make_env()
+        prep4 = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.95, shop_open=False, shop_slot_count=4
+        )
+        dispatcher.process_tick(vp, prep4, [])
+
+        # Back 单击进入手动锁层（BATTLE_PREP）
+        snap_locked = dispatcher.process_tick(vp, prep4, [ButtonTap(GamepadButton.BACK)])
+        assert snap_locked.scene_locked_manual is True
+        assert snap_locked.scene == GameScene.BATTLE_PREP
+
+        # 锁层期间视觉检测到商店展开且升至 6 槽、3 羁绊、联机有队友 -> 必须实时同步！
+        prep6_coop = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=True,
+            shop_slot_count=6,
+            unit_selected=False,
+            covenant_count=3,
+            has_teammates=True,
+        )
+        snap_synced = dispatcher.process_tick(vp, prep6_coop, [])
+        assert snap_synced.scene_locked_manual is True
+        assert snap_synced.shop_open is True
+        assert snap_synced.view_state == LayoutViewState.SHOP_OPEN.value
+        assert dispatcher.shop_slot_count == 6
+        assert dispatcher.covenant_count == 3
+        assert dispatcher.has_teammates is True
+
+        # 锁层期间即使视觉短暂判为 UNKNOWN_FREE_CURSOR，场景仍锁在 BATTLE_PREP 不丢失
+        snap_hold = dispatcher.process_tick(
+            vp, SceneDetectionResult(GameScene.UNKNOWN_FREE_CURSOR, 0.0), []
+        )
+        assert snap_hold.scene == GameScene.BATTLE_PREP
+        assert snap_hold.scene_locked_manual is True

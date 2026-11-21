@@ -23,6 +23,7 @@ class DeployState(str, Enum):
     IDLE = "idle"
     HOLDING_UNIT = "holding_unit"
     HOLDING_EQUIP = "holding_equip"
+    HOLDING_STRATEGY = "holding_strategy"
     AIMING_DIRECTION = "aiming_direction"
 
 
@@ -30,11 +31,12 @@ class DeployState(str, Enum):
 class HoldingSource:
     """记录当前虚拟抓取源的位置与所属区域信息。"""
 
-    zone: Literal["bench", "board", "equipment"]
+    zone: Literal["bench", "board", "equipment", "strategy"]
     norm_pos: tuple[float, float]
     slot_index: int | None = None
     board_cell: tuple[int, int] | None = None
     clicked_in_game: bool = False
+    anchor: str = "center_16_9"
 
 
 class DeployFSM:
@@ -169,6 +171,80 @@ class DeployFSM:
         self._emit_rumble(0.20, 0.30, 40)
         return True
 
+    def _strategy_avatar_point(self) -> tuple[float, float, str]:
+        """返回右侧策略头像的固定 HUD 归一化坐标与锚点（绝不随 shop_open 缩放）。"""
+        pt = self._layout.buttons.get("strategy_avatar")
+        if pt is not None:
+            return (float(pt.u), float(pt.v), str(pt.anchor))
+        return (0.9605, 0.3243, "right_edge")
+
+    def pick_strategy(
+        self,
+        viewport: ViewportRect | None = None,
+        *,
+        source_norm: tuple[float, float] | None = None,
+        anchor: str | None = None,
+    ) -> bool:
+        """锁定右侧策略头像作为抓取源，等待原地再按 A 使用或拖拽至干员/商店释放。"""
+        _ = viewport
+        default_u, default_v, default_anchor = self._strategy_avatar_point()
+        su, sv = (
+            (float(source_norm[0]), float(source_norm[1]))
+            if source_norm is not None
+            else (default_u, default_v)
+        )
+        s_anchor = str(anchor) if anchor is not None else default_anchor
+
+        self._state = DeployState.HOLDING_STRATEGY
+        self._holding_source = HoldingSource(
+            zone="strategy",
+            norm_pos=(su, sv),
+            slot_index=None,
+            board_cell=None,
+            clicked_in_game=False,
+            anchor=s_anchor,
+        )
+        self._aim_origin_norm = None
+        self._aim_preview_dir = None
+        self._aim_cell = None
+
+        self._emit_rumble(0.22, 0.32, 45)
+        return True
+
+    def use_strategy_on_target(
+        self,
+        target_norm: tuple[float, float],
+        viewport: ViewportRect,
+        *,
+        target_anchor: str = "center_16_9",
+    ) -> bool:
+        """将右侧策略头像平滑拖拽至目标干员格、整备槽或商店卡槽完成释放。"""
+        if self._state != DeployState.HOLDING_STRATEGY or self._holding_source is None:
+            return False
+
+        # 起点严格取固定右侧 HUD 策略头像坐标，绝不受 shop_open 镜头缩放影响
+        su, sv, s_anchor = self._strategy_avatar_point()
+        start_xy = viewport.norm_to_screen(su, sv, anchor=s_anchor)
+        end_xy = viewport.norm_to_screen(
+            target_norm[0], target_norm[1], anchor=target_anchor
+        )
+        self._hid.smooth_drag(start_xy, end_xy, release_at_end=True)
+
+        self._emit_rumble(0.35, 0.55, 65)
+        self.reset()
+        return True
+
+    def click_strategy_in_place(self, viewport: ViewportRect) -> bool:
+        """原地左键直接点击右侧策略头像使用策略（兼容空闲态 RT+A 与抓取态二次按 A）。"""
+        su, sv, s_anchor = self._strategy_avatar_point()
+        sx, sy = viewport.norm_to_screen(su, sv, anchor=s_anchor)
+        self._hid.click(sx, sy, button="left")
+
+        self._emit_rumble(0.30, 0.45, 55)
+        if self._state == DeployState.HOLDING_STRATEGY:
+            self.reset()
+        return True
+
     def place_on_bench(
         self,
         target_norm: tuple[float, float],
@@ -203,21 +279,33 @@ class DeployFSM:
         target_norm: tuple[float, float],
         viewport: ViewportRect,
     ) -> bool:
-        """第一段部署：将当前抓取干员平滑拖拽至棋盘目标格，落位后进入定朝向态。"""
+        """第一段部署：将当前抓取干员拖拽至棋盘目标格（同格回环拖拽原地转向），落位后进入定朝向态。"""
         if self._state != DeployState.HOLDING_UNIT or self._holding_source is None:
             return False
 
-        # 目标为自身原棋盘格时视为取消选中
         if (
             self._holding_source.zone == "board"
             and self._holding_source.board_cell == target_cell
         ):
-            self.reset()
-            return True
-
-        start_xy = viewport.norm_to_screen(*self._holding_source.norm_pos)
-        end_xy = viewport.norm_to_screen(target_norm[0], target_norm[1])
-        self._hid.smooth_drag(start_xy, end_xy, release_at_end=True)
+            # 实机原地重新定朝向：原地按住左键微移出格越过拖拽阈值再拖回原格松开，唤出四向菱形定朝向轮盘
+            origin_xy = viewport.norm_to_screen(target_norm[0], target_norm[1])
+            offset_px = max(36, int(round(viewport.active_width * 0.035)))
+            dx = -offset_px if target_norm[0] > 0.65 else offset_px
+            loopback_fn = getattr(self._hid, "smooth_drag_loopback", None)
+            if callable(loopback_fn):
+                loopback_fn(origin_xy, (dx, 0), release_at_end=True)
+            else:
+                waypoint_xy = (origin_xy[0] + dx, origin_xy[1])
+                self._hid.smooth_drag(origin_xy, waypoint_xy, release_at_end=False)
+                self._hid.smooth_drag(waypoint_xy, origin_xy, release_at_end=True)
+        else:
+            start_xy = viewport.norm_to_screen(
+                self._holding_source.norm_pos[0],
+                self._holding_source.norm_pos[1],
+                anchor=self._holding_source.anchor,
+            )
+            end_xy = viewport.norm_to_screen(target_norm[0], target_norm[1])
+            self._hid.smooth_drag(start_xy, end_xy, release_at_end=True)
 
         self._state = DeployState.AIMING_DIRECTION
         self._aim_origin_norm = (float(target_norm[0]), float(target_norm[1]))

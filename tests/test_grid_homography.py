@@ -163,21 +163,6 @@ class TestNodeGraphMapper:
         assert mapper.nearest_node(0.81, 0.74) == "bottom_right"
         assert len(mapper.node_polygon("top_left")) == 4
 
-    def test_default_layout_menus_are_fully_navigable(self) -> None:
-        _, layout = ConfigLoader(use_user_override=False).load()
-        for node_map in (
-            layout.activity_hub_nodes,
-            layout.pre_match_nodes,
-            layout.squad_edit_nodes,
-            layout.settlement_nodes,
-        ):
-            mapper = NodeGraphMapper(node_map)
-            start = mapper.default_node_id()
-            assert start is not None
-            for direction in ("up", "down", "left", "right"):
-                target = mapper.navigate(start, direction)
-                assert target in node_map
-
 
 class TestPerspectiveBoardMapper:
     """验证 4 点透视棋盘单应性矩阵正逆变换、近大远小几何特征与退化校验。"""
