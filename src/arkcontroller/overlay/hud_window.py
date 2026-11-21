@@ -67,6 +67,8 @@ SCENE_DISPLAY_NAMES: dict[GameScene, str] = {
     GameScene.UNKNOWN_FREE_CURSOR: "自由鼠标",
 }
 
+_FREE_CURSOR_SYNONYM_LABELS: frozenset[str] = frozenset({"自由鼠标", "自由光标"})
+
 FACE_BUTTON_COLORS: dict[str, tuple[QColor, QColor]] = {
     "A": (COLOR_GREEN, QColor("#FFFFFF")),
     "B": (COLOR_RED, QColor("#FFFFFF")),
@@ -613,6 +615,36 @@ class HUDWindow(QWidget):
         painter.setPen(QPen(COLOR_AMBER))
         painter.drawText(hint_rect, Qt.AlignmentFlag.AlignCenter, hint)
 
+    @staticmethod
+    def _format_top_status_text(snapshot: HUDStateSnapshot) -> str:
+        """格式化顶部状态胶囊文案，消除自由鼠标与自由光标同义重复段。"""
+        scene_name = SCENE_DISPLAY_NAMES.get(snapshot.scene, snapshot.scene.value)
+        segments: list[str] = [f"PRTS // {scene_name}"]
+        focus_label = (snapshot.focus_label or "").strip()
+
+        if snapshot.scene == GameScene.UNKNOWN_FREE_CURSOR:
+            if focus_label and focus_label not in _FREE_CURSOR_SYNONYM_LABELS:
+                segments.append(focus_label)
+        else:
+            if focus_label and not (
+                snapshot.free_cursor_active and focus_label in _FREE_CURSOR_SYNONYM_LABELS
+            ):
+                segments.append(focus_label)
+            view_state = getattr(snapshot, "view_state", "normal")
+            if view_state == "shop_open":
+                segments.append("商店展开")
+            elif view_state == "unit_selected":
+                segments.append("角色详情缩放")
+            if snapshot.free_cursor_active:
+                segments.append("自由光标")
+
+        if snapshot.scene_locked_manual:
+            segments.append("手动锁层")
+        if snapshot.paused:
+            segments.append("已暂停")
+
+        return "  ·  ".join(segments)
+
     def _draw_top_status_capsule(
         self,
         painter: QPainter,
@@ -621,23 +653,7 @@ class HUDWindow(QWidget):
         snapshot: HUDStateSnapshot,
     ) -> None:
         """绘制顶部居中微型磨砂黑胶囊及可选 Toast 提示。"""
-        scene_name = SCENE_DISPLAY_NAMES.get(snapshot.scene, snapshot.scene.value)
-        segments: list[str] = [f"PRTS // {scene_name}"]
-        if snapshot.focus_label:
-            segments.append(snapshot.focus_label)
-        view_state = getattr(snapshot, "view_state", "normal")
-        if view_state == "shop_open":
-            segments.append("商店展开")
-        elif view_state == "unit_selected":
-            segments.append("角色详情缩放")
-        if snapshot.free_cursor_active:
-            segments.append("自由光标")
-        if snapshot.scene_locked_manual:
-            segments.append("手动锁层")
-        if snapshot.paused:
-            segments.append("已暂停")
-
-        text = "  ·  ".join(segments)
+        text = self._format_top_status_text(snapshot)
         painter.setFont(self._font_title)
         fm = QFontMetrics(self._font_title)
         text_w = fm.horizontalAdvance(text)
