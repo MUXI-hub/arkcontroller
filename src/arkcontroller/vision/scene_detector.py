@@ -32,27 +32,21 @@ DEFAULT_SEARCH_PADDING: float = 0.02
 
 
 class GameScene(str, Enum):
-    """卫戍协议全流程界面阶段枚举。"""
+    """卫戍协议局内界面阶段枚举（局外界面一律回退至 UNKNOWN_FREE_CURSOR）。"""
 
-    ACTIVITY_HUB = "activity_hub"
-    PRE_MATCH_SETUP = "pre_match_setup"
-    SQUAD_EDIT = "squad_edit"
     BATTLE_PREP = "battle_prep"
     MODAL_CHOICE = "modal_choice"
+    MODAL_CONFIRM = "modal_confirm"
     BATTLE_COMBAT = "battle_combat"
-    SETTLEMENT = "settlement"
     UNKNOWN_FREE_CURSOR = "unknown_free_cursor"
 
 
 # 各场景在 16:9 标准视口下默认的标志性归一化 ROI: (u, v, w, h)
 DEFAULT_SCENE_ROIS: dict[GameScene, tuple[float, float, float, float]] = {
-    GameScene.ACTIVITY_HUB: (0.03, 0.04, 0.28, 0.14),
-    GameScene.PRE_MATCH_SETUP: (0.68, 0.78, 0.28, 0.16),
-    GameScene.SQUAD_EDIT: (0.04, 0.04, 0.30, 0.12),
     GameScene.BATTLE_PREP: (0.86, 0.12, 0.13, 0.10),
     GameScene.MODAL_CHOICE: (0.20, 0.22, 0.60, 0.56),
+    GameScene.MODAL_CONFIRM: (0.15, 0.28, 0.70, 0.44),
     GameScene.BATTLE_COMBAT: (0.38, 0.02, 0.24, 0.10),
-    GameScene.SETTLEMENT: (0.06, 0.14, 0.34, 0.20),
 }
 
 # 休整期商店展开状态辅助模板默认 ROI: (u, v, w, h) —— 右侧冻结+刷新按钮带
@@ -447,6 +441,8 @@ class SceneDetector:
                     gray_lazy, hsv_lazy
                 )
                 has_teammates = self._detect_teammates_heuristic(gray_lazy, unit_selected=False)
+            elif best_scene == GameScene.MODAL_CONFIRM:
+                shop_open = False
             elif best_scene == GameScene.BATTLE_COMBAT:
                 shop_open = False
                 unit_selected = self._detect_unit_selected(frame, unit_template)
@@ -602,30 +598,192 @@ class SceneDetector:
         return True
 
     @staticmethod
-    def _measure_vertical_edge_strength(v_channel: np.ndarray, x: int) -> float:
-        """测量 1280x720 商店卡片高度带 (y=540..695) 在指定 x 处的垂直边界梯度强度。"""
+    def _measure_vertical_edge_strength(
+        v_channel: np.ndarray, x: int, half_win: int = 12
+    ) -> float:
+        """测量 1280x720 商店卡片高度带 (y=540..695) 在 ``x ± half_win`` 内的垂直边框局部峰值。
+
+        先沿垂直方向对每列梯度取均值再在 ``±half_win`` 窗口取列峰最大值：
+        - 放宽至 ``±12px`` 可彻底消除分辨率缩放/间距偏移导致的边界断崖衰减；
+        - 按列求均值再取峰仅响应贯穿卡高的完整竖直边框，空白托盘杂波响应极低（~1~2）。
+        """
         width = v_channel.shape[1]
-        x_start = max(0, x - 2)
-        x_end = min(width, x + 3)
+        x_start = max(0, x - half_win)
+        x_end = min(width, x + half_win + 1)
         if x_end - x_start < 2:
             return 0.0
         strip = v_channel[540:695, x_start:x_end].astype(np.float32)
-        return float(np.abs(np.diff(strip, axis=1)).max(axis=1).mean())
+        col_grad = np.abs(np.diff(strip, axis=1)).mean(axis=0)
+        if col_grad.size == 0:
+            return 0.0
+        return float(col_grad.max())
+
+    @staticmethod
+    def _measure_shop_item_bottom_bar_ratio(
+        hsv: np.ndarray,
+        x1: int,
+        x2: int,
+        *,
+        strict_blue_purple: bool = False,
+    ) -> float:
+        """测量商店底部装饰条带 (y=690..712) 属于商品卡专属高饱和蓝紫底条的像素占比。"""
+        bot = hsv[690:712, x1:x2]
+        if bot.size == 0:
+            return 0.0
+        if strict_blue_purple:
+            # 严格蓝紫商品卡底条（H∈[105..138]），避免误排除洋红/紫红高亮升级卡底部反光
+            mask = (
+                (bot[:, :, 0] >= 105)
+                & (bot[:, :, 0] <= 138)
+                & (bot[:, :, 1] >= 110)
+                & (bot[:, :, 2] >= 125)
+            )
+        else:
+            # 覆盖常规商品卡蓝紫/洋红底条，同时以 V>=115 排除左侧暗蓝托盘背景
+            mask = (
+                (bot[:, :, 0] >= 100)
+                & (bot[:, :, 0] <= 152)
+                & (bot[:, :, 1] >= 90)
+                & (bot[:, :, 2] >= 115)
+            )
+        return float(mask.mean())
 
     @classmethod
-    def _has_shop_upgrade_card(cls, v_channel: np.ndarray, x1: int, x2: int) -> bool:
-        """判断给定横向区间是否存在高亮「升级商店 (LEVEL)」卡片（兼容灰/亮可点双色）。"""
-        v_top = v_channel[535:635, x1:x2]
-        v_all = v_channel[535:695, x1:x2]
-        if v_top.size == 0 or v_all.size == 0:
+    def _has_shop_upgrade_card(cls, hsv: np.ndarray, x1: int, x2: int) -> bool:
+        """判断给定横向区间是否存在「升级商店 (LEVEL)」卡片（兼容灰态与紫红资金充足 ``[G]`` 高亮态）。
+
+        判定要素：
+        1. 上部 ``LEVEL`` 屏幕亮框 ``y=552..628`` 高亮像素占比达标；
+        2. 左右 ``±12px`` 搜索窗口均存在清晰垂直边框局部峰值；
+        3. 对于非贴边升级卡（``x1 >= 44``，即 4 槽与 5 槽升级卡），检查其左侧外部
+           ``[x1-40..x1-12]`` 底部 ``y=690..712`` 无商品卡连续底条（``< 0.20``），
+           从而在不误杀自带蓝紫底部发光渐层的紫红 ``[G]`` 升级卡的前提下，排除被更高槽数
+           商品卡右 71% 重叠覆盖的区域。
+        """
+        v_ch = hsv[:, :, 2]
+        v_level = v_ch[552:628, x1:x2]
+        v_all = v_ch[540:695, x1:x2]
+        if v_level.size == 0 or v_all.size == 0:
             return False
-        top_bright = float((v_top > 120).mean())
-        all_bright = float((v_all > 110).mean())
-        if top_bright < 0.25 or all_bright < 0.20:
+
+        level_bright = float((v_level > 120).mean())
+        all_bright = float((v_all > 105).mean())
+        if level_bright < 0.25 or all_bright < 0.20:
             return False
-        edge_l = cls._measure_vertical_edge_strength(v_channel, x1)
-        edge_r = cls._measure_vertical_edge_strength(v_channel, x2)
-        return edge_l >= 10.0 and edge_r >= 10.0
+
+        edge_l = cls._measure_vertical_edge_strength(v_ch, x1, half_win=12)
+        edge_r = cls._measure_vertical_edge_strength(v_ch, x2, half_win=12)
+        if edge_l < 9.0 or edge_r < 9.0:
+            return False
+
+        # 若 x1 >= 44 且紧邻左侧外部底部存在商品卡连续蓝紫底条，说明此处实际是更左商品卡的右 71%
+        if x1 >= 44:
+            out_left_bar = cls._measure_shop_item_bottom_bar_ratio(
+                hsv, max(0, x1 - 40), max(1, x1 - 12), strict_blue_purple=False
+            )
+            if out_left_bar >= 0.20:
+                return False
+
+        return True
+
+    @classmethod
+    def _has_shop_item_card(cls, hsv: np.ndarray, x1: int, x2: int) -> bool:
+        """判断给定横向区间是否存在商品卡槽（兼容在售商品卡与已售空 ``no info`` 暗蓝空槽）。
+
+        对左专属非重叠区 ``[x1+4..x1+40]`` 与右主区 ``[x1+48..x2-8]`` 施加独立分段约束，
+        彻底防止“升级卡左侧叠加亮地图垂直边缘 + 右侧 71% 升级卡重叠”引发 4 误判 5 / 5 误判 6。
+        """
+        v_ch = hsv[:, :, 2]
+        edge_l = cls._measure_vertical_edge_strength(v_ch, x1, half_win=12)
+        edge_r = cls._measure_vertical_edge_strength(v_ch, x2, half_win=12)
+        if edge_l < 8.0 or edge_r < 8.0:
+            return False
+
+        left_x1 = min(x2 - 1, x1 + 4)
+        left_x2 = min(x2, x1 + 40)
+        right_x1 = min(x2 - 1, x1 + 48)
+        right_x2 = max(right_x1 + 1, x2 - 8)
+        if left_x2 <= left_x1 or right_x2 <= right_x1:
+            return False
+
+        # 1. 在售商品卡指纹：左专属非重叠区与右主区底部 y=690..712 均具备高饱和蓝紫/紫红装饰底条
+        left_bar = cls._measure_shop_item_bottom_bar_ratio(
+            hsv, left_x1, left_x2, strict_blue_purple=False
+        )
+        right_bar = cls._measure_shop_item_bottom_bar_ratio(
+            hsv, right_x1, right_x2, strict_blue_purple=False
+        )
+        if left_bar >= 0.20 and right_bar >= 0.20:
+            return True
+
+        left_v = v_ch[555:680, left_x1:left_x2]
+        right_v = v_ch[555:680, right_x1:right_x2]
+        left_h = hsv[555:680, left_x1:left_x2]
+        right_h = hsv[555:680, right_x1:right_x2]
+        if left_v.size == 0 or right_v.size == 0:
+            return False
+
+        left_mean = float(left_v.mean())
+        right_mean = float(right_v.mean())
+        left_std = float(left_v.std())
+        right_std = float(right_v.std())
+        left_bright = float((left_v > 110).mean())
+        right_bright = float((right_v > 110).mean())
+
+        # 2. 在售商品卡指纹：左右两段均呈卡片亮面/边框，且 x1+44 处无低一阶升级卡的陡峭左外框断层
+        mid_seam_edge = cls._measure_vertical_edge_strength(v_ch, x1 + 44, half_win=8)
+        if mid_seam_edge < 38.0:
+            if (
+                left_bright >= 0.30
+                and right_bright >= 0.30
+                and edge_l >= 10.0
+                and edge_r >= 10.0
+            ):
+                return True
+            if (
+                left_mean >= 65.0
+                and right_mean >= 65.0
+                and edge_l >= 14.0
+                and edge_r >= 14.0
+            ):
+                return True
+
+        # 3. 已售空 NO INFO 暗蓝卡槽指纹：左右两段均须为暗蓝低亮均匀底（排除右段为亮升级卡的拼接区）
+        if (
+            22.0 <= left_mean <= 68.0
+            and 22.0 <= right_mean <= 68.0
+            and left_bright <= 0.12
+            and right_bright <= 0.12
+        ):
+            if left_std <= 22.0 and right_std <= 22.0:
+                return True
+            left_dk_blue = float(
+                (
+                    (left_h[:, :, 0] >= 95)
+                    & (left_h[:, :, 0] <= 145)
+                    & (left_h[:, :, 1] >= 35)
+                    & (left_h[:, :, 2] >= 18)
+                    & (left_h[:, :, 2] <= 85)
+                ).mean()
+            )
+            right_dk_blue = float(
+                (
+                    (right_h[:, :, 0] >= 95)
+                    & (right_h[:, :, 0] <= 145)
+                    & (right_h[:, :, 1] >= 35)
+                    & (right_h[:, :, 2] >= 18)
+                    & (right_h[:, :, 2] <= 85)
+                ).mean()
+            )
+            if (
+                left_std <= 32.0
+                and right_std <= 32.0
+                and left_dk_blue >= 0.50
+                and right_dk_blue >= 0.50
+            ):
+                return True
+
+        return False
 
     @classmethod
     def _detect_shop_slot_count_heuristic(cls, frame: np.ndarray) -> int | None:
@@ -633,9 +791,9 @@ class SceneDetector:
 
         依据实机精确布局：最右卡槽固定于 x=936..1090，卡片步距 162px，升级卡宽 109px
         紧贴最左商品卡左侧。升级时向左侧延伸：
-        - 4 槽：升级卡 x=332..441，卡槽 450..1090
-        - 5 槽：升级卡 x=170..279，卡槽 288..1090
-        - 6 槽：升级卡 x=8..117（或满级时第 6 张卡槽 x=126..280 存在左右边框），卡槽 126..1090
+        - 6 槽：升级卡 x=8..117，或无 5 槽升级卡时第 6 槽商品卡/已售空槽 x=126..280；
+        - 5 槽：升级卡 x=170..279，或无 4 槽升级卡时第 5 槽商品卡/已售空槽 x=288..442；
+        - 4 槽：升级卡 x=332..441（其余兜底默认 4 槽）。
         """
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         ready_pink = cls._measure_top_right_ready_pink_ratio(hsv)
@@ -645,23 +803,79 @@ class SceneDetector:
         if refresh_yellow < 0.25 or freeze_blue < 0.25:
             return None
 
-        v_ch = hsv[:, :, 2]
+        has_upg6 = cls._has_shop_upgrade_card(hsv, 8, 117)
+        has_upg5 = cls._has_shop_upgrade_card(hsv, 170, 279)
+        has_upg4 = cls._has_shop_upgrade_card(hsv, 332, 441)
 
-        # 1. 优先判定 6 槽（4~6 本）：最左升级卡 [8..117] 出现，或满级无升级卡但第 6 槽边框 [126..280] 出现
-        if cls._has_shop_upgrade_card(v_ch, 8, 117):
-            return 6
-        if (
-            cls._measure_vertical_edge_strength(v_ch, 126) >= 8.0
-            and cls._measure_vertical_edge_strength(v_ch, 280) >= 8.0
-        ):
+        # 1. 优先判定 6 槽（4~6 本）：最左升级卡 [8..117]，或满级无升级卡时第 6 槽商品卡/空槽 [126..280]
+        if has_upg6 or (not has_upg5 and cls._has_shop_item_card(hsv, 126, 280)):
             return 6
 
-        # 2. 次优判定 5 槽（2~3 本）：升级卡左移至 [170..279]
-        if cls._has_shop_upgrade_card(v_ch, 170, 279):
+        # 2. 次优判定 5 槽（2~3 本）：升级卡 [170..279]，或无 4 槽升级卡时第 5 槽商品卡/空槽 [288..442]
+        if has_upg5 or (not has_upg4 and cls._has_shop_item_card(hsv, 288, 442)):
             return 5
 
-        # 3. 默认 1 本 4 槽
+        # 3. 1 本 4 槽（升级卡 [332..441] 或兜底回退 4 槽）
+        if has_upg4:
+            return 4
         return 4
+
+    @staticmethod
+    def _detect_modal_confirm_heuristic(
+        gray: np.ndarray, hsv: np.ndarray
+    ) -> SceneDetectionResult | None:
+        """检测回合结束未用完资金/策略确认弹窗（中央全宽黑框 + 左下灰取消栏 + 右下暗红确认栏）。
+
+        须置于 ``_measure_top_right_ready_pink_ratio`` 之前执行，防止上方模糊背景残留的
+        粉红准备按钮将确认弹窗误判为 ``BATTLE_PREP``。
+        """
+        # 1. 中央全宽黑底确认框左右空白边缘：y=200..440, x∈[20..220]∪[1060..1260]
+        dark_band = np.concatenate(
+            [gray[200:440, 20:220], gray[200:440, 1060:1260]], axis=1
+        )
+        dark_ratio = float((dark_band < 34).mean())
+        dark_std = float(dark_band.std())
+        if dark_ratio < 0.88 or dark_std > 14.0:
+            return None
+
+        # 2. 左下灰色「☒ 取消」栏：y=455..515, x∈[20..240]∪[420..620]
+        cancel_hsv = np.concatenate(
+            [hsv[455:515, 20:240], hsv[455:515, 420:620]], axis=1
+        )
+        cancel_gray = np.concatenate(
+            [gray[455:515, 20:240], gray[455:515, 420:620]], axis=1
+        )
+        cancel_ratio = float(
+            (
+                (cancel_hsv[:, :, 1] <= 42)
+                & (cancel_hsv[:, :, 2] >= 38)
+                & (cancel_hsv[:, :, 2] <= 120)
+            ).mean()
+        )
+        cancel_std = float(cancel_gray.std())
+        if cancel_ratio < 0.82 or cancel_std > 16.0:
+            return None
+
+        # 3. 右下暗红「☑ 确认」栏：y=455..515, x∈[660..860]∪[1060..1240]
+        confirm_hsv = np.concatenate(
+            [hsv[455:515, 660:860], hsv[455:515, 1060:1240]], axis=1
+        )
+        confirm_red_ratio = float(
+            (
+                ((confirm_hsv[:, :, 0] <= 14) | (confirm_hsv[:, :, 0] >= 166))
+                & (confirm_hsv[:, :, 1] >= 95)
+                & (confirm_hsv[:, :, 2] >= 65)
+                & (confirm_hsv[:, :, 2] <= 215)
+            ).mean()
+        )
+        if confirm_red_ratio < 0.78:
+            return None
+
+        return SceneDetectionResult(
+            scene=GameScene.MODAL_CONFIRM,
+            confidence=0.95,
+            shop_open=False,
+        )
 
     def _detect_unit_selected(
         self, frame: np.ndarray, unit_template: _SceneTemplate | None
@@ -689,6 +903,11 @@ class SceneDetector:
             )
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # 0. 优先检测回合结束资金/策略确认弹窗（须位于粉红准备按钮检测之前，避免模糊背景误判）
+        confirm_result = self._detect_modal_confirm_heuristic(gray, hsv)
+        if confirm_result is not None:
+            return confirm_result
 
         # 1. 检测三选一/多人六选一策略与悬赏决策弹窗（优先实机暗底亮框检测，再兼容亮底合成卡片）
         modal_result = self._detect_modal_choice_heuristic(gray, hsv)

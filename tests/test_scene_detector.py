@@ -158,18 +158,22 @@ def _make_battle_combat_frame() -> np.ndarray:
 
 
 def test_enum_and_result_contract() -> None:
-    """校验 GameScene 枚举值与 SceneDetectionResult 冻结属性契约。"""
+    """校验精简后的局内 GameScene 枚举值（5 项）与 SceneDetectionResult 冻结属性契约。"""
     expected_values = {
-        "activity_hub",
-        "pre_match_setup",
-        "squad_edit",
         "battle_prep",
         "modal_choice",
+        "modal_confirm",
         "battle_combat",
-        "settlement",
         "unknown_free_cursor",
     }
     assert {scene.value for scene in GameScene} == expected_values
+
+    # 确认局外场景枚举已彻底移除
+    for removed_name in ("ACTIVITY_HUB", "PRE_MATCH_SETUP", "SQUAD_EDIT", "SETTLEMENT"):
+        assert not hasattr(GameScene, removed_name)
+
+    assert GameScene.MODAL_CONFIRM in DEFAULT_SCENE_ROIS
+    assert DEFAULT_SCENE_ROIS[GameScene.MODAL_CONFIRM] == (0.15, 0.28, 0.70, 0.44)
 
     res = SceneDetectionResult(scene=GameScene.BATTLE_PREP, confidence=0.95)
     assert res.shop_open is True
@@ -218,7 +222,7 @@ def test_template_matching_plain_png_without_json(tmp_path: Path) -> None:
     frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 25, dtype=np.uint8)
     badge = _draw_distinctive_badge(frame, x=80, y=50, w=220, h=110, seed=101)
 
-    png_path = tmp_path / f"{GameScene.ACTIVITY_HUB.value}.png"
+    png_path = tmp_path / f"{GameScene.BATTLE_COMBAT.value}.png"
     ok, buf = cv2.imencode(".png", badge)
     assert ok
     buf.tofile(str(png_path))
@@ -228,13 +232,13 @@ def test_template_matching_plain_png_without_json(tmp_path: Path) -> None:
 
     # 标准 1280x720 帧命中
     res = detector.detect(frame)
-    assert res.scene == GameScene.ACTIVITY_HUB
+    assert res.scene == GameScene.BATTLE_COMBAT
     assert res.confidence >= 0.95
 
     # 非 1280x720（如 1920x1080）帧自动缩放后依然高置信度命中
     frame_1080p = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_LINEAR)
     res_1080p = detector.detect(frame_1080p)
-    assert res_1080p.scene == GameScene.ACTIVITY_HUB
+    assert res_1080p.scene == GameScene.BATTLE_COMBAT
     assert res_1080p.confidence >= 0.85
 
     # 纯黑帧不会误命中已有模板
@@ -259,14 +263,14 @@ def test_calibrator_roi_metadata_and_spatial_isolation(tmp_path: Path) -> None:
     badge = _draw_distinctive_badge(source_frame, x=x, y=y, w=w, h=h, seed=303)
 
     saved_png = calibrator.capture_scene_template(
-        source_frame, GameScene.SQUAD_EDIT, roi_norm=roi_norm
+        source_frame, GameScene.BATTLE_COMBAT, roi_norm=roi_norm
     )
     saved_json = saved_png.with_suffix(".json")
     assert saved_png.exists()
     assert saved_json.exists()
 
     meta = json.loads(saved_json.read_text(encoding="utf-8"))
-    assert meta["scene"] == GameScene.SQUAD_EDIT.value
+    assert meta["scene"] == GameScene.BATTLE_COMBAT.value
     assert meta["frame_size"] == [STANDARD_WIDTH, STANDARD_HEIGHT]
     assert len(meta["roi_norm"]) == 4
     assert pytest.approx(meta["roi_norm"], abs=0.005) == list(roi_norm)
@@ -275,7 +279,7 @@ def test_calibrator_roi_metadata_and_spatial_isolation(tmp_path: Path) -> None:
     detector = SceneDetector(templates_dir=templates_dir, debounce_frames=1)
     assert detector.loaded_template_count == 1
     res_hit = detector.detect(source_frame)
-    assert res_hit.scene == GameScene.SQUAD_EDIT
+    assert res_hit.scene == GameScene.BATTLE_COMBAT
     assert res_hit.confidence >= 0.98
 
     # 将相同图案平移到遥远的右下角（超出原 ROI 搜索窗），验证不会被局部 ROI 误匹配
@@ -284,19 +288,21 @@ def test_calibrator_roi_metadata_and_spatial_isolation(tmp_path: Path) -> None:
     res_miss = detector.detect(relocated_frame)
     assert res_miss.scene == GameScene.UNKNOWN_FREE_CURSOR
 
-    # 测试使用默认 ROI（roi_norm=None）也能正常裁剪并识别
-    default_roi = DEFAULT_SCENE_ROIS[GameScene.SETTLEMENT]
+    # 测试使用 MODAL_CONFIRM 默认 ROI（roi_norm=None）也能正常裁剪并识别
+    default_roi = DEFAULT_SCENE_ROIS[GameScene.MODAL_CONFIRM]
     dx = int(round(default_roi[0] * STANDARD_WIDTH))
     dy = int(round(default_roi[1] * STANDARD_HEIGHT))
     dw = int(round(default_roi[2] * STANDARD_WIDTH))
     dh = int(round(default_roi[3] * STANDARD_HEIGHT))
-    settlement_frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 18, dtype=np.uint8)
-    _draw_distinctive_badge(settlement_frame, x=dx, y=dy, w=dw, h=dh, seed=707)
+    confirm_tpl_frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 18, dtype=np.uint8)
+    _draw_distinctive_badge(confirm_tpl_frame, x=dx, y=dy, w=dw, h=dh, seed=707)
 
-    calibrator.capture_scene_template(settlement_frame, GameScene.SETTLEMENT)
+    calibrator.capture_scene_template(confirm_tpl_frame, GameScene.MODAL_CONFIRM)
     detector.reload_templates()
     assert detector.loaded_template_count == 2
-    assert detector.detect(settlement_frame).scene == GameScene.SETTLEMENT
+    res_confirm_tpl = detector.detect(confirm_tpl_frame)
+    assert res_confirm_tpl.scene == GameScene.MODAL_CONFIRM
+    assert res_confirm_tpl.shop_open is False
 
     # 禁止为 UNKNOWN_FREE_CURSOR 采集模板
     with pytest.raises(ValueError):
@@ -862,33 +868,415 @@ def test_real_viewport_and_config_loader_integration(tmp_path: Path) -> None:
     sample_frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 24, dtype=np.uint8)
     badge = _draw_distinctive_badge(sample_frame, x=120, y=100, w=200, h=120, seed=555)
     calibrator.capture_scene_template(
-        sample_frame, GameScene.PRE_MATCH_SETUP, roi_norm=(120 / 1280, 100 / 720, 200 / 1280, 120 / 720)
+        sample_frame, GameScene.MODAL_CONFIRM, roi_norm=(120 / 1280, 100 / 720, 200 / 1280, 120 / 720)
     )
-    assert calibrator.list_installed_templates() == ["pre_match_setup"]
+    assert calibrator.list_installed_templates() == ["modal_confirm"]
 
     # 写入变体模板与损坏 JSON，验证不崩溃且仍能命中
-    variant_png = templates_dir / "activity_hub__alt.png"
+    variant_png = templates_dir / "battle_combat__alt.png"
     ok, encoded = cv2.imencode(".png", badge)
     assert ok
     encoded.tofile(str(variant_png))
-    (templates_dir / "activity_hub__alt.json").write_text("{corrupt json", encoding="utf-8")
+    (templates_dir / "battle_combat__alt.json").write_text("{corrupt json", encoding="utf-8")
 
     detector = SceneDetector(templates_dir=templates_dir, debounce_frames=1)
     assert detector.loaded_template_count == 2
     assert detector.detect(sample_frame).scene in (
-        GameScene.PRE_MATCH_SETUP,
-        GameScene.ACTIVITY_HUB,
+        GameScene.MODAL_CONFIRM,
+        GameScene.BATTLE_COMBAT,
     )
 
-    assert calibrator.delete_scene_template(GameScene.PRE_MATCH_SETUP) is True
-    assert calibrator.delete_scene_template(GameScene.PRE_MATCH_SETUP) is False
+    assert calibrator.delete_scene_template(GameScene.MODAL_CONFIRM) is True
+    assert calibrator.delete_scene_template(GameScene.MODAL_CONFIRM) is False
     detector.reload_templates()
     assert detector.loaded_template_count == 1
-    assert detector.detect(sample_frame).scene == GameScene.ACTIVITY_HUB
+    assert detector.detect(sample_frame).scene == GameScene.BATTLE_COMBAT
 
     # 非法 ROI 参数与无效帧均抛出 ValueError
     with pytest.raises(ValueError):
         calibrator.capture_scene_template(sample_frame, GameScene.BATTLE_PREP, roi_norm=(0.2, 0.2, 0.0, 0.1))
     with pytest.raises(ValueError):
         calibrator.capture_scene_template(np.array([], dtype=np.uint8), GameScene.BATTLE_PREP)
+
+
+# =====================================================================
+# 6. 阶段二专项：回合结束确认弹窗、鲁棒 4/5/6 槽商店与 mss 自愈测试
+# =====================================================================
+
+
+def _make_modal_confirm_frame(*, with_top_ready_pink: bool = True) -> np.ndarray:
+    """构造回合结束未用完资金/策略确认弹窗合成帧（含右上模糊粉红按钮残留）。"""
+    frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 55, dtype=np.uint8)
+    if with_top_ready_pink:
+        # 模拟弹窗后方模糊残留的右上角粉红「准备就绪」按钮，检验不会被误判为 BATTLE_PREP
+        cv2.rectangle(frame, (1120, 100), (1255, 140), (110, 70, 235), -1)
+
+    # 中央全宽黑底确认框 y=193..448
+    frame[193:449, :] = (16, 16, 16)
+    # 模拟中央白字提示与「☐ 本局不再提示」
+    cv2.rectangle(frame, (440, 290), (840, 345), (210, 210, 210), 2)
+    cv2.rectangle(frame, (560, 393), (717, 413), (200, 200, 200), 1)
+
+    # 左下灰色「☒ 取消」栏 y=449..520, x=0..639（HSV S≈8, V≈68）
+    frame[449:521, 0:640] = (68, 66, 66)
+    cv2.rectangle(frame, (275, 470), (365, 502), (235, 235, 235), 2)
+
+    # 右下暗红「☑ 确认」栏 y=449..520, x=640..1280（BGR (55, 55, 155) -> HSV H=0, S≈165, V=155）
+    frame[449:521, 640:1280] = (55, 55, 155)
+    cv2.rectangle(frame, (915, 470), (1005, 502), (240, 240, 240), 2)
+    return frame
+
+
+def test_heuristic_modal_confirm_detection_and_priority_over_prep(tmp_path: Path) -> None:
+    """验证回合结束确认弹窗高置信度命中 MODAL_CONFIRM，且优先级高于右上角粉红准备按钮。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    confirm_frame = _make_modal_confirm_frame(with_top_ready_pink=True)
+    res = detector.detect(confirm_frame)
+    assert res.scene == GameScene.MODAL_CONFIRM
+    assert res.confidence == 0.95
+    assert res.shop_open is False
+
+    # 破坏右下暗红确认栏（改为深灰）-> 不再命中 MODAL_CONFIRM，安全回退为休整期
+    broken_red = confirm_frame.copy()
+    broken_red[449:521, 640:1280] = (68, 66, 66)
+    res_no_red = detector.detect(broken_red)
+    assert res_no_red.scene == GameScene.BATTLE_PREP
+
+    # 破坏中央黑底确认框（改为高亮灰白）-> 不再命中 MODAL_CONFIRM
+    broken_dark = confirm_frame.copy()
+    broken_dark[193:449, :] = (165, 165, 165)
+    res_no_dark = detector.detect(broken_dark)
+    assert res_no_dark.scene != GameScene.MODAL_CONFIRM
+
+
+def _make_base_shop_frame() -> np.ndarray:
+    """构造带实机右上角粉红准备按钮与右侧黄刷新/蓝冻结双按钮的商店展开基础帧。"""
+    frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 38, dtype=np.uint8)
+    # 模拟左侧空白商店托盘的暗蓝底部渐变背景（V≈68，无垂直卡片边框）
+    frame[690:712, 0:1090] = (68, 32, 22)
+    cv2.rectangle(frame, (200, 120), (1040, 480), (88, 92, 98), -1)
+    cv2.rectangle(frame, (1120, 100), (1255, 140), (110, 70, 235), -1)
+    cv2.rectangle(frame, (1125, 430), (1260, 480), (30, 210, 240), -1)
+    cv2.rectangle(frame, (970, 430), (1105, 480), (230, 140, 20), -1)
+    return frame
+
+
+def _draw_magenta_upgrade_card(
+    frame: np.ndarray, x1: int, x2: int, *, glowing_blue_purple_bottom: bool = True
+) -> None:
+    """绘制资金充足紫红色高亮「升级 (LEVEL)」卡片（含真实蓝紫底部发光渐层与 [G] 键帽）。"""
+    # 卡片整体深紫灰底 + 亮边框
+    cv2.rectangle(frame, (x1, 535), (x2, 708), (115, 70, 125), -1)
+    # 上部洋红/紫红高亮 LEVEL 屏幕 y=552..628（BGR (215, 120, 235) -> HSV H≈146, V=235）
+    cv2.rectangle(frame, (x1 + 6, 552), (x2 - 6, 628), (215, 120, 235), -1)
+    if glowing_blue_purple_bottom:
+        # 还原 media_0.png 真实紫红高亮 [G] 升级卡底部高饱和蓝紫发光渐层（strict_blue_purple > 0.45）
+        cv2.rectangle(frame, (x1 + 2, 688), (x2 - 2, 712), (215, 95, 110), -1)
+    else:
+        cv2.rectangle(frame, (x1 + 4, 688), (x2 - 4, 712), (82, 76, 86), -1)
+    cv2.rectangle(frame, ((x1 + x2) // 2 - 14, 690), ((x1 + x2) // 2 + 14, 710), (225, 225, 225), -1)
+    cv2.rectangle(frame, (x1, 535), (x2, 708), (220, 175, 235), 2)
+
+
+def _draw_gray_upgrade_card(frame: np.ndarray, x1: int, x2: int) -> None:
+    """绘制灰态「升级 (LEVEL)」卡片（资金不足时无底部蓝紫发光渐层）。"""
+    cv2.rectangle(frame, (x1, 535), (x2, 708), (110, 110, 110), -1)
+    cv2.rectangle(frame, (x1 + 6, 552), (x2 - 6, 628), (215, 215, 215), -1)
+    cv2.rectangle(frame, (x1 + 4, 688), (x2 - 4, 712), (92, 92, 92), -1)
+    cv2.rectangle(frame, (x1, 535), (x2, 708), (200, 200, 200), 2)
+
+
+def _draw_bright_map_left_clutter(frame: np.ndarray, x1: int, x2: int) -> None:
+    """在升级卡左侧叠加亮地图背景与垂直纹理边缘（梯度远超 8），用于验证防误升槽数。"""
+    cv2.rectangle(frame, (x1, 535), (x2, 685), (155, 175, 195), -1)
+    mid = (x1 + x2) // 2
+    cv2.line(frame, (mid, 535), (mid, 695), (235, 240, 245), 3)
+    cv2.line(frame, (mid + 4, 535), (mid + 4, 695), (45, 50, 55), 3)
+
+
+def _draw_shop_item_card(frame: np.ndarray, x1: int, x2: int, *, sold_out: bool = False) -> None:
+    """绘制在售商品卡（含底部高饱和蓝紫装饰条）或已售空 no info 暗蓝空槽。"""
+    if sold_out:
+        # 均匀暗蓝底（BGR (58, 36, 20) -> HSV H≈108, S≈167, V=58）+ 细亮边框
+        cv2.rectangle(frame, (x1, 535), (x2, 708), (58, 36, 20), -1)
+        cv2.rectangle(frame, (x1, 535), (x2, 708), (125, 95, 70), 2)
+        # 底部极暗无蓝紫装饰条
+        frame[690:712, x1 + 2 : x2 - 2] = (20, 18, 16)
+    else:
+        # 亮面商品卡 + 底部高饱和蓝紫装饰横条 y=690..712（BGR (210, 75, 95) -> HSV H≈115, S≈164, V=210）
+        cv2.rectangle(frame, (x1, 535), (x2, 708), (188, 192, 202), -1)
+        cv2.rectangle(frame, (x1 + 2, 690), (x2 - 2, 712), (210, 75, 95), -1)
+        cv2.rectangle(frame, (x1, 535), (x2, 708), (235, 235, 240), 2)
+
+
+def test_heuristic_shop_slot_count_shifted_magenta_upgrade_and_empty_slots(
+    tmp_path: Path,
+) -> None:
+    """验证商店 4/5/6 槽对 ±10px 偏移、紫红高亮升级卡、已售空暗蓝槽及商品卡防误判的鲁棒性。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 1. 1 本 4 槽：紫红资金充足高亮升级卡 [332..441] + 4 张带蓝紫底条商品卡 -> 判 4 槽
+    f4 = _make_base_shop_frame()
+    _draw_magenta_upgrade_card(f4, 332, 441)
+    for sx in (450, 612, 774, 936):
+        _draw_shop_item_card(f4, sx, sx + 154, sold_out=False)
+    res4 = detector.detect(f4)
+    assert res4.scene == GameScene.BATTLE_PREP
+    assert res4.shop_open is True
+    assert res4.shop_slot_count == 4
+
+    # 2. 2~3 本 5 槽：整体向右偏移 +8px（旧 ±2px 逻辑必败），紫红高亮升级卡 + 第 5 槽在售商品卡 -> 判 5 槽
+    f5_shifted = _make_base_shop_frame()
+    _draw_magenta_upgrade_card(f5_shifted, 170 + 8, 279 + 8)
+    _draw_shop_item_card(f5_shifted, 288 + 8, 442 + 8, sold_out=False)
+    for sx in (450, 612, 774, 936):
+        _draw_shop_item_card(f5_shifted, sx, sx + 154, sold_out=False)
+    res5_shifted = detector.detect(f5_shifted)
+    assert res5_shifted.shop_slot_count == 5
+
+    # 3. 5 槽无升级卡场景：仅凭第 5 槽已售空 no info 暗蓝空槽（带 -7px 偏移）-> 依然稳判 5 槽
+    f5_empty = _make_base_shop_frame()
+    _draw_shop_item_card(f5_empty, 288 - 7, 442 - 7, sold_out=True)
+    for sx in (450, 612, 774, 936):
+        _draw_shop_item_card(f5_empty, sx, sx + 154, sold_out=False)
+    res5_empty = detector.detect(f5_empty)
+    assert res5_empty.shop_slot_count == 5
+
+    # 4. 6 本满级无升级卡且第 6 槽已售空 no info 暗蓝空槽（带 +6px 偏移）-> 依然稳判 6 槽
+    f6_empty = _make_base_shop_frame()
+    _draw_shop_item_card(f6_empty, 126 + 6, 280 + 6, sold_out=True)
+    for sx in (288, 450, 612, 774, 936):
+        _draw_shop_item_card(f6_empty, sx, sx + 154, sold_out=False)
+    res6_empty = detector.detect(f6_empty)
+    assert res6_empty.shop_slot_count == 6
+
+    # 5. 验证 _has_shop_upgrade_card 排除第 6 槽完整商品卡右 71% 重叠区，但放行自带蓝紫发光底部的紫红 [G] 升级卡
+    tmp_item6 = _make_base_shop_frame()
+    _draw_shop_item_card(tmp_item6, 126, 280, sold_out=False)
+    hsv_item6 = cv2.cvtColor(tmp_item6, cv2.COLOR_BGR2HSV)
+    assert SceneDetector._has_shop_upgrade_card(hsv_item6, 170, 279) is False
+
+    tmp_upg = _make_base_shop_frame()
+    _draw_magenta_upgrade_card(tmp_upg, 170, 279, glowing_blue_purple_bottom=True)
+    hsv_upg = cv2.cvtColor(tmp_upg, cv2.COLOR_BGR2HSV)
+    assert SceneDetector._has_shop_upgrade_card(hsv_upg, 170, 279) is True
+
+    # 6. 紫红高亮带蓝紫底部发光 [G] 升级卡在 4/5/6 槽任意位置（含紧邻 NO INFO 空槽）均准确识别
+    f5_mag_no_info = _make_base_shop_frame()
+    _draw_magenta_upgrade_card(f5_mag_no_info, 170, 279, glowing_blue_purple_bottom=True)
+    _draw_shop_item_card(f5_mag_no_info, 288, 442, sold_out=True)
+    for sx in (450, 612, 774, 936):
+        _draw_shop_item_card(f5_mag_no_info, sx, sx + 154, sold_out=False)
+    assert detector.detect(f5_mag_no_info).shop_slot_count == 5
+
+    f6_mag_no_info = _make_base_shop_frame()
+    _draw_magenta_upgrade_card(f6_mag_no_info, 8, 117, glowing_blue_purple_bottom=True)
+    _draw_shop_item_card(f6_mag_no_info, 126, 280, sold_out=True)
+    for sx in (288, 450, 612, 774, 936):
+        _draw_shop_item_card(f6_mag_no_info, sx, sx + 154, sold_out=False)
+    assert detector.detect(f6_mag_no_info).shop_slot_count == 6
+
+    # 7. 防误升槽数回归：4 槽与 5 槽升级卡左侧叠加亮地图背景与强垂直边缘（灰态 & 紫红高亮态均绝不误升）
+    for draw_upg in (_draw_gray_upgrade_card, _draw_magenta_upgrade_card):
+        f4_clutter = _make_base_shop_frame()
+        draw_upg(f4_clutter, 332, 441)
+        _draw_bright_map_left_clutter(f4_clutter, 260, 326)
+        for sx in (450, 612, 774, 936):
+            _draw_shop_item_card(f4_clutter, sx, sx + 154, sold_out=False)
+        hsv_4c = cv2.cvtColor(f4_clutter, cv2.COLOR_BGR2HSV)
+        assert SceneDetector._has_shop_upgrade_card(hsv_4c, 332, 441) is True
+        assert SceneDetector._has_shop_item_card(hsv_4c, 288, 442) is False
+        assert detector.detect(f4_clutter).shop_slot_count == 4
+
+        f5_clutter = _make_base_shop_frame()
+        draw_upg(f5_clutter, 170, 279)
+        _draw_bright_map_left_clutter(f5_clutter, 98, 164)
+        _draw_shop_item_card(f5_clutter, 288, 442, sold_out=True)
+        for sx in (450, 612, 774, 936):
+            _draw_shop_item_card(f5_clutter, sx, sx + 154, sold_out=False)
+        hsv_5c = cv2.cvtColor(f5_clutter, cv2.COLOR_BGR2HSV)
+        assert SceneDetector._has_shop_upgrade_card(hsv_5c, 170, 279) is True
+        assert SceneDetector._has_shop_item_card(hsv_5c, 126, 280) is False
+        assert detector.detect(f5_clutter).shop_slot_count == 5
+
+
+def test_screen_capture_mss_self_healing_and_black_pw_rejection() -> None:
+    """验证 UAC 初始化失败次帧自愈、运行中句柄失效重建以及拒绝全黑 PrintWindow 伪帧。"""
+    viewport = _DummyViewport(
+        hwnd=5555,
+        client_left=0,
+        client_top=0,
+        client_width=1280,
+        client_height=720,
+        active_left=0,
+        active_top=0,
+        active_width=1280,
+        active_height=720,
+        is_foreground=True,
+    )
+
+    # (A) 首帧 mss.mss() 抛异常（模拟 UAC 安全桌面切换），次帧自动恢复并成功产出画面
+    call_count = 0
+    recovered_event = threading.Event()
+    closed_instances: list[MagicMock] = []
+
+    def _uac_recovery_factory() -> MagicMock:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("UAC secure desktop GDI unavailable")
+        inst = MagicMock()
+
+        def _grab(_monitor: dict[str, int]) -> np.ndarray:
+            recovered_event.set()
+            return np.full((720, 1280, 4), 145, dtype=np.uint8)
+
+        inst.grab.side_effect = _grab
+        inst.close.side_effect = lambda: closed_instances.append(inst)
+        return inst
+
+    with patch("arkcontroller.vision.screen_capture.mss.mss", side_effect=_uac_recovery_factory):
+        with ScreenCapture(enable_print_window_fallback=False) as cap:
+            cap.update_viewport(viewport)  # type: ignore[arg-type]
+            cap.start_async(fps=40.0)
+            assert recovered_event.wait(timeout=2.0), "后台线程未能在首帧 mss 失败后自动重建恢复"
+
+            deadline = time.monotonic() + 1.0
+            latest = None
+            while time.monotonic() < deadline:
+                latest = cap.get_latest_frame()
+                if latest is not None:
+                    break
+                time.sleep(0.01)
+
+            assert latest is not None
+            assert latest.shape == (STANDARD_HEIGHT, STANDARD_WIDTH, 3)
+            assert int(latest[0, 0, 0]) == 145
+            cap.stop_async()
+
+    assert call_count >= 2
+    assert len(closed_instances) == 1
+
+    # (B) 运行中 sct.grab() 句柄失效 -> 立即销毁旧实例，下一周期重建新实例恢复采样
+    runtime_instances: list[MagicMock] = []
+    runtime_closed: list[int] = []
+    rebuilt_event = threading.Event()
+
+    def _runtime_rebuild_factory() -> MagicMock:
+        idx = len(runtime_instances)
+        inst = MagicMock()
+        runtime_instances.append(inst)
+        inst.close.side_effect = lambda i=idx: runtime_closed.append(i)
+        if idx == 0:
+            inst.grab.side_effect = RuntimeError("GDI DC invalidated")
+        else:
+            def _ok_grab(_monitor: dict[str, int]) -> np.ndarray:
+                rebuilt_event.set()
+                return np.full((720, 1280, 4), 202, dtype=np.uint8)
+
+            inst.grab.side_effect = _ok_grab
+        return inst
+
+    with patch("arkcontroller.vision.screen_capture.mss.mss", side_effect=_runtime_rebuild_factory):
+        with ScreenCapture(enable_print_window_fallback=False) as cap:
+            cap.update_viewport(viewport)  # type: ignore[arg-type]
+            cap.start_async(fps=40.0)
+            assert rebuilt_event.wait(timeout=2.0), "后台线程未能在句柄异常后重建新 mss 实例"
+
+            deadline = time.monotonic() + 1.0
+            latest = None
+            while time.monotonic() < deadline:
+                latest = cap.get_latest_frame()
+                if latest is not None:
+                    break
+                time.sleep(0.01)
+
+            assert latest is not None
+            assert int(latest[0, 0, 0]) == 202
+            cap.stop_async()
+
+    assert len(runtime_instances) >= 2
+    assert 0 in runtime_closed and 1 in runtime_closed
+
+    # (C) 当 mss 失败且 PrintWindow 返回全黑伪帧（max == 0）时，必须返回 None 而非全黑帧
+    black_pw = np.zeros((STANDARD_HEIGHT, STANDARD_WIDTH, 3), dtype=np.uint8)
+    broken_sct = MagicMock()
+    broken_sct.grab.side_effect = RuntimeError("mss grab failed")
+
+    with patch("arkcontroller.vision.screen_capture.mss.mss", return_value=broken_sct):
+        with ScreenCapture(enable_print_window_fallback=True) as cap:
+            with patch.object(cap, "_grab_via_print_window", return_value=black_pw):
+                # 前台窗口与非前台窗口均不得返回全黑伪帧
+                assert cap.grab_frame(viewport) is None  # type: ignore[arg-type]
+                bg_vp = _DummyViewport(
+                    hwnd=5555,
+                    client_left=0,
+                    client_top=0,
+                    client_width=1280,
+                    client_height=720,
+                    active_left=0,
+                    active_top=0,
+                    active_width=1280,
+                    active_height=720,
+                    is_foreground=False,
+                )
+                assert cap.grab_frame(bg_vp) is None  # type: ignore[arg-type]
+
+
+def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
+    """无外部硬依赖的可选实机截图回归校验：若本机存在标定截图则验证 0 误判。"""
+    a7_up = Path(
+        r"C:\Users\MUXI\.gemini\antigravity\brain\a7e72e90-d260-48de-94e8-debc493ed124\.user_uploaded"
+    )
+    a7_dir = Path(
+        r"C:\Users\MUXI\.gemini\antigravity\brain\a7e72e90-d260-48de-94e8-debc493ed124"
+    )
+    old_sc = Path(
+        r"C:\Users\MUXI\.gemini\antigravity\brain\26ef9845-6d52-4d6e-925c-cbef8d7a9ccc\scratch"
+    )
+
+    cases: list[tuple[Path, GameScene, bool | None, int | None, int | None]] = [
+        (a7_up / "media_1795255173277_9cab756a.jpg", GameScene.MODAL_CONFIRM, False, None, None),
+        (a7_up / "media_1795255107638_886a641d.jpg", GameScene.UNKNOWN_FREE_CURSOR, None, None, None),
+        (a7_up / "media_1795249195269_5c024fc5.jpg", GameScene.MODAL_CHOICE, False, None, 3),
+        (a7_up / "media_1795250588564_ad5eab9e.jpg", GameScene.MODAL_CHOICE, False, None, 6),
+        (old_sc / "state1_normal.png", GameScene.BATTLE_PREP, False, None, None),
+        (old_sc / "state2_shop_open.png", GameScene.BATTLE_PREP, True, 4, None),
+        (a7_dir / "shop_6slot_verify.png", GameScene.BATTLE_PREP, True, 6, None),
+    ]
+
+    available = [c for c in cases if c[0].exists()]
+    if not available:
+        pytest.skip("本机无可选实机标定截图，跳过实机回归校验")
+
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+    for img_path, exp_scene, exp_shop_open, exp_slots, exp_choices in available:
+        raw = np.fromfile(str(img_path), dtype=np.uint8)
+        frame = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        assert frame is not None, f"无法读取实机截图: {img_path}"
+        res = detector.detect(frame)
+        assert res.scene == exp_scene, f"{img_path.name}: expected {exp_scene}, got {res}"
+        if exp_shop_open is not None:
+            assert res.shop_open is exp_shop_open, f"{img_path.name}: shop_open mismatch {res}"
+        if exp_slots is not None:
+            assert res.shop_slot_count == exp_slots, f"{img_path.name}: shop_slot_count mismatch {res}"
+        if exp_choices is not None:
+            assert res.choice_count == exp_choices, f"{img_path.name}: choice_count mismatch {res}"
+
+    # 额外可选校验：桌面实机截图 media_0.png 中带蓝紫底部发光的真实紫红 [G] 升级卡
+    media0_path = a7_dir / ".system_generated" / "steps" / "291" / "media_0.png"
+    if media0_path.exists():
+        m0_full = cv2.imdecode(np.fromfile(str(media0_path), dtype=np.uint8), cv2.IMREAD_COLOR)
+        if m0_full is not None and m0_full.shape[0] >= 956 and m0_full.shape[1] >= 1496:
+            m0_1280 = cv2.resize(
+                m0_full[147:956, 58:1496],
+                (STANDARD_WIDTH, STANDARD_HEIGHT),
+                interpolation=cv2.INTER_AREA,
+            )
+            hsv_m0 = cv2.cvtColor(m0_1280, cv2.COLOR_BGR2HSV)
+            assert SceneDetector._has_shop_upgrade_card(hsv_m0, 332, 441) is True
+            assert SceneDetector._has_shop_item_card(hsv_m0, 288, 442) is False
+            assert SceneDetector._has_shop_item_card(hsv_m0, 450, 604) is True
+
 

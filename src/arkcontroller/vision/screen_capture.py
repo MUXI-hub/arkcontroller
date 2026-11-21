@@ -114,6 +114,11 @@ def _setup_win32_gdi() -> tuple[Any, Any] | None:
         return None
 
 
+def _is_non_black_frame(frame: np.ndarray | None) -> bool:
+    """判断帧是否有效且非全黑伪帧（排除 Unity DX11 下 PrintWindow 返回全零画面的情况）。"""
+    return frame is not None and frame.size > 0 and int(frame.max()) > 0
+
+
 def _resize_to_standard_bgr(
     bgra_or_bgr: np.ndarray,
     target_width: int = TARGET_WIDTH,
@@ -216,32 +221,54 @@ class ScreenCapture:
         self, viewport: ViewportRect, sct: Any | None
     ) -> np.ndarray | None:
         """使用指定或线程局部的 ``mss`` 实例执行截图并在必要时回退 ``PrintWindow``。"""
+        frame, _ = self._grab_with_sct_checked(viewport, sct=sct, allow_mss=True)
+        return frame
+
+    def _grab_with_sct_checked(
+        self,
+        viewport: ViewportRect,
+        sct: Any | None,
+        *,
+        allow_mss: bool = True,
+    ) -> tuple[np.ndarray | None, bool]:
+        """执行截图并额外返回 ``mss`` 句柄是否因异常失效需要销毁重建。
+
+        若 ``PrintWindow`` 返回全黑伪帧（``max == 0``）且 ``mss`` 不可用或失败，
+        返回 ``None`` 而非全黑伪帧，避免污染下游场景识别器。
+        """
+        tried_pw = False
         # 当窗口被其他窗口遮挡（非前台）且开启了 PrintWindow 备选时，优先尝试 PrintWindow；
-        # 若部分 Unity/DirectX 窗口 PrintWindow 返回全黑帧，则继续尝试 mss 通道。
-        pw_fallback_candidate: np.ndarray | None = None
+        # 若 Unity/DirectX 窗口 PrintWindow 返回全黑帧，直接舍弃并尝试 mss 通道。
         if not viewport.is_foreground and self._enable_print_window_fallback and viewport.hwnd:
+            tried_pw = True
             pw_frame = self._grab_via_print_window(viewport)
-            if pw_frame is not None:
-                if int(pw_frame.max()) > 0:
-                    return pw_frame
-                pw_fallback_candidate = pw_frame
+            if _is_non_black_frame(pw_frame):
+                return (pw_frame, False)
 
-        mss_frame = self._grab_via_mss(viewport, sct=sct)
-        if mss_frame is not None:
-            return mss_frame
+        sct_broken = False
+        if allow_mss:
+            mss_frame, sct_broken = self._try_grab_via_mss(viewport, sct=sct)
+            if mss_frame is not None:
+                return (mss_frame, False)
 
-        if pw_fallback_candidate is not None:
-            return pw_fallback_candidate
+        if not tried_pw and self._enable_print_window_fallback and viewport.hwnd:
+            pw_frame = self._grab_via_print_window(viewport)
+            if _is_non_black_frame(pw_frame):
+                return (pw_frame, sct_broken)
 
-        if self._enable_print_window_fallback and viewport.hwnd:
-            return self._grab_via_print_window(viewport)
-
-        return None
+        return (None, sct_broken)
 
     def _grab_via_mss(
         self, viewport: ViewportRect, sct: Any | None = None
     ) -> np.ndarray | None:
         """使用 ``mss`` 截取桌面指定区域。"""
+        frame, _ = self._try_grab_via_mss(viewport, sct=sct)
+        return frame
+
+    def _try_grab_via_mss(
+        self, viewport: ViewportRect, sct: Any | None = None
+    ) -> tuple[np.ndarray | None, bool]:
+        """尝试通过 ``mss`` 截屏，返回 ``(frame, sct_broken)``。"""
         monitor = {
             "left": int(viewport.active_left),
             "top": int(viewport.active_top),
@@ -249,23 +276,24 @@ class ScreenCapture:
             "height": int(viewport.active_height),
         }
         if monitor["width"] <= 0 or monitor["height"] <= 0:
-            return None
+            return (None, False)
 
         try:
             active_sct = sct if sct is not None else self._get_thread_mss()
             raw = active_sct.grab(monitor)
             arr = np.asarray(raw, dtype=np.uint8)
-            return _resize_to_standard_bgr(
+            frame = _resize_to_standard_bgr(
                 arr,
                 target_width=self._target_width,
                 target_height=self._target_height,
             )
+            return (frame, False)
         except Exception:
-            logger.debug("mss 截取游戏视口失败，准备尝试备选通道", exc_info=True)
+            logger.debug("mss 截取游戏视口失败，准备销毁失效句柄并尝试备选通道", exc_info=True)
             if sct is None:
                 # 同步线程 mss 上下文若损坏则清理以便下次重建
                 self._close_thread_mss()
-            return None
+            return (None, True)
 
     def _grab_via_print_window(self, viewport: ViewportRect) -> np.ndarray | None:
         """使用 Win32 ``PrintWindow`` 非侵入式捕获被遮挡窗口客户区并裁剪 16:9 区域。"""
@@ -414,21 +442,50 @@ class ScreenCapture:
         self.close()
 
     def _capture_loop(self) -> None:
-        """后台守护线程主循环，线程内独立持有并释放 ``mss.mss()`` 实例。"""
+        """后台守护线程主循环，线程内独立持有、异常自愈并释放 ``mss.mss()`` 实例。"""
         sct: Any | None = None
-        try:
-            sct = mss.mss()
-        except Exception:
-            logger.warning("后台线程初始化 mss 失败，将仅使用备选方案", exc_info=True)
+        mss_init_warned = False
 
         try:
             while not self._stop_event.is_set():
                 t0 = time.perf_counter()
+
+                # 惰性初始化与 UAC/桌面切换后自动重试自愈，绝不让 sct 永久停留在 None
+                if sct is None:
+                    try:
+                        sct = mss.mss()
+                        if mss_init_warned:
+                            logger.info("后台线程 mss 上下文已自动重建恢复")
+                            mss_init_warned = False
+                    except Exception:
+                        sct = None
+                        if not mss_init_warned:
+                            logger.warning(
+                                "后台线程初始化 mss 失败，将在后续周期自动重试恢复",
+                                exc_info=True,
+                            )
+                            mss_init_warned = True
+                        else:
+                            logger.debug("后台线程重试初始化 mss 仍未就绪", exc_info=True)
+
                 with self._state_lock:
                     viewport = self._viewport
 
                 if viewport is not None and viewport.active_width > 0 and viewport.active_height > 0:
-                    frame = self._grab_with_sct(viewport, sct=sct)
+                    frame, sct_broken = self._grab_with_sct_checked(
+                        viewport,
+                        sct=sct,
+                        allow_mss=(sct is not None),
+                    )
+                    if sct_broken and sct is not None:
+                        try:
+                            sct.close()
+                        except Exception:
+                            logger.debug("关闭失效的后台 mss 实例时忽略异常", exc_info=True)
+                        finally:
+                            sct = None
+                        logger.warning("后台线程 mss 抓取异常，已销毁旧句柄并将在下一周期重建")
+
                     with self._state_lock:
                         # 仅当外部尚未清空 viewport 时才写回最新帧
                         if self._viewport is not None:
@@ -444,3 +501,4 @@ class ScreenCapture:
                     sct.close()
                 except Exception:
                     logger.debug("后台线程释放 mss 实例时忽略异常", exc_info=True)
+            self._close_thread_mss()
