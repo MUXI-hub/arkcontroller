@@ -2,6 +2,20 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-11-21
+
+### 新增与修复 (Added & Fixed)
+- **决策弹窗新增「二选一（`1x2`）」全链路适配 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 实机像素测绘并在 `configs/stronghold_layout_16_9.json` 与 `LayoutProfile` 新增 `choice_2_zone`（`start_u=0.3809, end_u=0.6477, v=0.5000, slot_w=0.2188, slot_h=0.3306`），`resolve_choice_card_center/size/confirm/polygon/toggle` 在 `choice_count == 2` 时精准适配二选一卡片、底部白色「确认选择」横条及右侧「收起」按钮（并兼容旧 JSON 缺省回退）。
+  - `SceneDetector._detect_real_modal_choice` 新增 `(C) 1x2` 二选一识别与底部白条选中索引感知；外围无第 3 卡判据采用按列垂直均值再取列峰（`mean(axis=0).max()`），免疫两翼压暗雪山/砖块斜边纹理干扰；同步强制二/三/六选一均需命中卫戍弹窗顶部青色标题/收起按钮特征。
+  - `ControlDispatcher` 更新决策弹窗焦点文案与导航，精准输出 `二选一 [1/2]` / `二选一 [2/2] · 待确认`，完整支持左右/`LB`/`RB` 循环切换、初始白条吸附、两段式 `A` / `RT+A` 确认、`B` 退回与按住 `LT` 收起看场。
+- **启动默认自由鼠标与局外界面 100% 防误判加固 (`arkcontroller.vision`)**：
+  - 新增 `_has_stronghold_in_game_chrome()` 局内双锚点门禁（左上深红退出门 + 顶部中央深黑状态栏），并将右上角准备按钮检测色相收窄至真实粉红区间 `(H >= 158) | (H <= 4)`，同时为亮卡弹窗回退补齐 `modal_chrome` 约束，彻底杜绝主界面、活动横幅、战前编队、干员列表与基建等局外画面误判切入局内吸附模式。
+- **自由鼠标物理光标无损同步与 HUD 顶部胶囊去重 (`arkcontroller.input` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - `VirtualHID` 新增 `get_cursor_pos()`（Win32 `GetCursorPos` 8 字节有符号 `POINT`，支持多屏负坐标，失败安全降级返回 `None`）。
+  - `ControlDispatcher` 在启动、窗口重新激活及自由鼠标模式下基于 `>= 2px` 变化门槛无损同步游戏客户区内真实物理光标位置（防止 `< 0.5px/tick` 微推左摇杆亚像素累加被整数回读抹零，副屏越界自动免疫；局内按 `LS` 切自由光标立即将真实指针落至当前吸附槽位）。
+  - `HUDWindow._format_top_status_text()` 清理同义重复段，`UNKNOWN_FREE_CURSOR` 场景清爽显示 `PRTS // 自由鼠标`，局内按 `LS` 切自由光标去重显示 `PRTS // 休整运营 · 自由光标`。
+
 ## [0.2.0] - 2026-11-21
 
 ### 新增、变更与修复 (Added, Changed & Fixed)

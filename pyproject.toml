@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arkcontroller"
-version = "0.2.0"
+version = "0.2.1"
 description = "《明日方舟》卫戍协议零注入 Xbox 手柄全流程操控系统"
 requires-python = ">=3.12"
 dependencies = [

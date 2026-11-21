@@ -160,8 +160,9 @@ Windows UAC 提权切回安全桌面瞬间可能导致后台线程首次初始�
 
 1. **局部 ROI 模板匹配层**：扫描 `assets/templates/` 中的 `<scene>.png` 与配套 `.json`（含 `roi_norm`、`threshold`、`search_padding`），在限定局部窗口内运行 `cv2.matchTemplate(..., cv2.TM_CCOEFF_NORMED)`（默认阈值 `0.82`），并过滤零方差纯色图像避免伪高分。
 2. **零模板 HSV 强特征与几何启发式层**：
+   - **局外 100% 防误判双锚点门禁**：`BATTLE_PREP` / `BATTLE_COMBAT` 启发式分支强制校验 `_has_stronghold_in_game_chrome()`（左上深红退出门 + 顶部中央深黑状态栏双锚点同时命中），并将右上准备按钮色相收窄至真实粉红区间 `(H >= 158) | (H <= 4)`，同时要求所有弹窗分支满足 `modal_chrome`（顶部青色标题带或右侧方形收起按钮），确保主界面、活动横幅、战前编队、干员列表与基建画面 100% 保持在 `UNKNOWN_FREE_CURSOR`；
    - **回合结束确认弹窗（`MODAL_CONFIRM`）**：优先于右上角准备按钮检测，联合判定中央全宽黑底左右边缘（`gray < 34` 且低方差）、左下灰色「取消」栏与右下暗红「确认」栏三特征，精准捕获未用完资金/策略确认窗；
-   - **决策弹窗（`MODAL_CHOICE`）**：基于 Sobel 垂直卡片边框梯度与白色「确认选择」底条检测，零模板区分单人 `1x3` 三选一与多人 `2x3` 六选一并追踪已选中索引；
+   - **自适应决策弹窗（`MODAL_CHOICE`：`1x2` / `1x3` / `2x3`）**：基于 Sobel 垂直卡片边框梯度与白色「确认选择」底条检测，按 `6 选一 -> 3 选一 -> 2 选一` 顺序零模板区分多人 `2x3` 六选一、单人 `1x3` 三选一与 `1x2` 二选一并实时追踪已选中索引；其中二选一两翼外围检测采用按列垂直均值再取列峰（`mean(axis=0).max()`），免疫压暗雪山/砖块斜边纹理背景干扰；
    - **休整运营与 4/5/6 槽鲁棒识别（`BATTLE_PREP`）**：通过右上角粉红准备按钮、展开商店右侧黄色刷新 + 蓝/青冻结双态色块、左侧角色详情青蓝血条判别 `shop_open` 与 `unit_selected`；商店栏位检测采用 `±12px` 垂直边框峰值搜索，兼容灰态与自带蓝紫底部发光渐层的紫红高亮 `[G]` 升级卡，并对商品卡左专属非重叠区与右主区施加独立分段约束（兼容已售空 `NO INFO` 暗蓝空槽），杜绝亮地图背景下 4 误判 5 / 5 误判 6；同时实时检测顶部居中对称羁绊图标数量（`0~9`）及多人左侧队友头像。
 3. **连续帧防抖与不打断保护**：连续 `debounce_frames = 2` 帧一致后切换稳定场景；干员/装备/策略抓取与定朝向期间不强行切层。即便用户通过 `Back` 键处于**手动锁层（`BATTLE_PREP`）**，只要视觉同为 `BATTLE_PREP`，`ControlDispatcher` 依然持续同步 `shop_open`、`shop_slot_count`、`unit_selected`、`covenant_count` 与 `has_teammates`。
 
@@ -198,7 +199,7 @@ stateDiagram-v2
 ### 6.2 组合键抑制与防误触机制（`GestureEngine`）
 
 - **径向缩放死区（Radial Scaled Deadzone）**：对摇杆二维矢量模长 $r = \sqrt{x^2 + y^2}$ 应用平滑死区重映射，消除十字轴吸附伪影与漂移；
-- **三次方双速光标积分**：$\Delta p = \text{sign}(v) \cdot |v|^{\gamma} \cdot V_{\max} \cdot \Delta t$（默认 $\gamma = 2.2, V_{\max} = 1400\text{ px/s}$），配合亚像素余量累加器实现极低速 1 像素级精调与满推高速跨屏；
+- **三次方双速光标积分与物理鼠标无损同步**：$\Delta p = \text{sign}(v) \cdot |v|^{\gamma} \cdot V_{\max} \cdot \Delta t$（默认 $\gamma = 2.2, V_{\max} = 1400\text{ px/s}$），配合亚像素余量累加器实现极低速 1 像素级精调与满推高速跨屏；自由鼠标模式下通过 `VirtualHID.get_cursor_pos()` 与 `>= 2px` 变化门槛同步窗口内真实物理鼠标位置（启动/重回前台/手移物理鼠标立即跟手，同时不抹零 `< 0.5px/tick` 慢速微推摇杆的亚像素累加，副屏越界自动免疫）；
 - **组合键消耗标记**：当 `LT`、`RT`、`Back` 与另一按键组成 Chord（如 `LT + X`、`Back + Start`）并触发后，本次按下周期自动屏蔽修饰键与子键松开时的单独 Tap/Hold 误触发；
 - **长按防误触进度反馈**：休整期按住 `Start` 时实时向 HUD 推送 `ButtonHoldProgress(0.0 ~ 1.0)` 渲染进度环，达到 `ready_hold_ms`（默认 `350ms`）才触发准备开战，中途松开立即归零取消。
 
