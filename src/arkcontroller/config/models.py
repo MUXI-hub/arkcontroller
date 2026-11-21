@@ -400,6 +400,100 @@ class LinearZone:
 SlotZoneConfig = LinearZone
 
 
+@dataclass
+class SymmetricCovenantZone:
+    """顶部栏下方居中对称分布的羁绊（盟约）图标区域配置。"""
+
+    center_u: float = 0.500
+    v: float = 0.118
+    step_u: float = 0.052
+    slot_w: float = 0.044
+    slot_h: float = 0.082
+    default_count: int = 5
+
+    def __post_init__(self) -> None:
+        self.center_u = _validate_unit_coord("covenant_zone.center_u", self.center_u)
+        self.v = _validate_unit_coord("covenant_zone.v", self.v)
+        self.step_u = _validate_positive_unit("covenant_zone.step_u", self.step_u)
+        self.slot_w = _validate_positive_unit("covenant_zone.slot_w", self.slot_w)
+        self.slot_h = _validate_positive_unit("covenant_zone.slot_h", self.slot_h)
+        self.default_count = int(self.default_count)
+        if self.default_count < 0:
+            raise ValueError(
+                f"SymmetricCovenantZone.default_count 必须 >= 0，当前值: {self.default_count}"
+            )
+
+    def slot_center(self, index: int, count: int | None = None) -> tuple[float, float]:
+        """按总羁绊数 count 计算居中对称的第 index 个图标归一化中心坐标 (u, v)。"""
+        n = self.default_count if count is None else int(count)
+        if n < 1 or not (0 <= index < n):
+            raise IndexError(f"羁绊槽位索引越界: index={index}, count={n}")
+        offset = (index - (n - 1) * 0.5) * self.step_u
+        u = max(0.0, min(1.0, self.center_u + offset))
+        return (float(u), float(self.v))
+
+    def slot_polygon(
+        self, index: int, count: int | None = None
+    ) -> list[tuple[float, float]]:
+        """返回第 index 个居中对称羁绊图标的顺时针 4 顶点归一化矩形。"""
+        cu, cv = self.slot_center(index, count=count)
+        hw = self.slot_w * 0.5
+        hh = self.slot_h * 0.5
+        return [
+            (max(0.0, cu - hw), max(0.0, cv - hh)),
+            (min(1.0, cu + hw), max(0.0, cv - hh)),
+            (min(1.0, cu + hw), min(1.0, cv + hh)),
+            (max(0.0, cu - hw), min(1.0, cv + hh)),
+        ]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "center_u": self.center_u,
+            "v": self.v,
+            "step_u": self.step_u,
+            "slot_w": self.slot_w,
+            "slot_h": self.slot_h,
+            "default_count": self.default_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> SymmetricCovenantZone:
+        return cls(
+            center_u=float(data.get("center_u", 0.500)),
+            v=float(data.get("v", 0.118)),
+            step_u=float(data.get("step_u", 0.052)),
+            slot_w=float(data.get("slot_w", 0.044)),
+            slot_h=float(data.get("slot_h", 0.082)),
+            default_count=int(data.get("default_count", 5)),
+        )
+
+
+def _default_choice_6_top_zone() -> LinearZone:
+    return LinearZone(
+        name="choice_6_top",
+        count=3,
+        start_u=0.2727,
+        start_v=0.3174,
+        end_u=0.7531,
+        end_v=0.3174,
+        slot_w=0.2016,
+        slot_h=0.3020,
+    )
+
+
+def _default_choice_6_bottom_zone() -> LinearZone:
+    return LinearZone(
+        name="choice_6_bottom",
+        count=3,
+        start_u=0.2727,
+        start_v=0.6931,
+        end_u=0.7531,
+        end_v=0.6931,
+        slot_w=0.2016,
+        slot_h=0.3020,
+    )
+
+
 def _parse_node_map(raw: Mapping[str, Any]) -> dict[str, NavNode]:
     """解析导航节点映射表。"""
     nodes: dict[str, NavNode] = {}
@@ -592,6 +686,9 @@ class LayoutProfile:
     board_quad: PerspectiveQuad
     buttons: dict[str, NormalizedPoint]
     view_overrides: dict[str, ViewLayoutOverride] = field(default_factory=dict)
+    choice_6_top_zone: LinearZone = field(default_factory=_default_choice_6_top_zone)
+    choice_6_bottom_zone: LinearZone = field(default_factory=_default_choice_6_bottom_zone)
+    covenant_zone: SymmetricCovenantZone = field(default_factory=SymmetricCovenantZone)
 
     def __post_init__(self) -> None:
         missing = [key for key in REQUIRED_BUTTON_KEYS if key not in self.buttons]
@@ -719,6 +816,97 @@ class LayoutProfile:
         new_v = max(0.0, min(1.0, base_pt.v - step_v * delta_slots))
         return NormalizedPoint(u=new_u, v=new_v, anchor=base_pt.anchor)
 
+    @staticmethod
+    def _linear_slot_center(zone: LinearZone, index: int, count: int) -> tuple[float, float]:
+        n = max(1, int(count))
+        idx = max(0, min(n - 1, int(index)))
+        if n == 1:
+            return (
+                (zone.start_u + zone.end_u) * 0.5,
+                (zone.start_v + zone.end_v) * 0.5,
+            )
+        t = idx / (n - 1)
+        return (
+            float(zone.start_u + t * (zone.end_u - zone.start_u)),
+            float(zone.start_v + t * (zone.end_v - zone.start_v)),
+        )
+
+    def resolve_choice_card_center(
+        self, index: int, choice_count: int = 3
+    ) -> tuple[float, float]:
+        """解析三选一（1x3）或多人六选一（2x3）第 index 张卡片的归一化中心坐标。"""
+        total = max(1, int(choice_count))
+        idx = max(0, min(total - 1, int(index)))
+        if total >= 5:
+            top_cols = max(1, (total + 1) // 2)
+            if idx < top_cols:
+                return self._linear_slot_center(self.choice_6_top_zone, idx, top_cols)
+            bot_cols = max(1, total - top_cols)
+            return self._linear_slot_center(
+                self.choice_6_bottom_zone, idx - top_cols, bot_cols
+            )
+        return self._linear_slot_center(self.choice_zone, idx, total)
+
+    def resolve_choice_card_size(
+        self, index: int, choice_count: int = 3
+    ) -> tuple[float, float]:
+        """解析三选一或六选一指定卡片的归一化宽高 (slot_w, slot_h)。"""
+        total = max(1, int(choice_count))
+        idx = max(0, min(total - 1, int(index)))
+        if total >= 5:
+            top_cols = max(1, (total + 1) // 2)
+            zone = (
+                self.choice_6_top_zone if idx < top_cols else self.choice_6_bottom_zone
+            )
+            return (zone.slot_w, zone.slot_h)
+        return (self.choice_zone.slot_w, self.choice_zone.slot_h)
+
+    def resolve_choice_confirm_point(
+        self, index: int, choice_count: int = 3
+    ) -> tuple[float, float]:
+        """解析卡片被选中后底部弹出的白色「确认选择」条归一化中心点击坐标。"""
+        cu, cv = self.resolve_choice_card_center(index, choice_count)
+        _, sh = self.resolve_choice_card_size(index, choice_count)
+        confirm_v = max(0.0, min(0.98, cv + sh * 0.505))
+        return (float(cu), float(confirm_v))
+
+    def resolve_choice_card_polygon(
+        self, index: int, choice_count: int = 3
+    ) -> list[tuple[float, float]]:
+        """返回未确认阶段第 index 张决策卡片的 4 顶点归一化矩形。"""
+        cu, cv = self.resolve_choice_card_center(index, choice_count)
+        sw, sh = self.resolve_choice_card_size(index, choice_count)
+        hw, hh = sw * 0.5, sh * 0.5
+        return [
+            (cu - hw, cv - hh),
+            (cu + hw, cv - hh),
+            (cu + hw, cv + hh),
+            (cu - hw, cv + hh),
+        ]
+
+    def resolve_choice_confirm_polygon(
+        self, index: int, choice_count: int = 3
+    ) -> list[tuple[float, float]]:
+        """返回卡片选中后底部白色「确认选择」横条的 4 顶点归一化矩形。"""
+        cu, confirm_v = self.resolve_choice_confirm_point(index, choice_count)
+        sw, _ = self.resolve_choice_card_size(index, choice_count)
+        hw = sw * 0.51
+        hh = 0.034
+        return [
+            (cu - hw, confirm_v - hh),
+            (cu + hw, confirm_v - hh),
+            (cu + hw, confirm_v + hh),
+            (cu - hw, confirm_v + hh),
+        ]
+
+    def resolve_choice_toggle_point(
+        self, choice_count: int = 3
+    ) -> NormalizedPoint | None:
+        """解析右侧「收起/展开」查看战场按钮坐标（兼容单人三选一与多人六选一）。"""
+        if int(choice_count) >= 5 and "choice_toggle_eye_6" in self.buttons:
+            return self.buttons["choice_toggle_eye_6"]
+        return self.buttons.get("choice_toggle_eye")
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为完整 JSON 字典。"""
         data: dict[str, Any] = {
@@ -730,6 +918,9 @@ class LayoutProfile:
             "bench_zone": self.bench_zone.to_dict(),
             "equip_zone": self.equip_zone.to_dict(),
             "choice_zone": self.choice_zone.to_dict(),
+            "choice_6_top_zone": self.choice_6_top_zone.to_dict(),
+            "choice_6_bottom_zone": self.choice_6_bottom_zone.to_dict(),
+            "covenant_zone": self.covenant_zone.to_dict(),
             "board_quad": self.board_quad.to_dict(),
             "buttons": {k: v.to_dict() for k, v in self.buttons.items()},
         }
@@ -745,6 +936,9 @@ class LayoutProfile:
             k: (v if isinstance(v, NormalizedPoint) else NormalizedPoint.from_dict(v))
             for k, v in buttons_raw.items()
         }
+        raw_c6_top = data.get("choice_6_top_zone")
+        raw_c6_bot = data.get("choice_6_bottom_zone")
+        raw_cov = data.get("covenant_zone")
         return cls(
             activity_hub_nodes=_parse_node_map(data["activity_hub_nodes"]),
             pre_match_nodes=_parse_node_map(data["pre_match_nodes"]),
@@ -777,6 +971,33 @@ class LayoutProfile:
             ),
             buttons=buttons,
             view_overrides=_parse_view_overrides(data.get("view_overrides")),
+            choice_6_top_zone=(
+                raw_c6_top
+                if isinstance(raw_c6_top, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_c6_top)
+                    if isinstance(raw_c6_top, Mapping)
+                    else _default_choice_6_top_zone()
+                )
+            ),
+            choice_6_bottom_zone=(
+                raw_c6_bot
+                if isinstance(raw_c6_bot, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_c6_bot)
+                    if isinstance(raw_c6_bot, Mapping)
+                    else _default_choice_6_bottom_zone()
+                )
+            ),
+            covenant_zone=(
+                raw_cov
+                if isinstance(raw_cov, SymmetricCovenantZone)
+                else (
+                    SymmetricCovenantZone.from_dict(raw_cov)
+                    if isinstance(raw_cov, Mapping)
+                    else SymmetricCovenantZone()
+                )
+            ),
         )
 
 

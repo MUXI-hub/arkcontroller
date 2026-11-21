@@ -19,6 +19,7 @@ from arkcontroller.config.models import (
     NormalizedPoint,
     NormalizedRect,
     PerspectiveQuad,
+    SymmetricCovenantZone,
 )
 from arkcontroller.platform import uac
 from arkcontroller.platform.window_tracker import ViewportRect, WindowTracker
@@ -368,6 +369,29 @@ class TestConfigSystem:
 
         assert "shop_toggle" in layout.buttons
         assert "safe_blank" in layout.buttons
+        assert "choice_toggle_eye_6" in layout.buttons
+        # 验证安全空白区已移至右侧策略头像正下方安全带，绝不落入底部商店卡牌区
+        assert layout.buttons["safe_blank"].u >= 0.90
+        assert 0.39 <= layout.buttons["safe_blank"].v <= 0.50
+        # 验证单人三选一与多人六选一卡片及底部白色确认条几何关系
+        c3_center = layout.resolve_choice_card_center(0, 3)
+        c3_confirm = layout.resolve_choice_confirm_point(0, 3)
+        assert c3_confirm[0] == pytest.approx(c3_center[0])
+        assert c3_confirm[1] == pytest.approx(0.674, abs=0.006)
+        c6_top_confirm = layout.resolve_choice_confirm_point(1, 6)
+        c6_bot_confirm = layout.resolve_choice_confirm_point(4, 6)
+        assert c6_top_confirm[0] == pytest.approx(c6_bot_confirm[0])
+        assert c6_top_confirm[1] == pytest.approx(0.470, abs=0.006)
+        assert c6_bot_confirm[1] == pytest.approx(0.846, abs=0.006)
+        assert layout.resolve_choice_toggle_point(3) == layout.buttons["choice_toggle_eye"]
+        assert layout.resolve_choice_toggle_point(6) == layout.buttons["choice_toggle_eye_6"]
+        # 验证顶部下方居中对称羁绊坐标解算（奇数与偶数）
+        assert isinstance(layout.covenant_zone, SymmetricCovenantZone)
+        assert layout.covenant_zone.slot_center(0, count=1)[0] == pytest.approx(0.50)
+        u_even_0, _ = layout.covenant_zone.slot_center(0, count=2)
+        u_even_1, _ = layout.covenant_zone.slot_center(1, count=2)
+        assert (u_even_0 + u_even_1) * 0.5 == pytest.approx(0.50)
+        assert u_even_1 - u_even_0 == pytest.approx(layout.covenant_zone.step_u)
         assert "shop_open" in layout.view_overrides
         assert "unit_selected" in layout.view_overrides
         assert layout.resolve_board_quad("shop_open") != layout.board_quad
