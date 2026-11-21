@@ -14,6 +14,7 @@ from arkcontroller.config.models import (
     NormalizedRect,
     PerspectiveQuad,
     SlotZoneConfig,
+    SymmetricCovenantZone,
     ViewLayoutOverride,
     ViewportTransform,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "PerspectiveQuad",
     "REQUIRED_BUTTON_KEYS",
     "SlotZoneConfig",
+    "SymmetricCovenantZone",
     "VALID_ANCHORS",
     "VALID_LEFT_STICK_MODES",
     "ViewLayoutOverride",

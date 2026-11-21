@@ -65,13 +65,10 @@ from arkcontroller.vision.screen_capture import ScreenCapture
 COLOR_VIOLET = QColor("#C084FC")
 
 CALIBRATABLE_SCENES: tuple[GameScene, ...] = (
-    GameScene.ACTIVITY_HUB,
-    GameScene.PRE_MATCH_SETUP,
-    GameScene.SQUAD_EDIT,
     GameScene.BATTLE_PREP,
     GameScene.MODAL_CHOICE,
+    GameScene.MODAL_CONFIRM,
     GameScene.BATTLE_COMBAT,
-    GameScene.SETTLEMENT,
 )
 
 VIEW_STATE_DISPLAY_NAMES: dict[LayoutViewState, str] = {

@@ -27,7 +27,6 @@ class LayoutViewState(str, Enum):
 
 REQUIRED_BUTTON_KEYS: tuple[str, ...] = (
     "back",
-    "start_action",
     "shop_refresh",
     "shop_upgrade",
     "shop_freeze",
@@ -42,10 +41,11 @@ REQUIRED_BUTTON_KEYS: tuple[str, ...] = (
     "teammate_2",
     "teammate_3",
     "teammate_4",
-    "squad_skill_1",
-    "squad_skill_2",
-    "squad_skill_3",
-    "squad_module",
+    "strategy_avatar",
+    "strategy_inspect",
+    "confirm_no",
+    "confirm_yes",
+    "confirm_dont_ask",
 )
 
 
@@ -71,13 +71,14 @@ def _default_keyboard_shortcuts() -> dict[str, str]:
         "shop_toggle": "a",
         "shop_freeze": "s",
         "shop_refresh": "d",
+        "shop_upgrade": "g",
         "battle_ready": "c",
         "enemy_preview": "w",
         "sell_board": "x",
         "sell_bench": "x",
         "retreat_unit": "q",
         "covenant_panel": "",
-        "emote_wheel": "z",
+        "emote_wheel": "",
         "back": "esc",
         "pause_menu": "esc",
     }
@@ -91,15 +92,6 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "toggle_calibration": "BACK+START",
             "toggle_pause": "LT+BACK",
             "toggle_free_cursor": "LS",
-        },
-        "menu": {
-            "confirm": "A",
-            "back": "B",
-            "quick_squad": "X",
-            "quick_rewards": "Y",
-            "prev_tab": "LB",
-            "next_tab": "RB",
-            "start_action": "START",
         },
         "battle_prep": {
             "select_or_grab": "A",
@@ -124,6 +116,12 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "confirm_choice": "A",
             "fast_confirm_choice": "RT+A",
             "peek_board_hold": "LT",
+        },
+        "modal_confirm": {
+            "confirm": "A",
+            "cancel": "B",
+            "quick_confirm": "START",
+            "toggle_dont_ask": "X",
         },
         "lt_chords": {
             "covenant_panel": "LT+DPAD_LEFT",
@@ -400,18 +398,149 @@ class LinearZone:
 SlotZoneConfig = LinearZone
 
 
-def _parse_node_map(raw: Mapping[str, Any]) -> dict[str, NavNode]:
-    """解析导航节点映射表。"""
-    nodes: dict[str, NavNode] = {}
-    for key, val in raw.items():
-        if isinstance(val, NavNode):
-            nodes[key] = val
-        elif isinstance(val, Mapping):
-            node = NavNode.from_dict(val, node_id=key)
-            nodes[node.id] = node
-        else:
-            raise TypeError(f"导航节点 '{key}' 类型错误: {type(val).__name__}")
-    return nodes
+@dataclass
+class SymmetricCovenantZone:
+    """顶部栏下方居中对称分布的羁绊（盟约）图标区域配置。"""
+
+    center_u: float = 0.500
+    v: float = 0.118
+    step_u: float = 0.052
+    slot_w: float = 0.044
+    slot_h: float = 0.082
+    default_count: int = 5
+
+    def __post_init__(self) -> None:
+        self.center_u = _validate_unit_coord("covenant_zone.center_u", self.center_u)
+        self.v = _validate_unit_coord("covenant_zone.v", self.v)
+        self.step_u = _validate_positive_unit("covenant_zone.step_u", self.step_u)
+        self.slot_w = _validate_positive_unit("covenant_zone.slot_w", self.slot_w)
+        self.slot_h = _validate_positive_unit("covenant_zone.slot_h", self.slot_h)
+        self.default_count = int(self.default_count)
+        if self.default_count < 0:
+            raise ValueError(
+                f"SymmetricCovenantZone.default_count 必须 >= 0，当前值: {self.default_count}"
+            )
+
+    def slot_center(self, index: int, count: int | None = None) -> tuple[float, float]:
+        """按总羁绊数 count 计算居中对称的第 index 个图标归一化中心坐标 (u, v)。"""
+        n = self.default_count if count is None else int(count)
+        if n < 1 or not (0 <= index < n):
+            raise IndexError(f"羁绊槽位索引越界: index={index}, count={n}")
+        offset = (index - (n - 1) * 0.5) * self.step_u
+        u = max(0.0, min(1.0, self.center_u + offset))
+        return (float(u), float(self.v))
+
+    def slot_polygon(
+        self, index: int, count: int | None = None
+    ) -> list[tuple[float, float]]:
+        """返回第 index 个居中对称羁绊图标的顺时针 4 顶点归一化矩形。"""
+        cu, cv = self.slot_center(index, count=count)
+        hw = self.slot_w * 0.5
+        hh = self.slot_h * 0.5
+        return [
+            (max(0.0, cu - hw), max(0.0, cv - hh)),
+            (min(1.0, cu + hw), max(0.0, cv - hh)),
+            (min(1.0, cu + hw), min(1.0, cv + hh)),
+            (max(0.0, cu - hw), min(1.0, cv + hh)),
+        ]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "center_u": self.center_u,
+            "v": self.v,
+            "step_u": self.step_u,
+            "slot_w": self.slot_w,
+            "slot_h": self.slot_h,
+            "default_count": self.default_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> SymmetricCovenantZone:
+        return cls(
+            center_u=float(data.get("center_u", 0.500)),
+            v=float(data.get("v", 0.118)),
+            step_u=float(data.get("step_u", 0.052)),
+            slot_w=float(data.get("slot_w", 0.044)),
+            slot_h=float(data.get("slot_h", 0.082)),
+            default_count=int(data.get("default_count", 5)),
+        )
+
+
+def _default_choice_2_zone() -> LinearZone:
+    return LinearZone(
+        name="choice_2",
+        count=2,
+        start_u=0.3809,
+        start_v=0.5000,
+        end_u=0.6477,
+        end_v=0.5000,
+        slot_w=0.2188,
+        slot_h=0.3306,
+    )
+
+
+def _default_choice_6_top_zone() -> LinearZone:
+    return LinearZone(
+        name="choice_6_top",
+        count=3,
+        start_u=0.2473,
+        start_v=0.2931,
+        end_u=0.7816,
+        end_v=0.2931,
+        slot_w=0.2180,
+        slot_h=0.3306,
+    )
+
+
+def _default_choice_6_bottom_zone() -> LinearZone:
+    return LinearZone(
+        name="choice_6_bottom",
+        count=3,
+        start_u=0.2473,
+        start_v=0.7083,
+        end_u=0.7816,
+        end_v=0.7083,
+        slot_w=0.2180,
+        slot_h=0.3306,
+    )
+
+
+def _default_emote_top_zone() -> LinearZone:
+    return LinearZone(
+        name="emote_top",
+        count=3,
+        start_u=0.0582,
+        start_v=0.6771,
+        end_u=0.1996,
+        end_v=0.6771,
+        slot_w=0.0640,
+        slot_h=0.1120,
+    )
+
+
+def _default_emote_bottom_zone() -> LinearZone:
+    return LinearZone(
+        name="emote_bottom",
+        count=3,
+        start_u=0.0582,
+        start_v=0.8016,
+        end_u=0.1996,
+        end_v=0.8016,
+        slot_w=0.0640,
+        slot_h=0.1120,
+    )
+
+
+def _default_fallback_buttons() -> dict[str, NormalizedPoint]:
+    """返回回合确认弹窗、策略头像与交流面板的默认实测按钮锚点（兼容精简配置字典）。"""
+    return {
+        "strategy_avatar": NormalizedPoint(u=0.9605, v=0.3243, anchor="right_edge"),
+        "strategy_inspect": NormalizedPoint(u=0.9047, v=0.3236, anchor="right_edge"),
+        "confirm_no": NormalizedPoint(u=0.2496, v=0.6729, anchor="center_16_9"),
+        "confirm_yes": NormalizedPoint(u=0.7496, v=0.6729, anchor="center_16_9"),
+        "confirm_dont_ask": NormalizedPoint(u=0.4992, v=0.5597, anchor="center_16_9"),
+        "emote_panel_center": NormalizedPoint(u=0.1290, v=0.7400, anchor="left_edge"),
+    }
 
 
 @dataclass
@@ -579,12 +708,8 @@ def _parse_view_overrides(raw: Any) -> dict[str, ViewLayoutOverride]:
 
 @dataclass
 class LayoutProfile:
-    """卫戍协议全流程 16:9 归一化布局配置集。"""
+    """卫戍协议局内 16:9 归一化布局配置集。"""
 
-    activity_hub_nodes: dict[str, NavNode]
-    pre_match_nodes: dict[str, NavNode]
-    squad_edit_nodes: dict[str, NavNode]
-    settlement_nodes: dict[str, NavNode]
     shop_zone: LinearZone
     bench_zone: LinearZone
     equip_zone: LinearZone
@@ -592,6 +717,12 @@ class LayoutProfile:
     board_quad: PerspectiveQuad
     buttons: dict[str, NormalizedPoint]
     view_overrides: dict[str, ViewLayoutOverride] = field(default_factory=dict)
+    choice_2_zone: LinearZone = field(default_factory=_default_choice_2_zone)
+    choice_6_top_zone: LinearZone = field(default_factory=_default_choice_6_top_zone)
+    choice_6_bottom_zone: LinearZone = field(default_factory=_default_choice_6_bottom_zone)
+    emote_top_zone: LinearZone = field(default_factory=_default_emote_top_zone)
+    emote_bottom_zone: LinearZone = field(default_factory=_default_emote_bottom_zone)
+    covenant_zone: SymmetricCovenantZone = field(default_factory=SymmetricCovenantZone)
 
     def __post_init__(self) -> None:
         missing = [key for key in REQUIRED_BUTTON_KEYS if key not in self.buttons]
@@ -719,17 +850,135 @@ class LayoutProfile:
         new_v = max(0.0, min(1.0, base_pt.v - step_v * delta_slots))
         return NormalizedPoint(u=new_u, v=new_v, anchor=base_pt.anchor)
 
+    @staticmethod
+    def _linear_slot_center(zone: LinearZone, index: int, count: int) -> tuple[float, float]:
+        n = max(1, int(count))
+        idx = max(0, min(n - 1, int(index)))
+        if n == 1:
+            return (
+                (zone.start_u + zone.end_u) * 0.5,
+                (zone.start_v + zone.end_v) * 0.5,
+            )
+        t = idx / (n - 1)
+        return (
+            float(zone.start_u + t * (zone.end_u - zone.start_u)),
+            float(zone.start_v + t * (zone.end_v - zone.start_v)),
+        )
+
+    def resolve_choice_card_center(
+        self, index: int, choice_count: int = 3
+    ) -> tuple[float, float]:
+        """解析二选一（1x2）、三选一（1x3）或多人六选一（2x3）第 index 张卡片的归一化中心坐标。"""
+        total = max(1, int(choice_count))
+        idx = max(0, min(total - 1, int(index)))
+        if total == 2:
+            return self._linear_slot_center(self.choice_2_zone, idx, 2)
+        if total >= 5:
+            top_cols = max(1, (total + 1) // 2)
+            if idx < top_cols:
+                return self._linear_slot_center(self.choice_6_top_zone, idx, top_cols)
+            bot_cols = max(1, total - top_cols)
+            return self._linear_slot_center(
+                self.choice_6_bottom_zone, idx - top_cols, bot_cols
+            )
+        return self._linear_slot_center(self.choice_zone, idx, total)
+
+    def resolve_choice_card_size(
+        self, index: int, choice_count: int = 3
+    ) -> tuple[float, float]:
+        """解析二选一、三选一或六选一指定卡片的归一化宽高 (slot_w, slot_h)。"""
+        total = max(1, int(choice_count))
+        idx = max(0, min(total - 1, int(index)))
+        if total == 2:
+            return (self.choice_2_zone.slot_w, self.choice_2_zone.slot_h)
+        if total >= 5:
+            top_cols = max(1, (total + 1) // 2)
+            zone = (
+                self.choice_6_top_zone if idx < top_cols else self.choice_6_bottom_zone
+            )
+            return (zone.slot_w, zone.slot_h)
+        return (self.choice_zone.slot_w, self.choice_zone.slot_h)
+
+    def resolve_choice_confirm_point(
+        self, index: int, choice_count: int = 3
+    ) -> tuple[float, float]:
+        """解析卡片被选中后底部弹出的白色「确认选择」条归一化中心点击坐标。"""
+        cu, cv = self.resolve_choice_card_center(index, choice_count)
+        _, sh = self.resolve_choice_card_size(index, choice_count)
+        confirm_v = max(0.0, min(0.98, cv + sh * 0.505))
+        return (float(cu), float(confirm_v))
+
+    def resolve_choice_card_polygon(
+        self, index: int, choice_count: int = 3
+    ) -> list[tuple[float, float]]:
+        """返回未确认阶段第 index 张决策卡片的 4 顶点归一化矩形。"""
+        cu, cv = self.resolve_choice_card_center(index, choice_count)
+        sw, sh = self.resolve_choice_card_size(index, choice_count)
+        hw, hh = sw * 0.5, sh * 0.5
+        return [
+            (cu - hw, cv - hh),
+            (cu + hw, cv - hh),
+            (cu + hw, cv + hh),
+            (cu - hw, cv + hh),
+        ]
+
+    def resolve_choice_confirm_polygon(
+        self, index: int, choice_count: int = 3
+    ) -> list[tuple[float, float]]:
+        """返回卡片选中后底部白色「确认选择」横条的 4 顶点归一化矩形。"""
+        cu, confirm_v = self.resolve_choice_confirm_point(index, choice_count)
+        sw, _ = self.resolve_choice_card_size(index, choice_count)
+        hw = sw * 0.51
+        hh = 0.034
+        return [
+            (cu - hw, confirm_v - hh),
+            (cu + hw, confirm_v - hh),
+            (cu + hw, confirm_v + hh),
+            (cu - hw, confirm_v + hh),
+        ]
+
+    def resolve_choice_toggle_point(
+        self, choice_count: int = 3
+    ) -> NormalizedPoint | None:
+        """解析右侧「收起/展开」查看战场按钮坐标（兼容二选一、三选一与多人六选一）。"""
+        if int(choice_count) >= 5 and "choice_toggle_eye_6" in self.buttons:
+            return self.buttons["choice_toggle_eye_6"]
+        return self.buttons.get("choice_toggle_eye")
+
+    def resolve_emote_slot_center(self, index: int) -> tuple[float, float]:
+        """解析左下 2x3 表情面板第 index (0..5) 个表情槽位的归一化中心坐标 (u, v)。"""
+        idx = max(0, min(5, int(index)))
+        if idx < 3:
+            return self._linear_slot_center(self.emote_top_zone, idx, 3)
+        return self._linear_slot_center(self.emote_bottom_zone, idx - 3, 3)
+
+    def resolve_emote_slot_polygon(self, index: int) -> list[tuple[float, float]]:
+        """返回左下 2x3 表情面板第 index (0..5) 个表情槽位的顺时针 4 顶点归一化矩形。"""
+        idx = max(0, min(5, int(index)))
+        cu, cv = self.resolve_emote_slot_center(idx)
+        zone = self.emote_top_zone if idx < 3 else self.emote_bottom_zone
+        hw = zone.slot_w * 0.5
+        hh = zone.slot_h * 0.5
+        return [
+            (max(0.0, cu - hw), max(0.0, cv - hh)),
+            (min(1.0, cu + hw), max(0.0, cv - hh)),
+            (min(1.0, cu + hw), min(1.0, cv + hh)),
+            (max(0.0, cu - hw), min(1.0, cv + hh)),
+        ]
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为完整 JSON 字典。"""
         data: dict[str, Any] = {
-            "activity_hub_nodes": {k: v.to_dict() for k, v in self.activity_hub_nodes.items()},
-            "pre_match_nodes": {k: v.to_dict() for k, v in self.pre_match_nodes.items()},
-            "squad_edit_nodes": {k: v.to_dict() for k, v in self.squad_edit_nodes.items()},
-            "settlement_nodes": {k: v.to_dict() for k, v in self.settlement_nodes.items()},
             "shop_zone": self.shop_zone.to_dict(),
             "bench_zone": self.bench_zone.to_dict(),
             "equip_zone": self.equip_zone.to_dict(),
             "choice_zone": self.choice_zone.to_dict(),
+            "choice_2_zone": self.choice_2_zone.to_dict(),
+            "choice_6_top_zone": self.choice_6_top_zone.to_dict(),
+            "choice_6_bottom_zone": self.choice_6_bottom_zone.to_dict(),
+            "emote_top_zone": self.emote_top_zone.to_dict(),
+            "emote_bottom_zone": self.emote_bottom_zone.to_dict(),
+            "covenant_zone": self.covenant_zone.to_dict(),
             "board_quad": self.board_quad.to_dict(),
             "buttons": {k: v.to_dict() for k, v in self.buttons.items()},
         }
@@ -739,17 +988,24 @@ class LayoutProfile:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> LayoutProfile:
-        """从合并后的字典反序列化 LayoutProfile 并校验完整性。"""
+        """从合并后的字典反序列化 LayoutProfile 并校验完整性。
+
+        自动静默忽略旧版残留的局外节点字段，并为新增的策略头像与回合确认按钮提供默认坐标兜底。
+        """
         buttons_raw = data.get("buttons", {})
         buttons: dict[str, NormalizedPoint] = {
             k: (v if isinstance(v, NormalizedPoint) else NormalizedPoint.from_dict(v))
             for k, v in buttons_raw.items()
         }
+        for key, default_pt in _default_fallback_buttons().items():
+            buttons.setdefault(key, default_pt)
+        raw_c2 = data.get("choice_2_zone")
+        raw_c6_top = data.get("choice_6_top_zone")
+        raw_c6_bot = data.get("choice_6_bottom_zone")
+        raw_em_top = data.get("emote_top_zone")
+        raw_em_bot = data.get("emote_bottom_zone")
+        raw_cov = data.get("covenant_zone")
         return cls(
-            activity_hub_nodes=_parse_node_map(data["activity_hub_nodes"]),
-            pre_match_nodes=_parse_node_map(data["pre_match_nodes"]),
-            squad_edit_nodes=_parse_node_map(data["squad_edit_nodes"]),
-            settlement_nodes=_parse_node_map(data["settlement_nodes"]),
             shop_zone=(
                 data["shop_zone"]
                 if isinstance(data["shop_zone"], LinearZone)
@@ -777,6 +1033,60 @@ class LayoutProfile:
             ),
             buttons=buttons,
             view_overrides=_parse_view_overrides(data.get("view_overrides")),
+            choice_2_zone=(
+                raw_c2
+                if isinstance(raw_c2, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_c2)
+                    if isinstance(raw_c2, Mapping)
+                    else _default_choice_2_zone()
+                )
+            ),
+            choice_6_top_zone=(
+                raw_c6_top
+                if isinstance(raw_c6_top, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_c6_top)
+                    if isinstance(raw_c6_top, Mapping)
+                    else _default_choice_6_top_zone()
+                )
+            ),
+            choice_6_bottom_zone=(
+                raw_c6_bot
+                if isinstance(raw_c6_bot, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_c6_bot)
+                    if isinstance(raw_c6_bot, Mapping)
+                    else _default_choice_6_bottom_zone()
+                )
+            ),
+            emote_top_zone=(
+                raw_em_top
+                if isinstance(raw_em_top, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_em_top)
+                    if isinstance(raw_em_top, Mapping)
+                    else _default_emote_top_zone()
+                )
+            ),
+            emote_bottom_zone=(
+                raw_em_bot
+                if isinstance(raw_em_bot, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_em_bot)
+                    if isinstance(raw_em_bot, Mapping)
+                    else _default_emote_bottom_zone()
+                )
+            ),
+            covenant_zone=(
+                raw_cov
+                if isinstance(raw_cov, SymmetricCovenantZone)
+                else (
+                    SymmetricCovenantZone.from_dict(raw_cov)
+                    if isinstance(raw_cov, Mapping)
+                    else SymmetricCovenantZone()
+                )
+            ),
         )
 
 

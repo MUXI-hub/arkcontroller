@@ -50,6 +50,15 @@ SM_CYVIRTUALSCREEN = 79
 ULONG_PTR = ctypes.c_size_t
 
 
+class POINT(ctypes.Structure):
+    """对应 Win32 POINT 结构体（8 字节，支持多屏负坐标）。"""
+
+    _fields_ = [
+        ("x", ctypes.c_long),
+        ("y", ctypes.c_long),
+    ]
+
+
 class MOUSEINPUT(ctypes.Structure):
     """对应 Win32 MOUSEINPUT 结构体（64 位下 32 字节）。"""
 
@@ -255,6 +264,17 @@ class VirtualHID:
         )
         return inp
 
+    def get_cursor_pos(self) -> tuple[int, int] | None:
+        """读取当前物理屏幕鼠标光标坐标 (x, y)；API 失败或不支持平台时安全返回 None。"""
+        try:
+            user32 = self._get_user32()
+            pt = POINT()
+            if not user32.GetCursorPos(ctypes.byref(pt)):
+                return None
+            return (int(pt.x), int(pt.y))
+        except Exception:
+            return None
+
     def move_cursor(self, screen_x: int, screen_y: int) -> None:
         """将鼠标光标绝对移动至指定屏幕物理像素坐标。"""
         with self._lock:
@@ -349,6 +369,59 @@ class VirtualHID:
                 ratio = idx / total_steps
                 cx = int(round(sx + (ex - sx) * ratio))
                 cy = int(round(sy + (ey - sy) * ratio))
+                self.move_cursor(cx, cy)
+            if release_at_end:
+                if post_hold_ms > 0:
+                    self._sleep(post_hold_ms / 1000.0)
+                self.mouse_up("left")
+
+    def smooth_drag_loopback(
+        self,
+        origin: tuple[int, int],
+        offset: tuple[int, int],
+        duration_ms: int = 130,
+        steps_each_way: int = 6,
+        release_at_end: bool = True,
+        pre_hover_ms: int = 30,
+        post_hold_ms: int = 30,
+    ) -> None:
+        """从起点按住左键平滑拖离原格再平滑拖回原格松开（用于棋盘干员原地唤出四向定朝向盘）。
+
+        Args:
+            origin: 起点（及回落终点）屏幕像素坐标 (ox, oy)。
+            offset: 往返折返偏移量 (dx, dy)，需跨越 Unity pixelDragThreshold 触发 BeginDrag。
+            duration_ms: 往返两段平滑插值总耗时（毫秒）。
+            steps_each_way: 去程与回程各自的线性插值步数（至少为 1）。
+            release_at_end: 回到起点停顿后是否自动松开鼠标左键。
+            pre_hover_ms: 移至起点后按下左键前的悬停时长（毫秒）。
+            post_hold_ms: 回到起点后松开左键前的停顿时长（毫秒）。
+        """
+        leg_steps = max(1, int(steps_each_way))
+        total_steps = leg_steps * 2
+        step_sleep_sec = (max(0, int(duration_ms)) / 1000.0) / total_steps
+        ox, oy = int(origin[0]), int(origin[1])
+        wx, wy = ox + int(offset[0]), oy + int(offset[1])
+
+        with self._lock:
+            self.move_cursor(ox, oy)
+            if pre_hover_ms > 0:
+                self._sleep(pre_hover_ms / 1000.0)
+            self.mouse_down("left")
+            # 去程：从 origin 平滑拖至 waypoint，触发客户端拖拽态
+            for idx in range(1, leg_steps + 1):
+                if step_sleep_sec > 0.0:
+                    self._sleep(step_sleep_sec)
+                ratio = idx / leg_steps
+                cx = int(round(ox + (wx - ox) * ratio))
+                cy = int(round(oy + (wy - oy) * ratio))
+                self.move_cursor(cx, cy)
+            # 回程：从 waypoint 平滑拖回 origin 原格
+            for idx in range(1, leg_steps + 1):
+                if step_sleep_sec > 0.0:
+                    self._sleep(step_sleep_sec)
+                ratio = idx / leg_steps
+                cx = int(round(wx + (ox - wx) * ratio))
+                cy = int(round(wy + (oy - wy) * ratio))
                 self.move_cursor(cx, cy)
             if release_at_end:
                 if post_hold_ms > 0:

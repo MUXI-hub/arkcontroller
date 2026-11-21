@@ -17,14 +17,13 @@ USER_OVERRIDE_FILENAME = "user_override.json"
 
 _LAYOUT_TOP_LEVEL_KEYS = frozenset(
     {
-        "activity_hub_nodes",
-        "pre_match_nodes",
-        "squad_edit_nodes",
-        "settlement_nodes",
         "shop_zone",
         "bench_zone",
         "equip_zone",
         "choice_zone",
+        "choice_6_top_zone",
+        "choice_6_bottom_zone",
+        "covenant_zone",
         "board_quad",
         "buttons",
         "view_overrides",

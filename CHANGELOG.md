@@ -2,6 +2,76 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [0.2.2] - 2026-11-21
+
+### 新增与修复 (Added & Fixed)
+- **商店防误触「连按两次 `A` 购买」+「`RT + A` 查看商店干员详情」(`arkcontroller.control`)**：
+  - 在 `FocusZone.SHOP` 空闲态下，第 1 次按 **`A`** 仅本地进入 2.0 秒预选确认态（不发送鼠标单击，避免诱发角色详情抢走第 2 次按键），HUD 状态栏提示 `商店 [i/N] · 再按A购买`；有效期内同槽第 2 次按 **`A`** 执行双击完成购买；预选态按 **`B`** 仅取消预选而不收起商店，换槽/切区/商店收起/超时自动清预选。
+  - 在 `FocusZone.SHOP` 按 **`RT + A`** 单击展开该商店干员详情（屏蔽误触发 `X` 出售与 `Y` 撤回并在 HUD 隐藏这两项提示），按 **`B`** 点击右侧安全空白区退出详情并精准回到原商店卡槽。
+- **左下「交流」按钮与 `2x3` 表情面板全交互 + 滚轮翻页 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 移除官方 PC 客户端无效的 `"emote_wheel": "z"` 快捷键，实机校准左下「交流」按钮 `(0.0684, 0.9181, left_edge)`、面板滚轮中心 `emote_panel_center (0.1290, 0.7400, left_edge)` 与 `emote_top_zone` / `emote_bottom_zone`（`2x3` 六枚表情槽）。
+  - 新增 `SceneDetectionResult.emote_panel_open` 自动识别与 `FocusZone.EMOTE_PANEL`：通过 `LT + D-Pad 下`（或在队友栏底部继续按下）呼出时，若商店展开则先自动收起商店再点击「交流」按钮；面板内支持方向键 `2x3` 选表情（指针跟随）、推右摇杆 **`RS`** 自动移至面板中心滚动翻页、`LB`/`RB` 快捷翻页、**`A`** 发送、**`B`** 关闭面板回归原区。
+- **多人六选一（`2x3`）PC 16:9 校准、含已被选走浅灰卡识别与手动锁层同步 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 实机校准官方 PC 16:9 六选一三列对齐布局 `choice_6_top_zone (v=0.2931)` / `choice_6_bottom_zone (v=0.7083)` 与 `choice_toggle_eye_6 (0.968, 0.500, right_edge)`；`SceneDetector` 同时兼容新 PC 16:9 与旧宽屏双布局，单槽接受「未选暗底卡」或「已被队友选走均匀浅灰卡」（支持 1~5 张灰卡，全 6 灰安全拒识）；同步修复手动锁层 `MODAL_CHOICE` 下实时同步 `choice_count` 与 `selected_choice_index`。
+- **修复 0 资金刷新变灰商店识别错乱、联机 `LOADING...` 休整期识别与收起防残框 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - `_detect_shop_open_heuristic` 与 `_detect_shop_slot_count_heuristic` 彻底脱离 `refresh_yellow >= 0.25` 资金颜色依赖，升级为 `(freeze_blue >= 0.45) or (refresh_yellow >= 0.25 and freeze_blue >= 0.25)`，0 资金刷新变灰后仍精准保持 `shop_open=True` 与三区缩放补偿；
+  - 联机等待阶段无右上粉红准备按钮时，通过局内双锚点 + 顶部「休息一下」紫框与左右放大镜精准识别 `BATTLE_PREP`（`shop_open=False`），并统一 `UNKNOWN_FREE_CURSOR` 默认 `shop_open=False`；商店收起时若焦点仍停留在空闲 `FocusZone.SHOP`，自动退回 `FocusZone.BENCH` 防止残留商店选框。
+- **局内 `ESC` 暂时离开确认弹窗抗剪影识别与无「本局不再提示」自动精简 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - 加固 `_detect_modal_confirm_heuristic`（采用黑底分位数约束并避开右下红栏右端机械剪影），杜绝未压缩实机帧漏检；新增 `confirm_has_dont_ask` 自动区分回合结束确认窗（3 项）与 `ESC` 退出确认窗（2 项，无「本局不再提示」时自动隐藏 `X` 提示并限定仅在取消/确认间切换）。
+- **透明 HUD 启用 `WDA_EXCLUDEFROMCAPTURE` 防截屏污染 (`arkcontroller.overlay`)**：
+  - 在 `apply_win32_click_through()` 中调用 `SetWindowDisplayAffinity(hwnd, 0x00000011)`（异常安全降级），玩家肉眼正常可见透明 HUD，而后台 `mss` 截屏自动穿透忽略 HUD 选框与准星，从根源消除 HUD 绘制物干扰视觉识别。
+
+## [0.2.1] - 2026-11-21
+
+### 新增与修复 (Added & Fixed)
+- **决策弹窗新增「二选一（`1x2`）」全链路适配 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 实机像素测绘并在 `configs/stronghold_layout_16_9.json` 与 `LayoutProfile` 新增 `choice_2_zone`（`start_u=0.3809, end_u=0.6477, v=0.5000, slot_w=0.2188, slot_h=0.3306`），`resolve_choice_card_center/size/confirm/polygon/toggle` 在 `choice_count == 2` 时精准适配二选一卡片、底部白色「确认选择」横条及右侧「收起」按钮（并兼容旧 JSON 缺省回退）。
+  - `SceneDetector._detect_real_modal_choice` 新增 `(C) 1x2` 二选一识别与底部白条选中索引感知；外围无第 3 卡判据采用按列垂直均值再取列峰（`mean(axis=0).max()`），免疫两翼压暗雪山/砖块斜边纹理干扰；同步强制二/三/六选一均需命中卫戍弹窗顶部青色标题/收起按钮特征。
+  - `ControlDispatcher` 更新决策弹窗焦点文案与导航，精准输出 `二选一 [1/2]` / `二选一 [2/2] · 待确认`，完整支持左右/`LB`/`RB` 循环切换、初始白条吸附、两段式 `A` / `RT+A` 确认、`B` 退回与按住 `LT` 收起看场。
+- **启动默认自由鼠标与局外界面 100% 防误判加固 (`arkcontroller.vision`)**：
+  - 新增 `_has_stronghold_in_game_chrome()` 局内双锚点门禁（左上深红退出门 + 顶部中央深黑状态栏），并将右上角准备按钮检测色相收窄至真实粉红区间 `(H >= 158) | (H <= 4)`，同时为亮卡弹窗回退补齐 `modal_chrome` 约束，彻底杜绝主界面、活动横幅、战前编队、干员列表与基建等局外画面误判切入局内吸附模式。
+- **自由鼠标物理光标无损同步与 HUD 顶部胶囊去重 (`arkcontroller.input` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - `VirtualHID` 新增 `get_cursor_pos()`（Win32 `GetCursorPos` 8 字节有符号 `POINT`，支持多屏负坐标，失败安全降级返回 `None`）。
+  - `ControlDispatcher` 在启动、窗口重新激活及自由鼠标模式下基于 `>= 2px` 变化门槛无损同步游戏客户区内真实物理光标位置（防止 `< 0.5px/tick` 微推左摇杆亚像素累加被整数回读抹零，副屏越界自动免疫；局内按 `LS` 切自由光标立即将真实指针落至当前吸附槽位）。
+  - `HUDWindow._format_top_status_text()` 清理同义重复段，`UNKNOWN_FREE_CURSOR` 场景清爽显示 `PRTS // 自由鼠标`，局内按 `LS` 切自由光标去重显示 `PRTS // 休整运营 · 自由光标`。
+
+## [0.2.0] - 2026-11-21
+
+### 新增、变更与修复 (Added, Changed & Fixed)
+- **棋盘干员原地设置转向（回环拖拽状态机）(`arkcontroller.input.virtual_hid` & `arkcontroller.control`)**：
+  - `VirtualHID` 新增 `smooth_drag_loopback(origin, offset, ...)` 往返平滑拖拽原语：在原格悬停按下左键 → 平滑拖离跨越 Unity `pixelDragThreshold` → 平滑拖回原格松开，稳定呼出游戏四向定朝向盘。
+  - `DeployFSM.place_on_board()` 在源格与目标格为同一棋盘格时不再直接取消，而是执行自动方向回环拖拽（最右列向左偏防越界）并转入 `AIMING_DIRECTION` 态，支持推摇杆/十字键原地重置干员朝向或按 **`B`** 取消。
+- **回合结束未用完资金 / 策略确认弹窗全自动识别与交互 (`arkcontroller.vision` & `arkcontroller.config` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 新增 `GameScene.MODAL_CONFIRM` 与 `FocusZone.CONFIRM_DIALOG`，零模板精准识别全宽暗底 + 左下灰「取消」栏 + 右下暗红「确认」栏，且优先级高于右上角准备按钮检测。
+  - 实机标定 `confirm_no (0.2496, 0.6729)`、`confirm_yes (0.7496, 0.6729)`、`confirm_dont_ask (0.4992, 0.5597)` 三处锚点；进入弹窗默认聚焦「确认」，支持方向键 / `LB`/`RB` 在三项间切换、**`A`** 确认（点击「本局不再提示」后自动回移聚焦「确认」便于连按开战）、**`B`** 直点取消、**`START`/`RT+A`** 直点确认、**`X`** 快捷勾选「本局不再提示」。
+- **官方原生 `G` 键升本防误触 (`arkcontroller.config` & `arkcontroller.control`)**：
+  - 在 `configs/default_bindings.json` 与 `KeymapConfig` 中补齐官方原生快捷键 `"shop_upgrade": "g"`（完整涵盖 `A/S/D/G/C/W/X/Q/Z/Esc`）。
+  - 局内按 **`Y`** 升本在原生快捷键模式下直接发送 `G` 键，彻底避免因商店栏位或界面微偏导致的鼠标坐标误买商品卡（纯鼠标模拟器模式下仍保留同步左移坐标点击）。
+- **彻底清理游戏外菜单配置，局外统一纯模拟自由鼠标 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 从 `configs/stronghold_layout_16_9.json`、`LayoutProfile`、`ConfigLoader` 及 `default_bindings.json` 中彻底删除 4 套局外菜单节点表（`activity_hub_nodes`、`pre_match_nodes`、`squad_edit_nodes`、`settlement_nodes`）、5 个局外按钮与 `"menu"` 键位段（`LayoutProfile.from_dict` 向后兼容静默忽略旧 `user_override.json` 残留字段）。
+  - 精简 `GameScene` 枚举为 5 项局内核心状态（`BATTLE_PREP`、`MODAL_CHOICE`、`MODAL_CONFIRM`、`BATTLE_COMBAT`、`UNKNOWN_FREE_CURSOR`），移除局外菜单路由；`ControlDispatcher` 默认初始化为 `UNKNOWN_FREE_CURSOR`（HUD 显示「自由鼠标」），局外与设置界面左摇杆始终直接驱动模拟鼠标光标（不受局内 `left_stick_mode="dpad"` 限制），搭配 `A` 单击、`RT+A` 双击、`B` 返回 `Esc`、`RS` 滚轮滚动。
+- **右侧策略头像拖拽与点击使用 (`arkcontroller.config` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 实机标定固定 `right_edge` 锚点 `strategy_avatar (0.9605, 0.3243)` 与 `strategy_inspect (0.9047, 0.3236)`（不受 `shop_open` 缩放矩阵污染）。
+  - 新增 `FocusZone.STRATEGY` 与 `DeployState.HOLDING_STRATEGY`（HUD 渲染琥珀色 `策略源` 虚线框与轨迹）：从棋盘最右列按右跨入策略头像区，支持 **`RT+A`** 一键直接点击使用、**`X`** 查看策略说明、**`A`** 锁定策略源后再按 **`A`** 原地点击使用，或移至棋盘/整备干员与商店卡槽（未展开商店自动先展开）按 **`A`** 平滑拖拽释放、**`B`** 安全取消。
+- **修复商店 4/5/6 槽位识别失灵与 UAC 后台截屏自愈 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - 修复 UAC 提权切回安全桌面瞬间 `ScreenCapture._capture_loop` 后台 `mss.mss()` 初始化异常后永久为 `None` 导致视觉识别失明的严重缺陷：改为每轮惰性重建自愈并在采集异常时立即销毁旧实例；同时拦截 Unity DX11 `PrintWindow` 返回的全黑伪帧。
+  - 加固 `SceneDetector._detect_shop_slot_count_heuristic`：垂直边框搜索窗放宽至 `±12px` 取局部峰，升级卡检测兼容灰态与自带蓝紫底部发光渐层的紫红高亮 `[G]` 升级卡，商品卡检测对左专属非重叠区与右主区施加双段约束并兼容已售空 `NO INFO` 暗蓝槽，彻底消除亮地图背景下 4 误判 5 / 5 误判 6 问题。
+  - 修复 `ControlDispatcher._sync_scene` 在 `手动锁层` 下屏蔽局内视觉同步的问题：当手动锁定 `BATTLE_PREP` 且视觉同为 `BATTLE_PREP` 时，继续实时同步 `shop_open`、`shop_slot_count`、`unit_selected`、`covenant_count` 与 `has_teammates`。
+
+## [0.1.3] - 2026-11-21
+
+### 新增与修复 (Added & Fixed)
+- **三选一（单人 `1x3`）与六选一（多人 `2x3`）自动识别及底部白条两段确认 (`arkcontroller.vision` & `arkcontroller.control` & `arkcontroller.config`)**：
+  - 修复实机暗底亮灰框决策卡片（如「悬赏决策」）无法被旧亮面卡片启发式识别的问题：基于 Sobel 垂直边框梯度、暗色卡面与青色标题/右侧「收起」按钮特征，零模板自动识别单人 `1x3` 三选一与多人联机 `2x3` 六选一网格，并实时检测哪张卡底部已弹出白色「`☑ 确认选择`」横条（`selected_choice_index`）。
+  - 支持多人 `2x3` 二维网格导航（左右同行循环、上下跨排切换、`LB/RB` 全局步进）以及两段式选牌确认：首次按 **`A`** 点击卡片中心弹出底部白色确认条并将 HUD 选框下移聚焦至白条，再次按 **`A`** 精准点击底部白色确认条完成锁定；按 **`RT + A`** 自动依次点击卡片中心与底部白条一键确认；同步校准三选一 `(0.968, 0.500)` 与六选一 `(0.922, 0.500)` 右侧「收起」看场按钮，并在按住 **`LT`** 期间锁定弹窗上下文防止误切层。
+- **装备区槽位内部平滑挪动/换位 (`arkcontroller.control.deploy_fsm` & `dispatcher`)**：
+  - 新增 `DeployFSM.place_on_equip()`：抓取装备（`HOLDING_EQUIP`）后在 `EQUIPMENT` 槽位间左右移动（或从棋盘/整备区退回装备栏）按 **`A`** 即可平滑拖拽调整装备顺序，同槽位二次按 **`A`** 自动取消选中不发冗余拖拽，体验与整备区干员换位完全一致。
+- **修复退出干员详情安全点击区误买商店干员 (`configs/stronghold_layout_16_9.json` & `dispatcher`)**：
+  - 将 `safe_blank` 从原底部 `(0.650, 0.880)` 迁移至右侧策略头像正下方安全空白带 `(0.955, 0.445, right_edge)`，彻底杜绝商店展开时按 **`B`** 退出详情误点购买第 2/3 张商店卡的问题。
+- **顶部左/右放大镜、居中对称羁绊栏与多人左侧队友头像栏导航 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - 新增 `FocusZone.TOP_INFO` 与 `SymmetricCovenantZone`：局内休整期与作战期从棋盘顶行继续向上即可跨入顶部信息栏，按左右依次聚焦 **左侧放大镜（查看本局信息） ↔ 正下方居中对称分布的已激活/未激活羁绊图标（自动检测奇偶槽数 `0~9`） ↔ 右侧放大镜（查看本轮出怪，`W`）**；支持按 **`A`** 查看详情、按 **`B`** 关闭本局信息右上角 `[×]` `(0.940, 0.061)` / 退出本轮出怪 / 关闭羁绊浮窗且期间不误触发 `Esc` 退局弹窗。
+  - 实机校准多人联机左侧 4 枚纵向队友头像 `teammate_1..4` `(u≈0.041, v=0.268..0.583)` 与左下「交流」按钮 `(0.0723, 0.9174)`；自动检测联机队友头像并开放 `FocusZone.TEAMMATES`（从棋盘最左列继续按左跨入），支持上下选队友按 **`A`** 点击查看战场（抓取干员/装备态下按 **`A`** 直接拖拽赠予该队友）。
+
 ## [0.1.2] - 2026-11-21
 
 ### 变更与修复 (Changed & Fixed)

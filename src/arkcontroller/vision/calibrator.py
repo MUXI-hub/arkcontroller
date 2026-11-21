@@ -110,7 +110,8 @@ class VisionCalibrator:
 
         参数:
             frame: 当前游戏 16:9 视口采样帧（若分辨率不同将自动缩放到 1280x720）。
-            scene: 目标界面阶段枚举。
+            scene: 目标局内界面阶段枚举（``BATTLE_PREP`` / ``MODAL_CHOICE`` /
+                ``MODAL_CONFIRM`` / ``BATTLE_COMBAT``）。
             roi_norm: 可选归一化裁剪区域 ``(u, v, w, h)``，缺省使用该场景默认标志性 ROI。
             threshold: 可选匹配阈值，缺省为 ``0.82``。
 

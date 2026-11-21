@@ -19,6 +19,7 @@ from arkcontroller.config.models import (
     NormalizedPoint,
     NormalizedRect,
     PerspectiveQuad,
+    SymmetricCovenantZone,
 )
 from arkcontroller.platform import uac
 from arkcontroller.platform.window_tracker import ViewportRect, WindowTracker
@@ -359,6 +360,29 @@ class TestConfigSystem:
         assert keymap.vibration_enabled is True
         assert keymap.left_stick_mode == "dpad"
         assert keymap.auto_toggle_shop is True
+        assert keymap.keyboard_shortcuts["shop_upgrade"] == "g"
+        assert keymap.keyboard_shortcuts == {
+            "shop_toggle": "a",
+            "shop_freeze": "s",
+            "shop_refresh": "d",
+            "shop_upgrade": "g",
+            "battle_ready": "c",
+            "enemy_preview": "w",
+            "sell_board": "x",
+            "sell_bench": "x",
+            "retreat_unit": "q",
+            "covenant_panel": "",
+            "emote_wheel": "",
+            "back": "esc",
+            "pause_menu": "esc",
+        }
+        assert "menu" not in keymap.bindings
+        assert keymap.bindings["modal_confirm"] == {
+            "confirm": "A",
+            "cancel": "B",
+            "quick_confirm": "START",
+            "toggle_dont_ask": "X",
+        }
 
         for key in REQUIRED_BUTTON_KEYS:
             assert key in layout.buttons
@@ -366,8 +390,108 @@ class TestConfigSystem:
             assert 0.0 <= pt.u <= 1.0
             assert 0.0 <= pt.v <= 1.0
 
+        # 验证已删除所有局外按钮与局外节点表
+        for removed_btn in (
+            "start_action",
+            "squad_skill_1",
+            "squad_skill_2",
+            "squad_skill_3",
+            "squad_module",
+        ):
+            assert removed_btn not in layout.buttons
+        for removed_attr in (
+            "activity_hub_nodes",
+            "pre_match_nodes",
+            "squad_edit_nodes",
+            "settlement_nodes",
+        ):
+            assert not hasattr(layout, removed_attr)
+            assert removed_attr not in layout.to_dict()
+
+        # 验证新增策略头像、交流面板与回合确认弹窗实测按钮锚点
+        assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
+        assert layout.buttons["strategy_inspect"] == NormalizedPoint(0.9047, 0.3236, "right_edge")
+        assert layout.buttons["confirm_no"] == NormalizedPoint(0.2496, 0.6729, "center_16_9")
+        assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
+        assert layout.buttons["confirm_dont_ask"] == NormalizedPoint(0.4992, 0.5597, "center_16_9")
+        assert layout.buttons["emote_wheel"] == NormalizedPoint(0.0684, 0.9181, "left_edge")
+        assert layout.buttons["emote_panel_center"] == NormalizedPoint(0.1290, 0.7400, "left_edge")
+        assert layout.buttons["choice_toggle_eye_6"] == NormalizedPoint(0.968, 0.500, "right_edge")
+
         assert "shop_toggle" in layout.buttons
         assert "safe_blank" in layout.buttons
+        assert "choice_toggle_eye_6" in layout.buttons
+        # 验证安全空白区已移至右侧策略头像正下方安全带，绝不落入底部商店卡牌区
+        assert layout.buttons["safe_blank"].u >= 0.90
+        assert 0.39 <= layout.buttons["safe_blank"].v <= 0.50
+        # 验证二选一、三选一与多人六选一卡片及底部白色确认条几何关系
+        assert layout.choice_2_zone.count == 2
+        assert "choice_2_zone" in layout.to_dict()
+        c2_left = layout.resolve_choice_card_center(0, 2)
+        c2_right = layout.resolve_choice_card_center(1, 2)
+        assert c2_left == pytest.approx((0.3809, 0.5000))
+        assert c2_right == pytest.approx((0.6477, 0.5000))
+        assert layout.resolve_choice_card_size(0, 2) == pytest.approx((0.2188, 0.3306))
+        c2_confirm_right = layout.resolve_choice_confirm_point(1, 2)
+        assert c2_confirm_right[0] == pytest.approx(0.6477)
+        assert c2_confirm_right[1] == pytest.approx(0.666953, abs=1e-4)
+        c2_poly = layout.resolve_choice_card_polygon(0, 2)
+        assert len(c2_poly) == 4
+        assert c2_poly[0] == pytest.approx((0.3809 - 0.1094, 0.5000 - 0.1653))
+        assert c2_poly[2] == pytest.approx((0.3809 + 0.1094, 0.5000 + 0.1653))
+        c2_confirm_poly = layout.resolve_choice_confirm_polygon(1, 2)
+        assert len(c2_confirm_poly) == 4
+        assert (c2_confirm_poly[0][0] + c2_confirm_poly[2][0]) * 0.5 == pytest.approx(0.6477)
+        assert (c2_confirm_poly[0][1] + c2_confirm_poly[2][1]) * 0.5 == pytest.approx(
+            c2_confirm_right[1]
+        )
+        assert layout.resolve_choice_toggle_point(2) == layout.buttons["choice_toggle_eye"]
+
+        c3_center = layout.resolve_choice_card_center(0, 3)
+        c3_confirm = layout.resolve_choice_confirm_point(0, 3)
+        assert c3_confirm[0] == pytest.approx(c3_center[0])
+        assert c3_confirm[1] == pytest.approx(0.674, abs=0.006)
+        # 官方 PC 16:9 六选一三列对齐与上下排白条确认点
+        assert layout.resolve_choice_card_center(0, 6) == pytest.approx((0.2473, 0.2931))
+        assert layout.resolve_choice_card_center(2, 6) == pytest.approx((0.7816, 0.2931))
+        assert layout.resolve_choice_card_center(3, 6) == pytest.approx((0.2473, 0.7083))
+        assert layout.resolve_choice_card_center(5, 6) == pytest.approx((0.7816, 0.7083))
+        assert layout.resolve_choice_card_size(0, 6) == pytest.approx((0.2180, 0.3306))
+        c6_top_confirm = layout.resolve_choice_confirm_point(1, 6)
+        c6_bot_confirm = layout.resolve_choice_confirm_point(4, 6)
+        assert c6_top_confirm[0] == pytest.approx(c6_bot_confirm[0])
+        assert c6_top_confirm[1] == pytest.approx(0.4601, abs=0.003)
+        assert c6_bot_confirm[1] == pytest.approx(0.8753, abs=0.003)
+        assert layout.resolve_choice_toggle_point(3) == layout.buttons["choice_toggle_eye"]
+        assert layout.resolve_choice_toggle_point(6) == layout.buttons["choice_toggle_eye_6"]
+
+        # 验证左下 2x3 表情面板几何解析 (0..5) 与序列化
+        assert layout.emote_top_zone.count == 3
+        assert layout.emote_bottom_zone.count == 3
+        assert "emote_top_zone" in layout.to_dict()
+        assert "emote_bottom_zone" in layout.to_dict()
+        expected_emote_centers = [
+            (0.0582, 0.6771),
+            (0.1289, 0.6771),
+            (0.1996, 0.6771),
+            (0.0582, 0.8016),
+            (0.1289, 0.8016),
+            (0.1996, 0.8016),
+        ]
+        for idx, exp in enumerate(expected_emote_centers):
+            cu, cv = layout.resolve_emote_slot_center(idx)
+            assert (cu, cv) == pytest.approx(exp, abs=1e-4)
+            poly = layout.resolve_emote_slot_polygon(idx)
+            assert len(poly) == 4
+            assert poly[0] == pytest.approx((cu - 0.032, cv - 0.056), abs=1e-4)
+            assert poly[2] == pytest.approx((cu + 0.032, cv + 0.056), abs=1e-4)
+        # 验证顶部下方居中对称羁绊坐标解算（奇数与偶数）
+        assert isinstance(layout.covenant_zone, SymmetricCovenantZone)
+        assert layout.covenant_zone.slot_center(0, count=1)[0] == pytest.approx(0.50)
+        u_even_0, _ = layout.covenant_zone.slot_center(0, count=2)
+        u_even_1, _ = layout.covenant_zone.slot_center(1, count=2)
+        assert (u_even_0 + u_even_1) * 0.5 == pytest.approx(0.50)
+        assert u_even_1 - u_even_0 == pytest.approx(layout.covenant_zone.step_u)
         assert "shop_open" in layout.view_overrides
         assert "unit_selected" in layout.view_overrides
         assert layout.resolve_board_quad("shop_open") != layout.board_quad
@@ -404,10 +528,70 @@ class TestConfigSystem:
         assert upg4 is not None and upg5 is not None and upg6 is not None
         assert upg5.u == pytest.approx(upg4.u - step4)
         assert upg6.u == pytest.approx(upg4.u - 2 * step4)
-        assert len(layout.activity_hub_nodes) >= 5
-        assert len(layout.pre_match_nodes) >= 4
-        assert len(layout.squad_edit_nodes) >= 12
-        assert len(layout.settlement_nodes) >= 2
+
+    def test_layout_from_dict_ignores_legacy_nodes_and_fills_default_new_buttons(
+        self, tmp_path: Path
+    ) -> None:
+        repo_configs = Path(__file__).resolve().parents[1] / "configs"
+        raw_layout = json.loads(
+            (repo_configs / "stronghold_layout_16_9.json").read_text(encoding="utf-8")
+        )
+        # 模拟旧配置字典：残留局外节点键且缺少 choice_2_zone 与新增的 5 个策略/确认弹窗按钮
+        raw_layout["activity_hub_nodes"] = {
+            "back": {"id": "back", "label": "返回", "u": 0.05, "v": 0.06}
+        }
+        raw_layout["pre_match_nodes"] = {}
+        raw_layout["squad_edit_nodes"] = {}
+        raw_layout["settlement_nodes"] = {}
+        raw_layout.pop("choice_2_zone", None)
+        raw_layout.pop("emote_top_zone", None)
+        raw_layout.pop("emote_bottom_zone", None)
+        for new_key in (
+            "strategy_avatar",
+            "strategy_inspect",
+            "confirm_no",
+            "confirm_yes",
+            "confirm_dont_ask",
+            "emote_panel_center",
+        ):
+            raw_layout["buttons"].pop(new_key, None)
+
+        layout = LayoutProfile.from_dict(raw_layout)
+        assert layout.choice_2_zone.start_u == pytest.approx(0.3809)
+        assert layout.choice_2_zone.end_u == pytest.approx(0.6477)
+        assert layout.resolve_choice_card_center(0, 2) == pytest.approx((0.3809, 0.5000))
+        assert layout.resolve_choice_card_center(1, 2) == pytest.approx((0.6477, 0.5000))
+        assert layout.resolve_emote_slot_center(0) == pytest.approx((0.0582, 0.6771))
+        assert layout.resolve_emote_slot_center(5) == pytest.approx((0.1996, 0.8016))
+        assert layout.buttons["emote_panel_center"] == NormalizedPoint(0.1290, 0.7400, "left_edge")
+        assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
+        assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
+
+        # 模拟旧 user_override.json 残留局外节点键时 ConfigLoader 正常加载不报错
+        (tmp_path / "default_bindings.json").write_text(
+            (repo_configs / "default_bindings.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (tmp_path / "stronghold_layout_16_9.json").write_text(
+            (repo_configs / "stronghold_layout_16_9.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (tmp_path / "user_override.json").write_text(
+            json.dumps(
+                {
+                    "layout": {
+                        "activity_hub_nodes": {"back": {"id": "back", "u": 0.1, "v": 0.1}},
+                        "settlement_nodes": {},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        loader = ConfigLoader(config_dir=tmp_path)
+        _, loaded_layout = loader.load()
+        assert loaded_layout.buttons["confirm_dont_ask"] == NormalizedPoint(
+            0.4992, 0.5597, "center_16_9"
+        )
 
     def test_save_user_override_merge_and_reload(self, tmp_path: Path) -> None:
         repo_configs = Path(__file__).resolve().parents[1] / "configs"

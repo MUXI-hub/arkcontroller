@@ -20,13 +20,14 @@
     "shop_toggle": "a",
     "shop_freeze": "s",
     "shop_refresh": "d",
+    "shop_upgrade": "g",
     "battle_ready": "c",
     "enemy_preview": "w",
     "sell_board": "x",
     "sell_bench": "x",
     "retreat_unit": "q",
     "covenant_panel": "",
-    "emote_wheel": "z",
+    "emote_wheel": "",
     "back": "esc",
     "pause_menu": "esc"
   },
@@ -36,15 +37,6 @@
       "toggle_calibration": "BACK+START",
       "toggle_pause": "LT+BACK",
       "toggle_free_cursor": "LS"
-    },
-    "menu": {
-      "confirm": "A",
-      "back": "B",
-      "quick_squad": "X",
-      "quick_rewards": "Y",
-      "prev_tab": "LB",
-      "next_tab": "RB",
-      "start_action": "START"
     },
     "battle_prep": {
       "select_or_grab": "A",
@@ -69,6 +61,12 @@
       "confirm_choice": "A",
       "fast_confirm_choice": "RT+A",
       "peek_board_hold": "LT"
+    },
+    "modal_confirm": {
+      "confirm": "A",
+      "cancel": "B",
+      "quick_confirm": "START",
+      "toggle_dont_ask": "X"
     },
     "lt_chords": {
       "covenant_panel": "LT+DPAD_LEFT",

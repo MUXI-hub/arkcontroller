@@ -46,6 +46,7 @@ SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 SWP_NOOWNERZORDER = 0x0200
+WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 # PRTS 工业科技风调色板
 COLOR_CYAN = QColor("#00E5FF")
@@ -60,15 +61,14 @@ COLOR_CAPSULE_BG = QColor(12, 16, 22, 212)
 COLOR_CAPSULE_BORDER = QColor(0, 229, 255, 110)
 
 SCENE_DISPLAY_NAMES: dict[GameScene, str] = {
-    GameScene.ACTIVITY_HUB: "活动主界面",
-    GameScene.PRE_MATCH_SETUP: "战前准备",
-    GameScene.SQUAD_EDIT: "编队与甄选",
     GameScene.BATTLE_PREP: "休整运营",
-    GameScene.MODAL_CHOICE: "三选一弹窗",
+    GameScene.MODAL_CHOICE: "决策弹窗",
+    GameScene.MODAL_CONFIRM: "回合确认",
     GameScene.BATTLE_COMBAT: "作战中",
-    GameScene.SETTLEMENT: "对局结算",
-    GameScene.UNKNOWN_FREE_CURSOR: "自由光标",
+    GameScene.UNKNOWN_FREE_CURSOR: "自由鼠标",
 }
+
+_FREE_CURSOR_SYNONYM_LABELS: frozenset[str] = frozenset({"自由鼠标", "自由光标"})
 
 FACE_BUTTON_COLORS: dict[str, tuple[QColor, QColor]] = {
     "A": (COLOR_GREEN, QColor("#FFFFFF")),
@@ -187,6 +187,13 @@ def apply_win32_click_through(hwnd: int) -> bool:
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
+        try:
+            user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+            user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
+            user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), WDA_EXCLUDEFROMCAPTURE)
+        except Exception:
+            # 兼容不支持 WDA_EXCLUDEFROMCAPTURE 的旧版系统或受限测试环境
+            pass
         return True
     except Exception:
         return False
@@ -468,7 +475,12 @@ class HUDWindow(QWidget):
         painter.drawRoundedRect(src_rect, 6.0, 6.0)
 
         # 源槽位顶部标签
-        tag_text = "装备源" if snapshot.deploy_state == DeployState.HOLDING_EQUIP else "抓取源"
+        if snapshot.deploy_state == DeployState.HOLDING_STRATEGY:
+            tag_text = "策略源"
+        elif snapshot.deploy_state == DeployState.HOLDING_EQUIP:
+            tag_text = "装备源"
+        else:
+            tag_text = "抓取源"
         painter.setFont(self._font_small)
         fm = QFontMetrics(self._font_small)
         tw = fm.horizontalAdvance(tag_text) + 10
@@ -611,6 +623,36 @@ class HUDWindow(QWidget):
         painter.setPen(QPen(COLOR_AMBER))
         painter.drawText(hint_rect, Qt.AlignmentFlag.AlignCenter, hint)
 
+    @staticmethod
+    def _format_top_status_text(snapshot: HUDStateSnapshot) -> str:
+        """格式化顶部状态胶囊文案，消除自由鼠标与自由光标同义重复段。"""
+        scene_name = SCENE_DISPLAY_NAMES.get(snapshot.scene, snapshot.scene.value)
+        segments: list[str] = [f"PRTS // {scene_name}"]
+        focus_label = (snapshot.focus_label or "").strip()
+
+        if snapshot.scene == GameScene.UNKNOWN_FREE_CURSOR:
+            if focus_label and focus_label not in _FREE_CURSOR_SYNONYM_LABELS:
+                segments.append(focus_label)
+        else:
+            if focus_label and not (
+                snapshot.free_cursor_active and focus_label in _FREE_CURSOR_SYNONYM_LABELS
+            ):
+                segments.append(focus_label)
+            view_state = getattr(snapshot, "view_state", "normal")
+            if view_state == "shop_open":
+                segments.append("商店展开")
+            elif view_state == "unit_selected":
+                segments.append("角色详情缩放")
+            if snapshot.free_cursor_active:
+                segments.append("自由光标")
+
+        if snapshot.scene_locked_manual:
+            segments.append("手动锁层")
+        if snapshot.paused:
+            segments.append("已暂停")
+
+        return "  ·  ".join(segments)
+
     def _draw_top_status_capsule(
         self,
         painter: QPainter,
@@ -619,23 +661,7 @@ class HUDWindow(QWidget):
         snapshot: HUDStateSnapshot,
     ) -> None:
         """绘制顶部居中微型磨砂黑胶囊及可选 Toast 提示。"""
-        scene_name = SCENE_DISPLAY_NAMES.get(snapshot.scene, snapshot.scene.value)
-        segments: list[str] = [f"PRTS // {scene_name}"]
-        if snapshot.focus_label:
-            segments.append(snapshot.focus_label)
-        view_state = getattr(snapshot, "view_state", "normal")
-        if view_state == "shop_open":
-            segments.append("商店展开")
-        elif view_state == "unit_selected":
-            segments.append("角色详情缩放")
-        if snapshot.free_cursor_active:
-            segments.append("自由光标")
-        if snapshot.scene_locked_manual:
-            segments.append("手动锁层")
-        if snapshot.paused:
-            segments.append("已暂停")
-
-        text = "  ·  ".join(segments)
+        text = self._format_top_status_text(snapshot)
         painter.setFont(self._font_title)
         fm = QFontMetrics(self._font_title)
         text_w = fm.horizontalAdvance(text)
