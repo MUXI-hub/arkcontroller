@@ -46,6 +46,7 @@ SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 SWP_NOOWNERZORDER = 0x0200
+WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 # PRTS 工业科技风调色板
 COLOR_CYAN = QColor("#00E5FF")
@@ -186,6 +187,13 @@ def apply_win32_click_through(hwnd: int) -> bool:
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
+        try:
+            user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+            user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
+            user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), WDA_EXCLUDEFROMCAPTURE)
+        except Exception:
+            # 兼容不支持 WDA_EXCLUDEFROMCAPTURE 的旧版系统或受限测试环境
+            pass
         return True
     except Exception:
         return False
