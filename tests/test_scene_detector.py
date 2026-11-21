@@ -193,6 +193,8 @@ def test_enum_and_result_contract() -> None:
     res = SceneDetectionResult(scene=GameScene.BATTLE_PREP, confidence=0.95)
     assert res.shop_open is True
     assert res.choice_count == 3
+    assert res.emote_panel_open is False
+    assert res.confirm_has_dont_ask is True
     with pytest.raises(FrozenInstanceError):
         res.confidence = 0.5  # type: ignore[misc]
 
@@ -207,6 +209,7 @@ def test_empty_templates_dir_and_safe_fallback(tmp_path: Path) -> None:
     res_none = detector.detect(None)
     assert res_none.scene == GameScene.UNKNOWN_FREE_CURSOR
     assert res_none.confidence == 0.0
+    assert res_none.shop_open is False
 
     # 纯黑帧、纯白帧、纯灰帧
     for fill_val in (0, 128, 255):
@@ -1259,15 +1262,22 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
         r"C:\Users\MUXI\.gemini\antigravity\brain\26ef9845-6d52-4d6e-925c-cbef8d7a9ccc\scratch"
     )
 
-    cases: list[tuple[Path, GameScene, bool | None, int | None, int | None, int | None]] = [
-        (a7_up / "media_1795255173277_9cab756a.jpg", GameScene.MODAL_CONFIRM, False, None, None, None),
-        (a7_up / "media_1795255107638_886a641d.jpg", GameScene.UNKNOWN_FREE_CURSOR, None, None, None, None),
-        (a7_up / "media_1795249195269_5c024fc5.jpg", GameScene.MODAL_CHOICE, False, None, 3, 0),
-        (a7_up / "media_1795250588564_ad5eab9e.jpg", GameScene.MODAL_CHOICE, False, None, 6, 4),
-        (a7_up / "media_1795263414030_b12d9638.jpg", GameScene.MODAL_CHOICE, False, None, 2, 1),
-        (old_sc / "state1_normal.png", GameScene.BATTLE_PREP, False, None, None, None),
-        (old_sc / "state2_shop_open.png", GameScene.BATTLE_PREP, True, 4, None, None),
-        (a7_dir / "shop_6slot_verify.png", GameScene.BATTLE_PREP, True, 6, None, None),
+    cases: list[
+        tuple[Path, GameScene, bool | None, int | None, int | None, int | None, bool | None, bool | None]
+    ] = [
+        (a7_up / "media_1795266584081_fc922d8f.jpg", GameScene.MODAL_CHOICE, False, None, 6, None, False, None),
+        (a7_up / "media_1795266595030_fc375d1b.jpg", GameScene.MODAL_CONFIRM, False, None, None, None, False, False),
+        (a7_up / "media_1795267445949_6c2d7322.jpg", GameScene.BATTLE_PREP, False, None, None, None, True, None),
+        (a7_up / "media_1795267505954_2ea0d702.jpg", GameScene.BATTLE_PREP, True, 4, None, None, False, None),
+        (a7_up / "media_1795255173277_9cab756a.jpg", GameScene.MODAL_CONFIRM, False, None, None, None, False, True),
+        (a7_up / "media_1795255107638_886a641d.jpg", GameScene.UNKNOWN_FREE_CURSOR, False, None, None, None, False, None),
+        (a7_up / "media_1795249195269_5c024fc5.jpg", GameScene.MODAL_CHOICE, False, None, 3, 0, False, None),
+        (a7_up / "media_1795250588564_ad5eab9e.jpg", GameScene.MODAL_CHOICE, False, None, 6, 4, False, None),
+        (a7_up / "media_1795263414030_b12d9638.jpg", GameScene.MODAL_CHOICE, False, None, 2, 1, False, None),
+        (old_sc / "state1_normal.png", GameScene.BATTLE_PREP, False, None, None, None, False, None),
+        (old_sc / "state2_shop_open.png", GameScene.BATTLE_PREP, True, 4, None, None, False, None),
+        (old_sc / "state14_key_w.png", GameScene.BATTLE_PREP, False, None, None, None, False, None),
+        (a7_dir / "shop_6slot_verify.png", GameScene.BATTLE_PREP, True, 6, None, None, False, None),
     ]
 
     available = [c for c in cases if c[0].exists()]
@@ -1275,7 +1285,16 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
         pytest.skip("本机无可选实机标定截图，跳过实机回归校验")
 
     detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
-    for img_path, exp_scene, exp_shop_open, exp_slots, exp_choices, exp_sel_choice in available:
+    for (
+        img_path,
+        exp_scene,
+        exp_shop_open,
+        exp_slots,
+        exp_choices,
+        exp_sel_choice,
+        exp_emote_open,
+        exp_dont_ask,
+    ) in available:
         raw = np.fromfile(str(img_path), dtype=np.uint8)
         frame = cv2.imdecode(raw, cv2.IMREAD_COLOR)
         assert frame is not None, f"无法读取实机截图: {img_path}"
@@ -1290,6 +1309,14 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
         if exp_sel_choice is not None:
             assert res.selected_choice_index == exp_sel_choice, (
                 f"{img_path.name}: selected_choice_index mismatch {res}"
+            )
+        if exp_emote_open is not None:
+            assert res.emote_panel_open is exp_emote_open, (
+                f"{img_path.name}: emote_panel_open mismatch {res}"
+            )
+        if exp_dont_ask is not None:
+            assert res.confirm_has_dont_ask is exp_dont_ask, (
+                f"{img_path.name}: confirm_has_dont_ask mismatch {res}"
             )
 
     # 额外可选校验：桌面实机截图 media_0.png 中带蓝紫底部发光的真实紫红 [G] 升级卡
@@ -1406,6 +1433,185 @@ def test_out_of_game_screens_never_misclassified(tmp_path: Path) -> None:
         ext_dark_cards[18:95, 140:580] = (58, 58, 58)
         ext_dark_cards[310:410, 1135:1280] = (58, 58, 58)
         assert detector.detect(ext_dark_cards).scene == GameScene.UNKNOWN_FREE_CURSOR
+
+
+# =====================================================================
+# 8. v0.2.2 专项：六选一灰卡、0 资金灰刷新商店、表情面板、联机休整与 ESC 退出确认窗
+# =====================================================================
+
+
+def _make_pc_6choice_frame(
+    *,
+    picked_indices: tuple[int, ...] = (),
+    selected_index: int | None = None,
+) -> np.ndarray:
+    """构造官方 PC 16:9 六选一（2x3）合成帧，支持指定已被队友选走的均匀浅灰卡与白条选中态。"""
+    frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 52, dtype=np.uint8)
+    _draw_modal_cyan_chrome(frame)
+    # 右侧方形「收起」按钮
+    cv2.rectangle(frame, (1203, 325), (1273, 395), (120, 120, 120), -1)
+    cv2.rectangle(frame, (1203, 325), (1273, 395), (235, 235, 235), 2)
+
+    cols = [(177, 456), (519, 798), (861, 1140)]
+    boxes = [(xl, 92, xr, 330) for xl, xr in cols] + [
+        (xl, 393, xr, 627) for xl, xr in cols
+    ]
+    for idx, (x1, y1, x2, y2) in enumerate(boxes):
+        if idx in picked_indices:
+            # 已被其他玩家选走：均匀低饱和浅灰卡块（无高亮白框，实机浅灰 med≈145..165）
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (156, 155, 152), -1)
+            cv2.rectangle(frame, (x1 + 24, y1 + 40), (x2 - 24, y2 - 40), (144, 142, 140), -1)
+        elif selected_index == idx:
+            bot_y = y2 + 28
+            cv2.rectangle(frame, (x1, y1), (x2, bot_y), (32, 36, 30), -1)
+            cv2.rectangle(frame, (x1, bot_y - 50), (x2, bot_y), (242, 244, 242), -1)
+            cv2.rectangle(frame, (x1, y1), (x2, bot_y), (245, 248, 245), 3)
+        else:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (24, 26, 28), -1)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (218, 220, 220), 3)
+    return frame
+
+
+def test_v022_6choice_pc_layout_with_picked_grey_cards(tmp_path: Path) -> None:
+    """验证官方 PC 16:9 六选一含 1~3 张已被队友选走浅灰卡及底部白条均精准识别，全灰 6 卡不误判。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    for picked, sel in (
+        ((2,), None),
+        ((0, 2), 4),
+        ((0, 2, 5), 1),
+    ):
+        frame = _make_pc_6choice_frame(picked_indices=picked, selected_index=sel)
+        res = detector.detect(frame)
+        assert res.scene == GameScene.MODAL_CHOICE
+        assert res.choice_count == 6
+        assert res.selected_choice_index == sel
+        assert res.shop_open is False
+
+    # 6 张全部为灰卡（0 张可选暗卡）不命中实机六选一
+    all_grey = _make_pc_6choice_frame(picked_indices=(0, 1, 2, 3, 4, 5), selected_index=None)
+    all_grey_g = cv2.cvtColor(all_grey, cv2.COLOR_BGR2GRAY)
+    all_grey_h = cv2.cvtColor(all_grey, cv2.COLOR_BGR2HSV)
+    assert SceneDetector._detect_real_modal_choice(all_grey_g, all_grey_h) is None
+    assert detector.detect(all_grey).choice_count != 6
+
+
+def test_v022_zero_gold_gray_refresh_shop_open_and_slots(tmp_path: Path) -> None:
+    """验证买完干员剩 0 资金导致刷新按钮变灰时，商店展开态与 4/5/6 槽位仍 100% 精准识别。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    def _make_zero_gold_base(*, frozen: bool = False) -> np.ndarray:
+        frame = _make_base_shop_frame()
+        # 将右侧黄色刷新按钮覆写为 0 资金暗灰色（S≈0，refresh_yellow == 0.0）
+        cv2.rectangle(frame, (1120, 425), (1265, 485), (92, 92, 92), -1)
+        if frozen:
+            # 冻结后「解冻」青绿色按钮（BGR (170, 180, 40) -> H≈88, S≈198, V≈180）
+            cv2.rectangle(frame, (965, 425), (1110, 485), (170, 180, 40), -1)
+        return frame
+
+    # 1. 0 资金灰刷新 + 常规深蓝冻结按钮：4 / 5 / 6 槽均精准识别
+    f4 = _make_zero_gold_base(frozen=False)
+    _draw_gray_upgrade_card(f4, 332, 441)
+    for sx in (450, 612, 774, 936):
+        _draw_shop_item_card(f4, sx, sx + 154, sold_out=False)
+    r4 = detector.detect(f4)
+    assert r4.scene == GameScene.BATTLE_PREP
+    assert r4.shop_open is True
+    assert r4.shop_slot_count == 4
+
+    f5 = _make_zero_gold_base(frozen=True)
+    _draw_gray_upgrade_card(f5, 170, 279)
+    for sx in (288, 450, 612, 774, 936):
+        _draw_shop_item_card(f5, sx, sx + 154, sold_out=False)
+    r5 = detector.detect(f5)
+    assert r5.scene == GameScene.BATTLE_PREP
+    assert r5.shop_open is True
+    assert r5.shop_slot_count == 5
+
+    f6 = _make_zero_gold_base(frozen=False)
+    _draw_gray_upgrade_card(f6, 8, 117)
+    for sx in (126, 288, 450, 612, 774, 936):
+        _draw_shop_item_card(f6, sx, sx + 154, sold_out=False)
+    r6 = detector.detect(f6)
+    assert r6.scene == GameScene.BATTLE_PREP
+    assert r6.shop_open is True
+    assert r6.shop_slot_count == 6
+
+
+def test_v022_emote_panel_and_coop_loading_prep_banner(tmp_path: Path) -> None:
+    """验证联机 LOADING 无粉红按钮时通过顶部紫框+放大镜稳判休整期，并精准识别左下 2x3 表情面板。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 48, dtype=np.uint8)
+    _draw_stronghold_in_game_chrome(frame)
+    # 模拟棋盘区域正常灰阶纹理，避免触发纯色帧守卫
+    cv2.rectangle(frame, (200, 120), (1040, 500), (88, 92, 98), -1)
+    # 模拟联机等待 LOADING...：右上无粉红准备按钮，但顶部中央有「休息一下」紫框 + 左青/右黄双放大镜
+    # 紫框 BGR (190, 65, 175) -> HSV H≈147, S≈168, V=190
+    cv2.rectangle(frame, (575, 12), (705, 58), (190, 65, 175), -1)
+    # 保持顶部中央暗背景占比仍达标（仅紫框覆盖一部分）
+    cv2.rectangle(frame, (595, 22), (685, 48), (22, 24, 28), -1)
+    # 左青色放大镜 (BGR (220, 210, 30) -> H≈91) + 右黄色放大镜 (BGR (30, 210, 240) -> H≈25)
+    cv2.circle(frame, (338, 34), 18, (220, 210, 30), 6)
+    cv2.circle(frame, (944, 34), 18, (30, 210, 240), 6)
+
+    # 未开表情面板时：识别为 BATTLE_PREP, shop_open=False, emote_panel_open=False
+    r_closed = detector.detect(frame)
+    assert r_closed.scene == GameScene.BATTLE_PREP
+    assert r_closed.shop_open is False
+    assert r_closed.emote_panel_open is False
+
+    # 在左下 ROI (x=18..302, y=438..628) 绘制深黑圆角面板 + 2x3 青绿霓虹表情图标
+    frame_emote = frame.copy()
+    cv2.rectangle(frame_emote, (12, 435), (306, 632), (24, 26, 28), -1)
+    for row_y in (488, 576):
+        for col_x in (74, 165, 255):
+            # 青绿霓虹图标（BGR (175, 225, 45) -> HSV H≈82, S≈204, V=225）
+            cv2.circle(frame_emote, (col_x, row_y), 26, (175, 225, 45), -1)
+
+    r_open = detector.detect(frame_emote)
+    assert r_open.scene == GameScene.BATTLE_PREP
+    assert r_open.shop_open is False
+    assert r_open.emote_panel_open is True
+
+    # 商店展开时，即便左下残留青绿元素也应压制 emote_panel_open=False
+    frame_shop = frame_emote.copy()
+    cv2.rectangle(frame_shop, (965, 425), (1110, 485), (230, 140, 20), -1)
+    r_shop = detector.detect(frame_shop)
+    assert r_shop.scene == GameScene.BATTLE_PREP
+    assert r_shop.shop_open is True
+    assert r_shop.emote_panel_open is False
+
+
+def test_v022_esc_confirm_without_dont_ask_silhouette_and_cursor_robustness(
+    tmp_path: Path,
+) -> None:
+    """验证 ESC 退出确认窗（无不再提示、右端深色机械剪影、光标/HUD 压边）稳判 MODAL_CONFIRM 且精准区分 dont_ask。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 1. 回合确认弹窗（含「本局不再提示」文字行）-> confirm_has_dont_ask=True
+    round_confirm = _make_modal_confirm_frame(with_top_ready_pink=True)
+    r_round = detector.detect(round_confirm)
+    assert r_round.scene == GameScene.MODAL_CONFIRM
+    assert r_round.confirm_has_dont_ask is True
+
+    # 2. ESC 暂时离开模拟确认窗：清空「本局不再提示」行，并在右端叠加深暗机械剪影 + 黑/灰带局部压边光标
+    esc_confirm = _make_modal_confirm_frame(with_top_ready_pink=True)
+    esc_confirm[385:422, 540:740] = (16, 16, 16)
+    # 模拟右下确认栏最右端 x=1060..1260 的深暗机械剪影（V=28，极低亮度）
+    esc_confirm[449:521, 1060:1280] = (12, 12, 28)
+    # 模拟纯红区压暗至 V=48（实机深红渐变暗部）
+    esc_confirm[449:521, 980:1060] = (16, 16, 48)
+    # 模拟游戏白色鼠标或青色 HUD 选框局部压过中央黑底边缘与灰取消栏（曾导致脆弱 std 超标）
+    cv2.rectangle(esc_confirm, (40, 210), (95, 250), (245, 245, 245), 3)
+    cv2.circle(esc_confirm, (120, 485), 14, (255, 230, 0), 3)
+
+    r_esc = detector.detect(esc_confirm)
+    assert r_esc.scene == GameScene.MODAL_CONFIRM
+    assert r_esc.confidence == 0.95
+    assert r_esc.shop_open is False
+    assert r_esc.confirm_has_dont_ask is False
+
 
 
 

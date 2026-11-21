@@ -75,6 +75,8 @@ class SceneDetectionResult:
     selected_choice_index: int | None = None
     covenant_count: int | None = None
     has_teammates: bool = False
+    emote_panel_open: bool = False
+    confirm_has_dont_ask: bool = True
 
 
 @dataclass(frozen=True)
@@ -226,7 +228,7 @@ class SceneDetector:
         self._stable_result: SceneDetectionResult = SceneDetectionResult(
             scene=GameScene.UNKNOWN_FREE_CURSOR,
             confidence=0.0,
-            shop_open=True,
+            shop_open=False,
             choice_count=3,
             unit_selected=False,
         )
@@ -247,7 +249,7 @@ class SceneDetector:
             self._stable_result = SceneDetectionResult(
                 scene=GameScene.UNKNOWN_FREE_CURSOR,
                 confidence=0.0,
-                shop_open=True,
+                shop_open=False,
                 choice_count=3,
             )
             self._pending_scene = None
@@ -368,7 +370,7 @@ class SceneDetector:
             return SceneDetectionResult(
                 scene=GameScene.UNKNOWN_FREE_CURSOR,
                 confidence=0.0,
-                shop_open=True,
+                shop_open=False,
                 choice_count=3,
             )
 
@@ -379,7 +381,7 @@ class SceneDetector:
                 return SceneDetectionResult(
                     scene=GameScene.UNKNOWN_FREE_CURSOR,
                     confidence=0.0,
-                    shop_open=True,
+                    shop_open=False,
                     choice_count=3,
                 )
 
@@ -390,7 +392,7 @@ class SceneDetector:
             return SceneDetectionResult(
                 scene=GameScene.UNKNOWN_FREE_CURSOR,
                 confidence=0.0,
-                shop_open=True,
+                shop_open=False,
                 choice_count=3,
             )
 
@@ -419,6 +421,8 @@ class SceneDetector:
             selected_choice_index: int | None = None
             covenant_count: int | None = None
             has_teammates = False
+            emote_panel_open = False
+            confirm_has_dont_ask = True
             gray_lazy: np.ndarray | None = None
             hsv_lazy: np.ndarray | None = None
 
@@ -433,6 +437,10 @@ class SceneDetector:
                 has_teammates = self._detect_teammates_heuristic(
                     gray_lazy, unit_selected=unit_selected
                 )
+                if not shop_open and not unit_selected:
+                    emote_panel_open = self._detect_emote_panel_open_heuristic(
+                        gray_lazy, hsv_lazy
+                    )
             elif best_scene == GameScene.MODAL_CHOICE:
                 shop_open = False
                 gray_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -443,6 +451,8 @@ class SceneDetector:
                 has_teammates = self._detect_teammates_heuristic(gray_lazy, unit_selected=False)
             elif best_scene == GameScene.MODAL_CONFIRM:
                 shop_open = False
+                gray_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                confirm_has_dont_ask = self._detect_confirm_has_dont_ask_heuristic(gray_lazy)
             elif best_scene == GameScene.BATTLE_COMBAT:
                 shop_open = False
                 unit_selected = self._detect_unit_selected(frame, unit_template)
@@ -452,6 +462,10 @@ class SceneDetector:
                 has_teammates = self._detect_teammates_heuristic(
                     gray_lazy, unit_selected=unit_selected
                 )
+                if not unit_selected:
+                    emote_panel_open = self._detect_emote_panel_open_heuristic(
+                        gray_lazy, hsv_lazy
+                    )
             return SceneDetectionResult(
                 scene=best_scene,
                 confidence=round(best_score, 4),
@@ -462,6 +476,8 @@ class SceneDetector:
                 selected_choice_index=selected_choice_index,
                 covenant_count=covenant_count,
                 has_teammates=has_teammates,
+                emote_panel_open=emote_panel_open,
+                confirm_has_dont_ask=confirm_has_dont_ask,
             )
 
         # (b) 第二层：启发式视觉特征回退
@@ -570,11 +586,70 @@ class SceneDetector:
         return (refresh_yellow, freeze_blue)
 
     @staticmethod
+    def _measure_top_prep_purple_and_magnifiers(hsv: np.ndarray) -> tuple[float, float, float]:
+        """测量顶部中央「休息一下」紫框与左右双放大镜像素占比（用于兼容联机 LOADING 等待期）。"""
+        top_p = hsv[6:66, 555:725]
+        top_purple = float(
+            (
+                (top_p[:, :, 0] >= 125)
+                & (top_p[:, :, 0] <= 162)
+                & (top_p[:, :, 1] >= 80)
+                & (top_p[:, :, 2] >= 90)
+            ).mean()
+        )
+        l_mag = hsv[12:56, 302:376]
+        lm_cyan = float(
+            (
+                (l_mag[:, :, 0] >= 78)
+                & (l_mag[:, :, 0] <= 108)
+                & (l_mag[:, :, 1] >= 90)
+                & (l_mag[:, :, 2] >= 100)
+            ).mean()
+        )
+        r_mag = hsv[12:56, 908:982]
+        rm_yel = float(
+            (
+                (r_mag[:, :, 0] >= 14)
+                & (r_mag[:, :, 0] <= 38)
+                & (r_mag[:, :, 1] >= 90)
+                & (r_mag[:, :, 2] >= 100)
+            ).mean()
+        )
+        return (top_purple, lm_cyan, rm_yel)
+
+    @classmethod
+    def _has_real_pc_prep_banner(cls, hsv: np.ndarray) -> bool:
+        """判断当前是否处于实机卫戍休整期（右上粉红准备按钮，或联机等待/出怪预览紫框+放大镜）。"""
+        if cls._measure_top_right_ready_pink_ratio(hsv) >= 0.28:
+            return True
+        if not cls._has_stronghold_in_game_chrome(hsv):
+            return False
+        top_purple, lm_cyan, rm_yel = cls._measure_top_prep_purple_and_magnifiers(hsv)
+        return top_purple >= 0.045 and (lm_cyan >= 0.14 or rm_yel >= 0.14)
+
+    @staticmethod
+    def _detect_emote_panel_open_heuristic(gray: np.ndarray, hsv: np.ndarray) -> bool:
+        """检测左下角 2x3 深黑圆角「交流」表情面板是否处于展开状态（ROI x=18..302, y=438..628）。"""
+        roi_g = gray[438:628, 18:302]
+        roi_h = hsv[438:628, 18:302]
+        dark_ratio = float((roi_g <= 68).mean())
+        if dark_ratio < 0.45:
+            return False
+        cyan_ratio = float(
+            (
+                (roi_h[:, :, 0] >= 65)
+                & (roi_h[:, :, 0] <= 102)
+                & (roi_h[:, :, 1] >= 55)
+                & (roi_h[:, :, 2] >= 100)
+            ).mean()
+        )
+        return cyan_ratio >= 0.14
+
+    @staticmethod
     def _detect_unit_selected_heuristic(frame: np.ndarray) -> bool:
         """基于左侧角色青蓝生命条（排除拖拽售出态）判断角色详情特写面板是否展开。"""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        ready_pink = SceneDetector._measure_top_right_ready_pink_ratio(hsv)
-        if ready_pink < 0.28:
+        if not SceneDetector._has_real_pc_prep_banner(hsv):
             return False
         hp_roi = hsv[325:345, 5:430]
         hp_blue = float(
@@ -598,14 +673,13 @@ class SceneDetector:
 
     @staticmethod
     def _detect_shop_open_heuristic(frame: np.ndarray) -> bool:
-        """判断休整期商店是否处于展开状态（兼容实机右侧刷新/冻结色块与通用卡牌边缘特征）。"""
+        """判断休整期商店是否处于展开状态（脱离资金刷新变灰依赖，兼容实机与合成测试帧）。"""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        ready_pink = SceneDetector._measure_top_right_ready_pink_ratio(hsv)
         refresh_yellow, freeze_blue = SceneDetector._measure_shop_action_buttons(hsv)
 
-        # 实机休整期画面（右上角存在粉红准备就绪按钮）：直接采用零误差的刷新/冻结双按钮色块判别
-        if ready_pink >= 0.28:
-            return refresh_yellow >= 0.25 and freeze_blue >= 0.25
+        # 实机休整期画面（含粉红准备按钮态、0 资金灰刷新态及联机 LOADING 紫框+放大镜态）
+        if SceneDetector._has_real_pc_prep_banner(hsv):
+            return (freeze_blue >= 0.45) or (refresh_yellow >= 0.25 and freeze_blue >= 0.25)
 
         # 兼容非实机布局/自定义主题及单元测试合成帧
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -822,11 +896,10 @@ class SceneDetector:
         - 4 槽：升级卡 x=332..441（其余兜底默认 4 槽）。
         """
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        ready_pink = cls._measure_top_right_ready_pink_ratio(hsv)
-        if ready_pink < 0.28:
+        if not cls._has_real_pc_prep_banner(hsv):
             return None
         refresh_yellow, freeze_blue = cls._measure_shop_action_buttons(hsv)
-        if refresh_yellow < 0.25 or freeze_blue < 0.25:
+        if not ((freeze_blue >= 0.45) or (refresh_yellow >= 0.25 and freeze_blue >= 0.25)):
             return None
 
         has_upg6 = cls._has_shop_upgrade_card(hsv, 8, 117)
@@ -847,29 +920,34 @@ class SceneDetector:
         return 4
 
     @staticmethod
-    def _detect_modal_confirm_heuristic(
-        gray: np.ndarray, hsv: np.ndarray
-    ) -> SceneDetectionResult | None:
-        """检测回合结束未用完资金/策略确认弹窗（中央全宽黑框 + 左下灰取消栏 + 右下暗红确认栏）。
+    def _detect_confirm_has_dont_ask_heuristic(gray: np.ndarray) -> bool:
+        """判断确认弹窗中央偏下区域是否存在「☐ 本局不再提示」勾选行。"""
+        return float((gray[388:418, 545:735] >= 100).mean()) >= 0.05
 
-        须置于 ``_measure_top_right_ready_pink_ratio`` 之前执行，防止上方模糊背景残留的
-        粉红准备按钮将确认弹窗误判为 ``BATTLE_PREP``。
+    @classmethod
+    def _detect_modal_confirm_heuristic(
+        cls, gray: np.ndarray, hsv: np.ndarray
+    ) -> SceneDetectionResult | None:
+        """检测回合结束资金/策略确认弹窗及局内 ESC 退出确认弹窗（统一命中 ``MODAL_CONFIRM``）。
+
+        须置于 ``_measure_top_right_ready_pink_ratio`` 之前执行，并具备以下抗干扰加固：
+        1. 中央全宽黑底使用分位数（80 分位 < 30.0）替代脆弱标准差，避免光标/选框压边拉高 std；
+        2. 左下灰取消栏避开中央文字区且放宽至 ``>= 0.74``；
+        3. 右下暗红确认栏聚焦 ``x∈[655..885]∪[980..1080]`` 避开右端深色机械剪影并放宽 ``V >= 42``；
+        4. 自动检测 ``gray[388:418, 545:735]`` 区分是否包含「本局不再提示」行。
         """
         # 1. 中央全宽黑底确认框左右空白边缘：y=200..440, x∈[20..220]∪[1060..1260]
         dark_band = np.concatenate(
             [gray[200:440, 20:220], gray[200:440, 1060:1260]], axis=1
         )
-        dark_ratio = float((dark_band < 34).mean())
-        dark_std = float(dark_band.std())
-        if dark_ratio < 0.88 or dark_std > 14.0:
+        dark_ratio = float((dark_band < 36).mean())
+        dark_p80 = float(np.percentile(dark_band, 80))
+        if dark_ratio < 0.82 or dark_p80 >= 30.0:
             return None
 
-        # 2. 左下灰色「☒ 取消」栏：y=455..515, x∈[20..240]∪[420..620]
+        # 2. 左下灰色「☒ 取消」栏（避开中央图标文字区）：y=455..515, x∈[30..235]∪[410..615]
         cancel_hsv = np.concatenate(
-            [hsv[455:515, 20:240], hsv[455:515, 420:620]], axis=1
-        )
-        cancel_gray = np.concatenate(
-            [gray[455:515, 20:240], gray[455:515, 420:620]], axis=1
+            [hsv[455:515, 30:235], hsv[455:515, 410:615]], axis=1
         )
         cancel_ratio = float(
             (
@@ -878,29 +956,30 @@ class SceneDetector:
                 & (cancel_hsv[:, :, 2] <= 120)
             ).mean()
         )
-        cancel_std = float(cancel_gray.std())
-        if cancel_ratio < 0.82 or cancel_std > 16.0:
+        if cancel_ratio < 0.74:
             return None
 
-        # 3. 右下暗红「☑ 确认」栏：y=455..515, x∈[660..860]∪[1060..1240]
+        # 3. 右下暗红「☑ 确认」栏（避开最右端深色机械剪影）：y=455..515, x∈[655..885]∪[980..1080]
         confirm_hsv = np.concatenate(
-            [hsv[455:515, 660:860], hsv[455:515, 1060:1240]], axis=1
+            [hsv[455:515, 655:885], hsv[455:515, 980:1080]], axis=1
         )
         confirm_red_ratio = float(
             (
                 ((confirm_hsv[:, :, 0] <= 14) | (confirm_hsv[:, :, 0] >= 166))
                 & (confirm_hsv[:, :, 1] >= 95)
-                & (confirm_hsv[:, :, 2] >= 65)
+                & (confirm_hsv[:, :, 2] >= 42)
                 & (confirm_hsv[:, :, 2] <= 215)
             ).mean()
         )
-        if confirm_red_ratio < 0.78:
+        if confirm_red_ratio < 0.72:
             return None
 
+        confirm_has_dont_ask = cls._detect_confirm_has_dont_ask_heuristic(gray)
         return SceneDetectionResult(
             scene=GameScene.MODAL_CONFIRM,
             confidence=0.95,
             shop_open=False,
+            confirm_has_dont_ask=confirm_has_dont_ask,
         )
 
     def _detect_unit_selected(
@@ -924,13 +1003,13 @@ class SceneDetector:
             return SceneDetectionResult(
                 scene=GameScene.UNKNOWN_FREE_CURSOR,
                 confidence=0.0,
-                shop_open=True,
+                shop_open=False,
                 choice_count=3,
             )
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # 0. 优先检测回合结束资金/策略确认弹窗（须位于粉红准备按钮检测之前，避免模糊背景误判）
+        # 0. 优先检测回合结束/ESC 退出确认弹窗（须位于粉红准备按钮检测之前，避免模糊背景误判）
         confirm_result = self._detect_modal_confirm_heuristic(gray, hsv)
         if confirm_result is not None:
             return confirm_result
@@ -943,9 +1022,11 @@ class SceneDetector:
         # 局内身份门禁：2a 与 2b 均强制共现卫戍协议局内双锚点，局外界面严守 UNKNOWN_FREE_CURSOR
         in_game_chrome = self._has_stronghold_in_game_chrome(hsv)
 
-        # 2a. 实机官方 PC 端卫戍协议休整期强特征：局内锚点 + 右上角粉红「准备就绪」按钮（~0.52）
+        # 2a. 实机官方 PC 端卫戍协议休整期：右上角粉红「准备就绪」按钮，或联机 LOADING/出怪预览紫框+放大镜
         top_ready_pink = self._measure_top_right_ready_pink_ratio(hsv)
-        if in_game_chrome and top_ready_pink >= 0.28:
+        top_purple, lm_cyan, rm_yel = self._measure_top_prep_purple_and_magnifiers(hsv)
+        top_prep_banner_ok = top_purple >= 0.045 and (lm_cyan >= 0.14 or rm_yel >= 0.14)
+        if in_game_chrome and (top_ready_pink >= 0.28 or top_prep_banner_ok):
             shop_open = self._detect_shop_open(frame, shop_template)
             unit_selected = self._detect_unit_selected(frame, unit_template)
             shop_slot_count = (
@@ -955,7 +1036,15 @@ class SceneDetector:
             has_teammates = self._detect_teammates_heuristic(
                 gray, unit_selected=unit_selected
             )
-            confidence = min(0.90, 0.72 + 0.30 * min(top_ready_pink, 0.60))
+            emote_panel_open = (
+                self._detect_emote_panel_open_heuristic(gray, hsv)
+                if (not shop_open and not unit_selected)
+                else False
+            )
+            if top_ready_pink >= 0.28:
+                confidence = min(0.90, 0.72 + 0.30 * min(top_ready_pink, 0.60))
+            else:
+                confidence = min(0.86, 0.74 + 0.80 * min(top_purple, 0.12))
             return SceneDetectionResult(
                 scene=GameScene.BATTLE_PREP,
                 confidence=round(confidence, 4),
@@ -965,6 +1054,7 @@ class SceneDetector:
                 shop_slot_count=shop_slot_count,
                 covenant_count=covenant_count,
                 has_teammates=has_teammates,
+                emote_panel_open=emote_panel_open,
             )
 
         # 2b. 通用底部整备槽位条纹特征（需先通过局内身份门禁，彻底免疫战前编队/干员列表/基建误判）
@@ -984,6 +1074,11 @@ class SceneDetector:
                     has_teammates = self._detect_teammates_heuristic(
                         gray, unit_selected=unit_selected
                     )
+                    emote_panel_open = (
+                        self._detect_emote_panel_open_heuristic(gray, hsv)
+                        if (not shop_open and not unit_selected)
+                        else False
+                    )
                     return SceneDetectionResult(
                         scene=GameScene.BATTLE_PREP,
                         confidence=round(confidence, 4),
@@ -992,6 +1087,7 @@ class SceneDetector:
                         unit_selected=unit_selected,
                         covenant_count=covenant_count,
                         has_teammates=has_teammates,
+                        emote_panel_open=emote_panel_open,
                     )
 
                 # 右下角无准备按钮高亮块，且顶部中央存在作战波次 HUD 面板 -> 作战期
@@ -1003,6 +1099,11 @@ class SceneDetector:
                     has_teammates = self._detect_teammates_heuristic(
                         gray, unit_selected=unit_selected
                     )
+                    emote_panel_open = (
+                        self._detect_emote_panel_open_heuristic(gray, hsv)
+                        if not unit_selected
+                        else False
+                    )
                     return SceneDetectionResult(
                         scene=GameScene.BATTLE_COMBAT,
                         confidence=round(confidence, 4),
@@ -1011,13 +1112,14 @@ class SceneDetector:
                         unit_selected=unit_selected,
                         covenant_count=covenant_count,
                         has_teammates=has_teammates,
+                        emote_panel_open=emote_panel_open,
                     )
 
         # 置信度不足时一律安全返回未知自由光标模式
         return SceneDetectionResult(
             scene=GameScene.UNKNOWN_FREE_CURSOR,
             confidence=0.0,
-            shop_open=True,
+            shop_open=False,
             choice_count=3,
         )
 
@@ -1086,6 +1188,72 @@ class SceneDetector:
         return best_idx
 
     @classmethod
+    def _eval_6choice_layout(
+        cls,
+        gray: np.ndarray,
+        hsv: np.ndarray,
+        gx: np.ndarray,
+        cols: tuple[tuple[int, int], tuple[int, int], tuple[int, int]],
+        row_specs: tuple[tuple[int, int, int, int], tuple[int, int, int, int]],
+        confirm_boxes: list[tuple[int, int, int, int]],
+        excl_bands: tuple[tuple[int, int], tuple[int, int]] | None = None,
+    ) -> SceneDetectionResult | None:
+        """评估指定 2x3 六选一列布局是否命中（允许 1~5 张已被队友选走的均匀浅灰卡）。"""
+        xs = [x for pair in cols for x in pair]
+        if excl_bands is not None:
+            for ey1, ey2 in excl_bands:
+                ex_edges = cls._v_border_strength(gx, xs, ey1, ey2)
+                if float(np.mean(ex_edges)) < 165.0 or min(ex_edges) < 85.0:
+                    return None
+
+        all_edges: list[float] = []
+        dark_count = 0
+        for ey1, ey2, iy1, iy2 in row_specs:
+            for xl, xr in cols:
+                el, er = cls._v_border_strength(gx, (xl, xr), ey1, ey2)
+                min_e = min(el, er)
+                all_edges.extend((el, er))
+
+                sub_g = gray[iy1:iy2, xl + 16 : xr - 16]
+                sub_s = hsv[iy1:iy2, xl + 16 : xr - 16, 1]
+                if sub_g.size == 0:
+                    return None
+                g_mean = float(sub_g.mean())
+                s_mean = float(sub_s.mean())
+                grey_ratio = float(((sub_g >= 115) & (sub_g <= 215) & (sub_s <= 35)).mean())
+
+                is_dark_card = min_e >= 135.0 and g_mean < 115.0
+                is_picked_grey = (
+                    min_e >= 105.0
+                    and 110.0 <= g_mean <= 208.0
+                    and s_mean <= 35.0
+                    and grey_ratio >= 0.45
+                )
+                if is_dark_card:
+                    dark_count += 1
+                elif not is_picked_grey:
+                    return None
+
+        if dark_count < 1:
+            return None
+
+        edge_mean = float(np.mean(all_edges))
+        if edge_mean < 180.0:
+            return None
+
+        selected_idx = cls._detect_white_confirm_bar_index(hsv, confirm_boxes)
+        has_mates = cls._detect_teammates_heuristic(gray, unit_selected=False)
+        conf = min(0.94, 0.78 + 0.16 * min(edge_mean / 550.0, 1.0))
+        return SceneDetectionResult(
+            scene=GameScene.MODAL_CHOICE,
+            confidence=round(conf, 4),
+            shop_open=False,
+            choice_count=6,
+            selected_choice_index=selected_idx,
+            has_teammates=has_mates,
+        )
+
+    @classmethod
     def _detect_real_modal_choice(
         cls, gray: np.ndarray, hsv: np.ndarray
     ) -> SceneDetectionResult | None:
@@ -1100,39 +1268,43 @@ class SceneDetector:
 
         gx = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
 
-        # (A) 多人模式 2x3 六选一网格检测（列边界 x=[220,478], [528,785], [835,1093]）
-        cols_6 = ((220, 478), (528, 785), (835, 1093))
-        xs_6 = [x for pair in cols_6 for x in pair]
-        top_edges = cls._v_border_strength(gx, xs_6, 130, 325)
-        bot_edges = cls._v_border_strength(gx, xs_6, 395, 595)
-        if (
-            float(np.mean(top_edges)) >= 230.0
-            and float(np.mean(bot_edges)) >= 230.0
-            and min(top_edges + bot_edges) >= 135.0
-        ):
-            interiors_ok = all(
-                float(gray[135:295, xl + 16 : xr - 16].mean()) < 115.0
-                and float(gray[405:565, xl + 16 : xr - 16].mean()) < 115.0
-                for xl, xr in cols_6
-            )
-            if interiors_ok:
-                confirm_boxes_6 = [
-                    (xl + 14, 310, xr - 14, 362) for xl, xr in cols_6
-                ] + [
-                    (xl + 14, 582, xr - 14, 636) for xl, xr in cols_6
-                ]
-                selected_idx = cls._detect_white_confirm_bar_index(hsv, confirm_boxes_6)
-                has_mates = cls._detect_teammates_heuristic(gray, unit_selected=False)
-                edge_mean = float(np.mean(top_edges + bot_edges))
-                conf = min(0.94, 0.78 + 0.16 * min(edge_mean / 550.0, 1.0))
-                return SceneDetectionResult(
-                    scene=GameScene.MODAL_CHOICE,
-                    confidence=round(conf, 4),
-                    shop_open=False,
-                    choice_count=6,
-                    selected_choice_index=selected_idx,
-                    has_teammates=has_mates,
-                )
+        # (A1) 官方 PC 16:9 实机 2x3 六选一网格（列边界 x=[177,456], [519,798], [861,1140]，兼容已被队友选走浅灰卡）
+        cols_6_pc = ((177, 456), (519, 798), (861, 1140))
+        confirm_boxes_6_pc = [
+            (xl + 14, 305, xr - 14, 358) for xl, xr in cols_6_pc
+        ] + [
+            (xl + 14, 604, xr - 14, 656) for xl, xr in cols_6_pc
+        ]
+        hit_6_pc = cls._eval_6choice_layout(
+            gray,
+            hsv,
+            gx,
+            cols=cols_6_pc,
+            row_specs=((100, 320, 108, 305), (400, 618, 410, 600)),
+            confirm_boxes=confirm_boxes_6_pc,
+            excl_bands=((108, 225), (520, 615)),
+        )
+        if hit_6_pc is not None:
+            return hit_6_pc
+
+        # (A2) 兼容旧宽屏录屏 2x3 六选一网格（列边界 x=[220,478], [528,785], [835,1093]）
+        cols_6_wide = ((220, 478), (528, 785), (835, 1093))
+        confirm_boxes_6_wide = [
+            (xl + 14, 310, xr - 14, 362) for xl, xr in cols_6_wide
+        ] + [
+            (xl + 14, 582, xr - 14, 636) for xl, xr in cols_6_wide
+        ]
+        hit_6_wide = cls._eval_6choice_layout(
+            gray,
+            hsv,
+            gx,
+            cols=cols_6_wide,
+            row_specs=((130, 325, 135, 295), (395, 595, 405, 565)),
+            confirm_boxes=confirm_boxes_6_wide,
+            excl_bands=None,
+        )
+        if hit_6_wide is not None:
+            return hit_6_wide
 
         # (B) 单人/常规 1x3 三选一横排检测（列边界 x=[171,460], [515,801], [857,1144]）
         cols_3 = ((171, 460), (515, 801), (857, 1144))
