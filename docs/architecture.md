@@ -139,7 +139,7 @@ flowchart TD
 | **零内存/零注入** | 严禁调用 `OpenProcess` 读写内存、DLL 注入或 Hook 游戏进程；仅使用公开 Win32 输入与窗口查询 API |
 | **UIPI 权限合规** | 通过标准 UAC 提权与官方 PC 客户端（`Arknights.exe`）对齐完整性级别，避免任何绕过安全检查的行为 |
 | **64 位 SendInput 对齐** | `VirtualHID` 在 `ctypes.Union` 中完整定义 `MOUSEINPUT`、`KEYBDINPUT`、`HARDWAREINPUT`，确保 64 位 Windows 下 `ctypes.sizeof(INPUT) == 40`，并使用 `MapVirtualKeyW` 发送硬件扫描码（`KEYEVENTF_SCANCODE`） |
-| **HUD 绝对不抢焦点** | `HUDWindow` 同时启用 Qt `WindowTransparentForInput` + `WA_ShowWithoutActivating` 与 Win32 `SetWindowLongW(GWL_EXSTYLE, WS_EX_LAYERED \| WS_EX_TRANSPARENT \| WS_EX_NOACTIVATE \| WS_EX_TOPMOST)`，确保所有真实与合成点击 100% 穿透至游戏窗口 |
+| **HUD 绝对不抢焦点 & 防截屏污染** | `HUDWindow` 同时启用 Qt `WindowTransparentForInput` + `WA_ShowWithoutActivating`、Win32 `SetWindowLongW(GWL_EXSTYLE, WS_EX_LAYERED \| WS_EX_TRANSPARENT \| WS_EX_NOACTIVATE \| WS_EX_TOPMOST)` 以及 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`，确保所有点击 100% 穿透至游戏窗口，且后台 `mss` / DWM 截屏自动忽略透明 HUD 图层，杜绝青色选框干扰视觉识别 |
 | **失焦自动挂起** | `ControlDispatcher` 在每帧核对 `viewport is not None and viewport.is_foreground`，游戏切出前台或暂停时立刻隐藏 HUD 并停止所有键鼠模拟 |
 
 ---
@@ -161,10 +161,10 @@ Windows UAC 提权切回安全桌面瞬间可能导致后台线程首次初始�
 1. **局部 ROI 模板匹配层**：扫描 `assets/templates/` 中的 `<scene>.png` 与配套 `.json`（含 `roi_norm`、`threshold`、`search_padding`），在限定局部窗口内运行 `cv2.matchTemplate(..., cv2.TM_CCOEFF_NORMED)`（默认阈值 `0.82`），并过滤零方差纯色图像避免伪高分。
 2. **零模板 HSV 强特征与几何启发式层**：
    - **局外 100% 防误判双锚点门禁**：`BATTLE_PREP` / `BATTLE_COMBAT` 启发式分支强制校验 `_has_stronghold_in_game_chrome()`（左上深红退出门 + 顶部中央深黑状态栏双锚点同时命中），并将右上准备按钮色相收窄至真实粉红区间 `(H >= 158) | (H <= 4)`，同时要求所有弹窗分支满足 `modal_chrome`（顶部青色标题带或右侧方形收起按钮），确保主界面、活动横幅、战前编队、干员列表与基建画面 100% 保持在 `UNKNOWN_FREE_CURSOR`；
-   - **回合结束确认弹窗（`MODAL_CONFIRM`）**：优先于右上角准备按钮检测，联合判定中央全宽黑底左右边缘（`gray < 34` 且低方差）、左下灰色「取消」栏与右下暗红「确认」栏三特征，精准捕获未用完资金/策略确认窗；
-   - **自适应决策弹窗（`MODAL_CHOICE`：`1x2` / `1x3` / `2x3`）**：基于 Sobel 垂直卡片边框梯度与白色「确认选择」底条检测，按 `6 选一 -> 3 选一 -> 2 选一` 顺序零模板区分多人 `2x3` 六选一、单人 `1x3` 三选一与 `1x2` 二选一并实时追踪已选中索引；其中二选一两翼外围检测采用按列垂直均值再取列峰（`mean(axis=0).max()`），免疫压暗雪山/砖块斜边纹理背景干扰；
-   - **休整运营与 4/5/6 槽鲁棒识别（`BATTLE_PREP`）**：通过右上角粉红准备按钮、展开商店右侧黄色刷新 + 蓝/青冻结双态色块、左侧角色详情青蓝血条判别 `shop_open` 与 `unit_selected`；商店栏位检测采用 `±12px` 垂直边框峰值搜索，兼容灰态与自带蓝紫底部发光渐层的紫红高亮 `[G]` 升级卡，并对商品卡左专属非重叠区与右主区施加独立分段约束（兼容已售空 `NO INFO` 暗蓝空槽），杜绝亮地图背景下 4 误判 5 / 5 误判 6；同时实时检测顶部居中对称羁绊图标数量（`0~9`）及多人左侧队友头像。
-3. **连续帧防抖与不打断保护**：连续 `debounce_frames = 2` 帧一致后切换稳定场景；干员/装备/策略抓取与定朝向期间不强行切层。即便用户通过 `Back` 键处于**手动锁层（`BATTLE_PREP`）**，只要视觉同为 `BATTLE_PREP`，`ControlDispatcher` 依然持续同步 `shop_open`、`shop_slot_count`、`unit_selected`、`covenant_count` 与 `has_teammates`。
+   - **回合结束 & `ESC` 退出确认弹窗（`MODAL_CONFIRM`）**：优先于右上角准备按钮检测，采用黑底分位数约束（`dark_ratio >= 0.82 & p80 < 30`）、左下纯灰取消带与避开右下机械剪影的暗红确认带联合判定，并通过中央上方亮像素占比输出 `confirm_has_dont_ask` 自动区分三项回合确认窗与双项 `ESC` 暂时离开窗；
+   - **自适应决策弹窗（`MODAL_CHOICE`：`1x2` / `1x3` / `2x3`）**：基于 Sobel 垂直卡片边框梯度与白色「确认选择」底条检测，按 `6 选一（支持官方 PC 16:9 与旧宽屏双布局，单槽兼容未选暗卡与 1~5 张已被队友选走的均匀浅灰卡） -> 3 选一 -> 2 选一` 顺序零模板区分并实时追踪 `selected_choice_index`；二选一两翼外围检测采用按列垂直均值再取列峰（`mean(axis=0).max()`）免疫压暗雪山纹理背景；
+   - **休整运营、0 资金商店与左下 `2x3` 表情面板（`BATTLE_PREP`）**：支持右上角粉红准备按钮或联机 `LOADING...` 顶部「休息一下」紫框 + 放大镜双路径判定；商店展开与槽数检测彻底脱离 `refresh_yellow` 资金颜色依赖，升级为 `(freeze_blue >= 0.45) or (refresh_yellow >= 0.25 and freeze_blue >= 0.25)`，在 0 资金刷新变灰后仍稳判 `shop_open=True` 与 `4/5/6` 槽；`±12px` 峰值搜索兼容紫红 `[G]` 升级卡与已售空 `NO INFO` 空槽；非商店/非详情态下同步检测左下 `2x3` 表情面板（`emote_panel_open`）、顶部居中对称羁绊数量（`0~9`）及多人左侧队友头像。
+3. **连续帧防抖与不打断保护**：连续 `debounce_frames = 2` 帧一致后切换稳定场景；干员/装备/策略抓取与定朝向期间不强行切层。即便用户通过 `Back` 键处于**手动锁层**，只要同为 `BATTLE_PREP`、`MODAL_CHOICE` 或 `MODAL_CONFIRM`，`ControlDispatcher` 依然实时同步 `shop_open`、`shop_slot_count`、`unit_selected`、`emote_panel_open`、`covenant_count`、`has_teammates`、`choice_count`、`selected_choice_index` 与 `confirm_has_dont_ask`；当商店收起时自动将空闲 `FocusZone.SHOP` 退回 `FocusZone.BENCH` 防止残留选框。
 
 ---
 

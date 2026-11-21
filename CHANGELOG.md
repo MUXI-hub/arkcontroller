@@ -2,6 +2,25 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [0.2.2] - 2026-11-21
+
+### 新增与修复 (Added & Fixed)
+- **商店防误触「连按两次 `A` 购买」+「`RT + A` 查看商店干员详情」(`arkcontroller.control`)**：
+  - 在 `FocusZone.SHOP` 空闲态下，第 1 次按 **`A`** 仅本地进入 2.0 秒预选确认态（不发送鼠标单击，避免诱发角色详情抢走第 2 次按键），HUD 状态栏提示 `商店 [i/N] · 再按A购买`；有效期内同槽第 2 次按 **`A`** 执行双击完成购买；预选态按 **`B`** 仅取消预选而不收起商店，换槽/切区/商店收起/超时自动清预选。
+  - 在 `FocusZone.SHOP` 按 **`RT + A`** 单击展开该商店干员详情（屏蔽误触发 `X` 出售与 `Y` 撤回并在 HUD 隐藏这两项提示），按 **`B`** 点击右侧安全空白区退出详情并精准回到原商店卡槽。
+- **左下「交流」按钮与 `2x3` 表情面板全交互 + 滚轮翻页 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 移除官方 PC 客户端无效的 `"emote_wheel": "z"` 快捷键，实机校准左下「交流」按钮 `(0.0684, 0.9181, left_edge)`、面板滚轮中心 `emote_panel_center (0.1290, 0.7400, left_edge)` 与 `emote_top_zone` / `emote_bottom_zone`（`2x3` 六枚表情槽）。
+  - 新增 `SceneDetectionResult.emote_panel_open` 自动识别与 `FocusZone.EMOTE_PANEL`：通过 `LT + D-Pad 下`（或在队友栏底部继续按下）呼出时，若商店展开则先自动收起商店再点击「交流」按钮；面板内支持方向键 `2x3` 选表情（指针跟随）、推右摇杆 **`RS`** 自动移至面板中心滚动翻页、`LB`/`RB` 快捷翻页、**`A`** 发送、**`B`** 关闭面板回归原区。
+- **多人六选一（`2x3`）PC 16:9 校准、含已被选走浅灰卡识别与手动锁层同步 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 实机校准官方 PC 16:9 六选一三列对齐布局 `choice_6_top_zone (v=0.2931)` / `choice_6_bottom_zone (v=0.7083)` 与 `choice_toggle_eye_6 (0.968, 0.500, right_edge)`；`SceneDetector` 同时兼容新 PC 16:9 与旧宽屏双布局，单槽接受「未选暗底卡」或「已被队友选走均匀浅灰卡」（支持 1~5 张灰卡，全 6 灰安全拒识）；同步修复手动锁层 `MODAL_CHOICE` 下实时同步 `choice_count` 与 `selected_choice_index`。
+- **修复 0 资金刷新变灰商店识别错乱、联机 `LOADING...` 休整期识别与收起防残框 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - `_detect_shop_open_heuristic` 与 `_detect_shop_slot_count_heuristic` 彻底脱离 `refresh_yellow >= 0.25` 资金颜色依赖，升级为 `(freeze_blue >= 0.45) or (refresh_yellow >= 0.25 and freeze_blue >= 0.25)`，0 资金刷新变灰后仍精准保持 `shop_open=True` 与三区缩放补偿；
+  - 联机等待阶段无右上粉红准备按钮时，通过局内双锚点 + 顶部「休息一下」紫框与左右放大镜精准识别 `BATTLE_PREP`（`shop_open=False`），并统一 `UNKNOWN_FREE_CURSOR` 默认 `shop_open=False`；商店收起时若焦点仍停留在空闲 `FocusZone.SHOP`，自动退回 `FocusZone.BENCH` 防止残留商店选框。
+- **局内 `ESC` 暂时离开确认弹窗抗剪影识别与无「本局不再提示」自动精简 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - 加固 `_detect_modal_confirm_heuristic`（采用黑底分位数约束并避开右下红栏右端机械剪影），杜绝未压缩实机帧漏检；新增 `confirm_has_dont_ask` 自动区分回合结束确认窗（3 项）与 `ESC` 退出确认窗（2 项，无「本局不再提示」时自动隐藏 `X` 提示并限定仅在取消/确认间切换）。
+- **透明 HUD 启用 `WDA_EXCLUDEFROMCAPTURE` 防截屏污染 (`arkcontroller.overlay`)**：
+  - 在 `apply_win32_click_through()` 中调用 `SetWindowDisplayAffinity(hwnd, 0x00000011)`（异常安全降级），玩家肉眼正常可见透明 HUD，而后台 `mss` 截屏自动穿透忽略 HUD 选框与准星，从根源消除 HUD 绘制物干扰视觉识别。
+
 ## [0.2.1] - 2026-11-21
 
 ### 新增与修复 (Added & Fixed)
