@@ -244,6 +244,34 @@ class DeployFSM:
         self.reset()
         return True
 
+    def place_on_equip(
+        self,
+        target_norm: tuple[float, float],
+        viewport: ViewportRect,
+        *,
+        slot_index: int | None = None,
+    ) -> bool:
+        """将当前抓取的装备在装备区槽位间平滑拖拽挪动/换位（如同整备区干员换位）。"""
+        if self._state != DeployState.HOLDING_EQUIP or self._holding_source is None:
+            return False
+
+        # 目标为自身原装备槽位时视为取消选中，不发送冗余拖拽
+        if (
+            self._holding_source.zone == "equipment"
+            and slot_index is not None
+            and self._holding_source.slot_index == slot_index
+        ):
+            self.reset()
+            return True
+
+        start_xy = viewport.norm_to_screen(*self._holding_source.norm_pos)
+        end_xy = viewport.norm_to_screen(target_norm[0], target_norm[1])
+        self._hid.smooth_drag(start_xy, end_xy, release_at_end=True)
+
+        self._emit_rumble(0.20, 0.30, 45)
+        self.reset()
+        return True
+
     def set_preview_direction(self, direction: Direction | None) -> None:
         """更新定朝向态下 HUD 十字轮盘的实时预选高亮方向。"""
         if self._state == DeployState.AIMING_DIRECTION:

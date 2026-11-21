@@ -59,6 +59,8 @@ class FocusZone(str, Enum):
     BENCH = "bench"
     BOARD = "board"
     EQUIPMENT = "equipment"
+    TOP_INFO = "top_info"
+    TEAMMATES = "teammates"
     CHOICE_CARDS = "choice_cards"
     FREE_CURSOR = "free_cursor"
 
@@ -118,6 +120,12 @@ _BATTLE_PREP_ZONE_ORDER: tuple[FocusZone, ...] = (
     FocusZone.EQUIPMENT,
 )
 
+_HOLDING_EQUIP_ZONE_ORDER: tuple[FocusZone, ...] = (
+    FocusZone.EQUIPMENT,
+    FocusZone.BOARD,
+    FocusZone.BENCH,
+)
+
 # Back 单击手动切层序列：None 表示恢复自动识别
 _MANUAL_LAYER_CYCLE: tuple[GameScene | None, ...] = (
     None,
@@ -133,7 +141,7 @@ _MANUAL_SCENE_TITLES: dict[GameScene, str] = {
     GameScene.PRE_MATCH_SETUP: "模式准备层",
     GameScene.SQUAD_EDIT: "战前编队层",
     GameScene.BATTLE_PREP: "局内运营层",
-    GameScene.MODAL_CHOICE: "弹窗三选一层",
+    GameScene.MODAL_CHOICE: "弹窗决策层",
     GameScene.BATTLE_COMBAT: "作战观战层",
     GameScene.SETTLEMENT: "结算层",
     GameScene.UNKNOWN_FREE_CURSOR: "纯鼠标自由层",
@@ -243,6 +251,13 @@ class ControlDispatcher:
         self._bench_idx: int = 0
         self._equip_idx: int = 0
         self._choice_idx: int = min(1, max(0, self._choice_count - 1))
+        self._selected_choice_idx: int | None = None
+        self._selected_choice_override_until: float = 0.0
+        self._covenant_count: int = self.layout.covenant_zone.default_count
+        self._top_info_idx: int = 0
+        self._has_teammates: bool = False
+        self._teammate_focus_idx: int = 0
+        self._info_overlay: Literal["match_info", "enemy_preview"] | None = None
         self._board_row: int = self._board_mapper.rows // 2
         self._board_col: int = self._board_mapper.cols // 2
 
@@ -300,6 +315,28 @@ class ControlDispatcher:
     def unit_selected(self) -> bool:
         return self._unit_selected
 
+    @property
+    def selected_choice_index(self) -> int | None:
+        return self._selected_choice_idx
+
+    @property
+    def covenant_count(self) -> int:
+        return self._covenant_count
+
+    @property
+    def has_teammates(self) -> bool:
+        return self._has_teammates
+
+    def set_covenant_count(self, count: int) -> None:
+        """设置顶部栏正下方居中对称羁绊槽位数（0~9）并安全同步顶部焦点索引。"""
+        self._apply_covenant_count(count)
+
+    def set_has_teammates(self, enabled: bool) -> None:
+        """设置当前对局是否启用左侧多人联机队友头像栏。"""
+        self._has_teammates = bool(enabled)
+        if not self._has_teammates and self._focus_zone == FocusZone.TEAMMATES:
+            self._focus_zone = FocusZone.BOARD
+
     def set_shop_slot_count(self, count: int) -> None:
         """设置当前商店栏位数（支持 4/5/6 槽向左等距延伸）并同步重建商店映射器。"""
         self._apply_shop_slot_count(count)
@@ -309,6 +346,7 @@ class ControlDispatcher:
         self.keymap = keymap
         self.layout = layout
         self._shop_slot_count = layout.shop_zone.count
+        self._covenant_count = max(0, min(9, self._covenant_count))
         self.deploy_fsm.update_configs(keymap, layout)
         self._rebuild_mappers()
 
@@ -317,6 +355,11 @@ class ControlDispatcher:
         self._equip_idx = self._equip_mapper.clamp_index(self._equip_idx)
         self._choice_count = max(1, min(self._choice_count, max(self._choice_mapper.count, self._choice_count)))
         self._choice_idx = max(0, min(self._choice_count - 1, self._choice_idx))
+        if self._selected_choice_idx is not None and self._selected_choice_idx >= self._choice_count:
+            self._selected_choice_idx = None
+        top_items = self._top_info_items()
+        self._top_info_idx = max(0, min(len(top_items) - 1, self._top_info_idx))
+        self._teammate_focus_idx = max(0, min(3, self._teammate_focus_idx))
         self._board_row = max(0, min(self._board_mapper.rows - 1, self._board_row))
         self._board_col = max(0, min(self._board_mapper.cols - 1, self._board_col))
 
@@ -484,9 +527,181 @@ class ControlDispatcher:
         return True
 
     def _click_safe_blank(self, viewport: ViewportRect) -> None:
-        """左键点击安全空白区以退出角色详情特写视角（官方 PC 端不识别右键取消）。"""
+        """左键点击右侧策略头像正下方安全空白区以退出角色详情/羁绊浮窗（避免误买商店卡）。"""
         if not self._click_button("safe_blank", viewport):
-            self._click_norm(0.650, 0.880, viewport, button="left")
+            self._click_norm(0.955, 0.445, viewport, anchor="right_edge", button="left")
+
+    @staticmethod
+    def _rect_poly(
+        cu: float, cv: float, w: float, h: float
+    ) -> list[tuple[float, float]]:
+        hw, hh = w * 0.5, h * 0.5
+        return [
+            (_clamp01(cu - hw), _clamp01(cv - hh)),
+            (_clamp01(cu + hw), _clamp01(cv - hh)),
+            (_clamp01(cu + hw), _clamp01(cv + hh)),
+            (_clamp01(cu - hw), _clamp01(cv + hh)),
+        ]
+
+    def _apply_covenant_count(self, new_count: int) -> None:
+        """更新顶部栏下方居中对称羁绊数量，并在顶部栏吸附时保持右放大镜等相对焦点稳定。"""
+        clamped = max(0, min(9, int(new_count)))
+        if clamped == self._covenant_count:
+            return
+        old_total = self._covenant_count + 2
+        was_right_mag = self._top_info_idx == old_total - 1
+        self._covenant_count = clamped
+        new_total = self._covenant_count + 2
+        if was_right_mag:
+            self._top_info_idx = new_total - 1
+        else:
+            self._top_info_idx = max(0, min(new_total - 1, self._top_info_idx))
+
+    def _top_info_items(
+        self,
+    ) -> list[
+        tuple[
+            Literal["match_info", "covenant", "enemy_preview"],
+            str,
+            tuple[float, float],
+            str,
+            list[tuple[float, float]],
+        ]
+    ]:
+        """构建顶部信息与居中对称羁绊栏的从左至右吸附序列：[左放大镜, 羁绊1..N, 右放大镜]。"""
+        left_pt = self.layout.buttons.get("covenant_panel")
+        lu, lv = (left_pt.u, left_pt.v) if left_pt is not None else (0.265, 0.047)
+        l_anchor = left_pt.anchor if left_pt is not None else "center_16_9"
+
+        right_pt = self.layout.buttons.get("enemy_preview")
+        ru, rv = (right_pt.u, right_pt.v) if right_pt is not None else (0.738, 0.048)
+        r_anchor = right_pt.anchor if right_pt is not None else "center_16_9"
+
+        items: list[
+            tuple[
+                Literal["match_info", "covenant", "enemy_preview"],
+                str,
+                tuple[float, float],
+                str,
+                list[tuple[float, float]],
+            ]
+        ] = [
+            (
+                "match_info",
+                "查看本局信息",
+                (lu, lv),
+                l_anchor,
+                self._rect_poly(lu, lv, 0.056, 0.052),
+            )
+        ]
+
+        cov_zone = self.layout.covenant_zone
+        for k in range(self._covenant_count):
+            cu, cv = cov_zone.slot_center(k, count=self._covenant_count)
+            poly = cov_zone.slot_polygon(k, count=self._covenant_count)
+            items.append(
+                (
+                    "covenant",
+                    f"羁绊 [{k + 1}/{self._covenant_count}]",
+                    (cu, cv),
+                    "center_16_9",
+                    poly,
+                )
+            )
+
+        items.append(
+            (
+                "enemy_preview",
+                "查看本轮出怪",
+                (ru, rv),
+                r_anchor,
+                self._rect_poly(ru, rv, 0.056, 0.052),
+            )
+        )
+        return items
+
+    def _nearest_top_info_idx(self, u: float) -> int:
+        items = self._top_info_items()
+        best_idx = 0
+        best_dist = float("inf")
+        for idx, (_, _, (iu, _), _, _) in enumerate(items):
+            dist = abs(iu - u)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+        return best_idx
+
+    def _teammate_slot_geometry(
+        self, idx: int
+    ) -> tuple[tuple[float, float], str, list[tuple[float, float]]]:
+        mate_num = max(1, min(4, int(idx) + 1))
+        pt = self.layout.buttons.get(f"teammate_{mate_num}")
+        if pt is not None:
+            u, v, anchor = pt.u, pt.v, pt.anchor
+        else:
+            u, v, anchor = 0.041, 0.268 + 0.105 * (mate_num - 1), "left_edge"
+        return ((u, v), anchor, self._rect_poly(u, v, 0.054, 0.092))
+
+    def _nearest_teammate_idx(self, v: float) -> int:
+        best_idx = 0
+        best_dist = float("inf")
+        for idx in range(4):
+            (_, mv), _, _ = self._teammate_slot_geometry(idx)
+            dist = abs(mv - v)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+        return best_idx
+
+    def _toggle_match_info_panel(self, viewport: ViewportRect) -> None:
+        """打开或关闭顶部左侧放大镜（查看本局信息：核心/附加盟约、敌方领袖与词条）。"""
+        if self._info_overlay == "match_info":
+            if not self._click_button("covenant_close", viewport):
+                self._click_norm(0.940, 0.061, viewport, anchor="right_edge")
+            self._info_overlay = None
+            self._emit_rumble(0.16, 0.20, 30)
+            self._set_toast("已关闭本局信息面板")
+            return
+
+        if self._info_overlay == "enemy_preview":
+            self._trigger_action("enemy_preview", "enemy_preview", "w", viewport)
+            self._wait_ui_transition(160)
+
+        self._trigger_action("covenant_panel", "covenant_panel", None, viewport)
+        self._info_overlay = "match_info"
+        self._emit_rumble(0.18, 0.24, 35)
+        self._set_toast("查看本局信息（按 B 关闭）")
+
+    def _toggle_enemy_preview(self, viewport: ViewportRect) -> None:
+        """打开或关闭顶部右侧放大镜（查看本轮出怪与路线预览，原生快捷键 W）。"""
+        if self._info_overlay == "match_info":
+            if not self._click_button("covenant_close", viewport):
+                self._click_norm(0.940, 0.061, viewport, anchor="right_edge")
+            self._wait_ui_transition(160)
+
+        self._trigger_action("enemy_preview", "enemy_preview", "w", viewport)
+        self._emit_rumble(0.18, 0.24, 35)
+        if self._info_overlay == "enemy_preview":
+            self._info_overlay = None
+            self._set_toast("已退出本轮出怪预览")
+        else:
+            self._info_overlay = "enemy_preview"
+            self._set_toast("查看本轮出怪（按 B 关闭）")
+
+    def _close_info_overlay_if_open(self, viewport: ViewportRect) -> bool:
+        """若本局信息或本轮出怪浮层处于开启态，则执行对应安全关闭操作并返回 True。"""
+        if self._info_overlay == "match_info":
+            if not self._click_button("covenant_close", viewport):
+                self._click_norm(0.940, 0.061, viewport, anchor="right_edge")
+            self._info_overlay = None
+            self._set_toast("已关闭本局信息面板")
+            return True
+        if self._info_overlay == "enemy_preview":
+            self._trigger_action("enemy_preview", "enemy_preview", "w", viewport)
+            self._info_overlay = None
+            self._set_toast("已退出本轮出怪预览")
+            return True
+        return False
 
     def _unit_detail_tab_center(self, idx: int) -> tuple[float, float]:
         btn_key, _, default_u, default_v = _UNIT_DETAIL_TABS[idx % len(_UNIT_DETAIL_TABS)]
@@ -543,7 +758,30 @@ class ControlDispatcher:
         if scene_result is None or self.scene_locked_manual:
             return
 
+        # 按住 LT 收起决策弹窗查看战场期间，锁住 MODAL_CHOICE 防止松开 LT 前丢失恢复上下文
+        if self._current_scene == GameScene.MODAL_CHOICE and self._choice_eye_hidden:
+            return
+
+        # 打开本局信息/本轮出怪期间背景按钮隐藏可能使视觉暂报 UNKNOWN，保留局内上下文以便按 B 关闭
+        if (
+            self._info_overlay is not None
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and scene_result.scene == GameScene.UNKNOWN_FREE_CURSOR
+        ):
+            return
+
         now = time.monotonic()
+        if getattr(scene_result, "has_teammates", False):
+            self._has_teammates = True
+
+        detected_cov = getattr(scene_result, "covenant_count", None)
+        if (
+            scene_result.scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and isinstance(detected_cov, int)
+            and detected_cov >= 0
+        ):
+            self._apply_covenant_count(detected_cov)
+
         if now >= self._shop_override_until:
             self._shop_open = bool(scene_result.shop_open)
         if now >= self._unit_override_until:
@@ -563,6 +801,21 @@ class ControlDispatcher:
         if new_choice_count != self._choice_count:
             self._choice_count = new_choice_count
             self._choice_idx = max(0, min(self._choice_count - 1, self._choice_idx))
+            if (
+                self._selected_choice_idx is not None
+                and self._selected_choice_idx >= self._choice_count
+            ):
+                self._selected_choice_idx = None
+
+        detected_sel_choice = getattr(scene_result, "selected_choice_index", None)
+        if (
+            scene_result.scene == GameScene.MODAL_CHOICE
+            and self._current_scene == GameScene.MODAL_CHOICE
+            and now >= self._selected_choice_override_until
+            and isinstance(detected_sel_choice, int)
+            and 0 <= detected_sel_choice < self._choice_count
+        ):
+            self._selected_choice_idx = detected_sel_choice
 
         if scene_result.scene == self._current_scene:
             self._refresh_view_state()
@@ -573,11 +826,21 @@ class ControlDispatcher:
             self._refresh_view_state()
             return
 
-        self._apply_scene_transition(scene_result.scene)
+        self._apply_scene_transition(
+            scene_result.scene,
+            initial_selected_choice=detected_sel_choice,
+        )
 
-    def _apply_scene_transition(self, target_scene: GameScene) -> None:
+    def _apply_scene_transition(
+        self,
+        target_scene: GameScene,
+        *,
+        initial_selected_choice: int | None = None,
+    ) -> None:
         if self._current_scene == GameScene.MODAL_CHOICE and target_scene != GameScene.MODAL_CHOICE:
             self._choice_eye_hidden = False
+            self._selected_choice_idx = None
+            self._selected_choice_override_until = 0.0
 
         if target_scene != GameScene.BATTLE_PREP and self.deploy_fsm.is_active:
             self.deploy_fsm.reset()
@@ -585,10 +848,13 @@ class ControlDispatcher:
         if target_scene not in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT):
             self._unit_selected = False
             self._unit_override_until = 0.0
+            self._info_overlay = None
         if target_scene != GameScene.BATTLE_PREP:
             self._shop_override_until = 0.0
         if target_scene in _MENU_SCENES:
             self._apply_shop_slot_count(self.layout.shop_zone.count)
+            self._has_teammates = False
+            self._covenant_count = self.layout.covenant_zone.default_count
 
         self._current_scene = target_scene
         self._ready_hold_progress = 0.0
@@ -611,7 +877,15 @@ class ControlDispatcher:
         elif target_scene == GameScene.MODAL_CHOICE:
             self._focus_zone = FocusZone.CHOICE_CARDS
             self._free_cursor_active = False
-            self._choice_idx = min(self._choice_count // 2, self._choice_count - 1)
+            if (
+                isinstance(initial_selected_choice, int)
+                and 0 <= initial_selected_choice < self._choice_count
+            ):
+                self._selected_choice_idx = initial_selected_choice
+                self._choice_idx = initial_selected_choice
+            else:
+                self._selected_choice_idx = None
+                self._choice_idx = 1 if self._choice_count >= 3 else 0
         else:
             self._focus_zone = FocusZone.FREE_CURSOR
             self._free_cursor_active = True
@@ -701,9 +975,20 @@ class ControlDispatcher:
             return self._board_mapper.cell_center(self._board_row, self._board_col)
         if self._focus_zone == FocusZone.EQUIPMENT:
             return self._equip_mapper.slot_center(self._equip_idx)
+        if self._focus_zone == FocusZone.TOP_INFO:
+            items = self._top_info_items()
+            idx = max(0, min(len(items) - 1, self._top_info_idx))
+            return items[idx][2]
+        if self._focus_zone == FocusZone.TEAMMATES:
+            uv, _, _ = self._teammate_slot_geometry(self._teammate_focus_idx)
+            return uv
         if self._focus_zone == FocusZone.CHOICE_CARDS:
-            return self._choice_mapper.slot_center(
-                self._choice_idx, count=self._choice_count
+            if self._selected_choice_idx == self._choice_idx:
+                return self.layout.resolve_choice_confirm_point(
+                    self._choice_idx, self._choice_count
+                )
+            return self.layout.resolve_choice_card_center(
+                self._choice_idx, self._choice_count
             )
         return self._cursor_norm
 
@@ -733,9 +1018,20 @@ class ControlDispatcher:
             return self._board_mapper.cell_polygon(self._board_row, self._board_col)
         if self._focus_zone == FocusZone.EQUIPMENT:
             return self._equip_mapper.slot_polygon(self._equip_idx)
+        if self._focus_zone == FocusZone.TOP_INFO:
+            items = self._top_info_items()
+            idx = max(0, min(len(items) - 1, self._top_info_idx))
+            return items[idx][4]
+        if self._focus_zone == FocusZone.TEAMMATES:
+            _, _, poly = self._teammate_slot_geometry(self._teammate_focus_idx)
+            return poly
         if self._focus_zone == FocusZone.CHOICE_CARDS:
-            return self._choice_mapper.slot_polygon(
-                self._choice_idx, count=self._choice_count
+            if self._selected_choice_idx == self._choice_idx:
+                return self.layout.resolve_choice_confirm_polygon(
+                    self._choice_idx, self._choice_count
+                )
+            return self.layout.resolve_choice_card_polygon(
+                self._choice_idx, self._choice_count
             )
         return None
 
@@ -824,14 +1120,18 @@ class ControlDispatcher:
         if self._current_scene != GameScene.MODAL_CHOICE:
             return
 
+        toggle_pt = self.layout.resolve_choice_toggle_point(self._choice_count)
+        if toggle_pt is None:
+            return
+
         if event.active and not self._choice_eye_hidden:
-            if self._click_button("choice_toggle_eye", viewport):
-                self._choice_eye_hidden = True
-                self._set_toast("查看战场中（松开 LT 恢复弹窗）")
+            self._click_norm(toggle_pt.u, toggle_pt.v, viewport, anchor=toggle_pt.anchor)
+            self._choice_eye_hidden = True
+            self._set_toast("已收起弹窗查看战场（松开 LT 展开）")
         elif not event.active and self._choice_eye_hidden:
-            if self._click_button("choice_toggle_eye", viewport):
-                self._choice_eye_hidden = False
-                self._set_toast("已恢复三选一弹窗")
+            self._click_norm(toggle_pt.u, toggle_pt.v, viewport, anchor=toggle_pt.anchor)
+            self._choice_eye_hidden = False
+            self._set_toast("已恢复决策弹窗")
 
     def _toggle_free_cursor(self) -> None:
         """LS 按下：一键切换槽位吸附导航与自由虚拟光标模式。"""
@@ -1010,13 +1310,22 @@ class ControlDispatcher:
             return
 
         if self._current_scene == GameScene.MODAL_CHOICE and not self._choice_eye_hidden:
-            u, v = self._choice_mapper.slot_center(
-                self._choice_idx, count=self._choice_count
+            if self._selected_choice_idx != self._choice_idx:
+                cu, cv = self.layout.resolve_choice_card_center(
+                    self._choice_idx, self._choice_count
+                )
+                self._click_norm(cu, cv, viewport)
+                self._wait_ui_transition(160)
+            confirm_u, confirm_v = self.layout.resolve_choice_confirm_point(
+                self._choice_idx, self._choice_count
             )
-            sx, sy = viewport.norm_to_screen(u, v)
-            self.hid.double_click(sx, sy)
+            self._click_norm(confirm_u, confirm_v, viewport)
+            self._selected_choice_idx = None
+            self._selected_choice_override_until = (
+                time.monotonic() + _STATE_SYNC_LOCK_SECONDS
+            )
             self._emit_rumble(0.30, 0.40, 50)
-            self._set_toast(f"极速确认第 {self._choice_idx + 1} 张策略卡")
+            self._set_toast(f"已确认选择第 {self._choice_idx + 1} 张决策卡")
 
     def _handle_in_battle_lt_chord(
         self, button: GamepadButton, viewport: ViewportRect
@@ -1032,13 +1341,11 @@ class ControlDispatcher:
             return
 
         if button == GamepadButton.DPAD_LEFT:
-            self._trigger_action("covenant_panel", "covenant_panel", None, viewport)
-            self._set_toast("切换盟约详情面板")
+            self._toggle_match_info_panel(viewport)
             return
 
         if button == GamepadButton.DPAD_UP:
-            self._trigger_action("enemy_preview", "enemy_preview", "w", viewport)
-            self._set_toast("切换敌方波次与路线预览")
+            self._toggle_enemy_preview(viewport)
             return
 
         if button == GamepadButton.DPAD_DOWN:
@@ -1070,7 +1377,9 @@ class ControlDispatcher:
 
     def _switch_teammate_view(self, index: int, viewport: ViewportRect) -> None:
         idx = max(1, min(4, index))
+        self._has_teammates = True
         self._selected_teammate = idx
+        self._teammate_focus_idx = idx - 1
         if not self._click_button(f"teammate_{idx}", viewport):
             self.hid.tap_key(str(idx))
         self._emit_rumble(0.18, 0.25, 35)
@@ -1159,7 +1468,8 @@ class ControlDispatcher:
         if button == GamepadButton.A:
             self._click_norm(self._cursor_norm[0], self._cursor_norm[1], viewport)
         elif button == GamepadButton.B:
-            self._trigger_action("back", "back", "esc", viewport)
+            if not self._close_info_overlay_if_open(viewport):
+                self._trigger_action("back", "back", "esc", viewport)
         elif button == GamepadButton.START:
             if self._current_scene == GameScene.BATTLE_PREP and self.keymap.ready_hold_ms == 0:
                 self._trigger_battle_ready(viewport)
@@ -1293,7 +1603,7 @@ class ControlDispatcher:
         self._set_toast(f"切换至{label}")
 
     # ------------------------------------------------------------------
-    # 三选一弹窗处理
+    # 三选一 / 多人六选一决策弹窗处理
     # ------------------------------------------------------------------
 
     def _handle_modal_choice_button(
@@ -1307,27 +1617,80 @@ class ControlDispatcher:
         if self._choice_eye_hidden:
             return
 
-        if button in (GamepadButton.DPAD_LEFT, GamepadButton.LB):
-            self._choice_idx, _ = self._choice_mapper.step(
-                self._choice_idx, -1, wrap=True, count=self._choice_count
-            )
-            return
-
-        if button in (GamepadButton.DPAD_RIGHT, GamepadButton.RB):
-            self._choice_idx, _ = self._choice_mapper.step(
-                self._choice_idx, 1, wrap=True, count=self._choice_count
-            )
-            return
+        total = max(1, self._choice_count)
+        if total >= 5:
+            # 多人 2x3 六选一网格导航：左右同行循环，上下跨排切换，LB/RB 全局顺序步进
+            top_cols = max(1, (total + 1) // 2)
+            if button == GamepadButton.DPAD_LEFT:
+                if self._choice_idx < top_cols:
+                    self._choice_idx = (self._choice_idx - 1) % top_cols
+                else:
+                    bot_cols = max(1, total - top_cols)
+                    self._choice_idx = top_cols + ((self._choice_idx - top_cols - 1) % bot_cols)
+                return
+            if button == GamepadButton.DPAD_RIGHT:
+                if self._choice_idx < top_cols:
+                    self._choice_idx = (self._choice_idx + 1) % top_cols
+                else:
+                    bot_cols = max(1, total - top_cols)
+                    self._choice_idx = top_cols + ((self._choice_idx - top_cols + 1) % bot_cols)
+                return
+            if button in (GamepadButton.DPAD_UP, GamepadButton.DPAD_DOWN):
+                if self._choice_idx < top_cols:
+                    self._choice_idx = min(total - 1, self._choice_idx + top_cols)
+                else:
+                    self._choice_idx = max(0, self._choice_idx - top_cols)
+                return
+            if button == GamepadButton.LB:
+                self._choice_idx = (self._choice_idx - 1) % total
+                return
+            if button == GamepadButton.RB:
+                self._choice_idx = (self._choice_idx + 1) % total
+                return
+        else:
+            if button in (GamepadButton.DPAD_LEFT, GamepadButton.LB):
+                self._choice_idx = (self._choice_idx - 1) % total
+                return
+            if button in (GamepadButton.DPAD_RIGHT, GamepadButton.RB):
+                self._choice_idx = (self._choice_idx + 1) % total
+                return
 
         if is_repeat:
             return
 
         if button == GamepadButton.A:
-            u, v = self._choice_mapper.slot_center(
-                self._choice_idx, count=self._choice_count
+            if self._selected_choice_idx != self._choice_idx:
+                cu, cv = self.layout.resolve_choice_card_center(
+                    self._choice_idx, self._choice_count
+                )
+                self._click_norm(cu, cv, viewport)
+                self._selected_choice_idx = self._choice_idx
+                self._selected_choice_override_until = (
+                    time.monotonic() + _STATE_SYNC_LOCK_SECONDS
+                )
+                self._emit_rumble(0.18, 0.24, 35)
+                self._set_toast(
+                    f"已选中第 {self._choice_idx + 1} 张卡（再按 A 点击底部白色确认条）"
+                )
+            else:
+                confirm_u, confirm_v = self.layout.resolve_choice_confirm_point(
+                    self._choice_idx, self._choice_count
+                )
+                self._click_norm(confirm_u, confirm_v, viewport)
+                self._selected_choice_idx = None
+                self._selected_choice_override_until = (
+                    time.monotonic() + _STATE_SYNC_LOCK_SECONDS
+                )
+                self._emit_rumble(0.30, 0.42, 55)
+                self._set_toast(f"已确认选择第 {self._choice_idx + 1} 张决策卡")
+            return
+
+        if button == GamepadButton.B and self._selected_choice_idx is not None:
+            self._selected_choice_idx = None
+            self._selected_choice_override_until = (
+                time.monotonic() + _STATE_SYNC_LOCK_SECONDS
             )
-            self._click_norm(u, v, viewport)
-            self._emit_rumble(0.22, 0.30, 40)
+            self._set_toast("已取消待确认聚焦，可重新选卡")
 
     # ------------------------------------------------------------------
     # 局内作战期处理
@@ -1382,6 +1745,66 @@ class ControlDispatcher:
             self._emit_rumble(0.30, 0.35, 50)
             self._set_toast(f"已撤回角色 ({retreat_key.upper()})")
 
+    def _activate_top_info_item(self, viewport: ViewportRect) -> None:
+        items = self._top_info_items()
+        idx = max(0, min(len(items) - 1, self._top_info_idx))
+        kind, label, (cu, cv), anchor, _ = items[idx]
+        if kind == "match_info":
+            self._toggle_match_info_panel(viewport)
+            return
+        if kind == "enemy_preview":
+            self._toggle_enemy_preview(viewport)
+            return
+        self._close_info_overlay_if_open(viewport)
+        self._click_norm(cu, cv, viewport, anchor=anchor, button="left")
+        self._emit_rumble(0.16, 0.22, 35)
+        self._set_toast(f"查看{label}详情（按 B 关闭浮窗）")
+
+    def _navigate_top_info_or_teammates(
+        self, direction: Direction, viewport: ViewportRect | None = None
+    ) -> bool:
+        """处理顶部信息/羁绊栏与左侧队友栏的区内外方向导航；若消费该事件则返回 True。"""
+        if self._focus_zone == FocusZone.TOP_INFO:
+            items = self._top_info_items()
+            if direction == "left":
+                self._top_info_idx = (self._top_info_idx - 1) % len(items)
+            elif direction == "right":
+                self._top_info_idx = (self._top_info_idx + 1) % len(items)
+            elif direction == "down":
+                cu = items[max(0, min(len(items) - 1, self._top_info_idx))][2][0]
+                _, col = self._board_mapper.nearest_cell(
+                    cu, self._board_mapper.quad.top_left[1]
+                )
+                self._board_row = 0
+                self._board_col = col
+                if self._current_scene == GameScene.BATTLE_PREP and viewport is not None:
+                    self._enter_battle_prep_zone(FocusZone.BOARD, viewport)
+                else:
+                    self._focus_zone = FocusZone.BOARD
+            return True
+
+        if self._focus_zone == FocusZone.TEAMMATES:
+            if direction == "up":
+                self._teammate_focus_idx = (self._teammate_focus_idx - 1) % 4
+                self._selected_teammate = self._teammate_focus_idx + 1
+            elif direction == "down":
+                self._teammate_focus_idx = (self._teammate_focus_idx + 1) % 4
+                self._selected_teammate = self._teammate_focus_idx + 1
+            elif direction == "right":
+                (_, mv), _, _ = self._teammate_slot_geometry(self._teammate_focus_idx)
+                row, _ = self._board_mapper.nearest_cell(
+                    self._board_mapper.quad.top_left[0], mv
+                )
+                self._board_row = row
+                self._board_col = 0
+                if self._current_scene == GameScene.BATTLE_PREP and viewport is not None:
+                    self._enter_battle_prep_zone(FocusZone.BOARD, viewport)
+                else:
+                    self._focus_zone = FocusZone.BOARD
+            return True
+
+        return False
+
     def _handle_battle_combat_button(
         self,
         button: GamepadButton,
@@ -1394,21 +1817,44 @@ class ControlDispatcher:
             return
 
         if button in _DPAD_TO_DIR:
+            direction = _DPAD_TO_DIR[button]
+            if self._navigate_top_info_or_teammates(direction, viewport):
+                return
             self._focus_zone = FocusZone.BOARD
-            self._board_row, self._board_col, _ = self._board_mapper.move(
-                self._board_row, self._board_col, _DPAD_TO_DIR[button], wrap_cols=False
+            self._board_row, self._board_col, exit_dir = self._board_mapper.move(
+                self._board_row, self._board_col, direction, wrap_cols=False
             )
+            if exit_dir == "up":
+                cu, _ = self._board_mapper.cell_center(self._board_row, self._board_col)
+                self._top_info_idx = self._nearest_top_info_idx(cu)
+                self._focus_zone = FocusZone.TOP_INFO
+            elif exit_dir == "left" and self._has_teammates:
+                _, cv = self._board_mapper.cell_center(self._board_row, self._board_col)
+                self._teammate_focus_idx = self._nearest_teammate_idx(cv)
+                self._selected_teammate = self._teammate_focus_idx + 1
+                self._focus_zone = FocusZone.TEAMMATES
             return
 
         if is_repeat:
             return
 
         if button == GamepadButton.A:
-            u, v = self._board_mapper.cell_center(self._board_row, self._board_col)
-            self._click_norm(u, v, viewport)
-            self._unit_tab_idx = 0
-            self._set_unit_selected(True)
+            if self._focus_zone == FocusZone.TOP_INFO:
+                self._activate_top_info_item(viewport)
+            elif self._focus_zone == FocusZone.TEAMMATES:
+                self._teammate_cycle_pos = self._teammate_focus_idx + 1
+                self._switch_teammate_view(self._teammate_focus_idx + 1, viewport)
+            else:
+                u, v = self._board_mapper.cell_center(self._board_row, self._board_col)
+                self._click_norm(u, v, viewport)
+                self._unit_tab_idx = 0
+                self._set_unit_selected(True)
         elif button == GamepadButton.B:
+            if self._close_info_overlay_if_open(viewport):
+                return
+            if self._focus_zone == FocusZone.TEAMMATES:
+                self._focus_zone = FocusZone.BOARD
+                return
             self._click_safe_blank(viewport)
             if self._unit_selected:
                 self._set_unit_selected(False)
@@ -1474,9 +1920,13 @@ class ControlDispatcher:
         if button == GamepadButton.A:
             self._handle_idle_prep_a(viewport)
         elif button == GamepadButton.B:
+            if self._close_info_overlay_if_open(viewport):
+                return
             if self._focus_zone == FocusZone.SHOP and self._shop_open:
                 self._set_shop_open(False, viewport, announce=True)
                 self._focus_zone = FocusZone.BENCH
+            elif self._focus_zone == FocusZone.TEAMMATES:
+                self._enter_battle_prep_zone(FocusZone.BOARD, viewport)
             else:
                 self._click_safe_blank(viewport)
         elif button == GamepadButton.X:
@@ -1510,14 +1960,26 @@ class ControlDispatcher:
         self, delta: int, viewport: ViewportRect
     ) -> None:
         fsm_state = self.deploy_fsm.state
-        if fsm_state in (DeployState.HOLDING_UNIT, DeployState.HOLDING_EQUIP):
-            # 抓取状态下在整备区与棋盘之间快速跳区
+        if fsm_state == DeployState.HOLDING_UNIT:
+            # 抓取干员态下在整备区与棋盘之间快速跳区
             target = (
                 FocusZone.BOARD
                 if self._focus_zone != FocusZone.BOARD
                 else FocusZone.BENCH
             )
             self._enter_battle_prep_zone(target, viewport)
+            return
+
+        if fsm_state == DeployState.HOLDING_EQUIP:
+            # 抓取装备态下在 装备栏 <-> 棋盘 <-> 整备区 之间循环切换（兼顾穿戴与挪动装备槽位）
+            if self._focus_zone not in _HOLDING_EQUIP_ZONE_ORDER:
+                self._enter_battle_prep_zone(FocusZone.BOARD, viewport)
+                return
+            eq_idx = _HOLDING_EQUIP_ZONE_ORDER.index(self._focus_zone)
+            next_eq_zone = _HOLDING_EQUIP_ZONE_ORDER[
+                (eq_idx + delta) % len(_HOLDING_EQUIP_ZONE_ORDER)
+            ]
+            self._enter_battle_prep_zone(next_eq_zone, viewport)
             return
 
         if self._focus_zone not in _BATTLE_PREP_ZONE_ORDER:
@@ -1532,10 +1994,14 @@ class ControlDispatcher:
     def _navigate_battle_prep(
         self, direction: Direction, viewport: ViewportRect
     ) -> None:
+        if self._navigate_top_info_or_teammates(direction, viewport):
+            return
+
         is_holding = self.deploy_fsm.state in (
             DeployState.HOLDING_UNIT,
             DeployState.HOLDING_EQUIP,
         )
+        is_holding_unit = self.deploy_fsm.state == DeployState.HOLDING_UNIT
         shop_above_board = (
             self._shop_mapper.zone.start_v < self._board_mapper.quad.top_left[1]
         )
@@ -1566,7 +2032,7 @@ class ControlDispatcher:
             self._bench_idx = new_idx
             if exit_dir == "up":
                 cu, cv = self._bench_mapper.slot_center(self._bench_idx)
-                if not equip_vertical and not is_holding:
+                if not equip_vertical and not is_holding_unit:
                     self._enter_battle_prep_zone(FocusZone.EQUIPMENT, viewport)
                     self._equip_idx = self._equip_mapper.nearest_slot(cu, cv)
                 else:
@@ -1588,7 +2054,7 @@ class ControlDispatcher:
             self._board_col = new_c
             if exit_dir == "down":
                 cu, cv = self._board_mapper.cell_center(self._board_row, self._board_col)
-                if not equip_vertical and not is_holding:
+                if not equip_vertical and not is_holding_unit:
                     self._enter_battle_prep_zone(FocusZone.EQUIPMENT, viewport)
                     self._equip_idx = self._equip_mapper.nearest_slot(cu, cv)
                 else:
@@ -1598,14 +2064,23 @@ class ControlDispatcher:
                 cu, cv = self._board_mapper.cell_center(self._board_row, self._board_col)
                 self._enter_battle_prep_zone(FocusZone.SHOP, viewport)
                 self._shop_idx = self._shop_mapper.nearest_slot(cu, cv)
-            elif exit_dir == "right" and equip_vertical and equip_on_right and not is_holding:
+            elif exit_dir == "up" and not shop_above_board and not is_holding:
+                cu, _ = self._board_mapper.cell_center(self._board_row, self._board_col)
+                self._top_info_idx = self._nearest_top_info_idx(cu)
+                self._enter_battle_prep_zone(FocusZone.TOP_INFO, viewport)
+            elif exit_dir == "right" and equip_vertical and equip_on_right and not is_holding_unit:
                 cu, cv = self._board_mapper.cell_center(self._board_row, self._board_col)
                 self._enter_battle_prep_zone(FocusZone.EQUIPMENT, viewport)
                 self._equip_idx = self._equip_mapper.nearest_slot(cu, cv)
-            elif exit_dir == "left" and equip_vertical and not equip_on_right and not is_holding:
+            elif exit_dir == "left" and equip_vertical and not equip_on_right and not is_holding_unit:
                 cu, cv = self._board_mapper.cell_center(self._board_row, self._board_col)
                 self._enter_battle_prep_zone(FocusZone.EQUIPMENT, viewport)
                 self._equip_idx = self._equip_mapper.nearest_slot(cu, cv)
+            elif exit_dir == "left" and self._has_teammates:
+                _, cv = self._board_mapper.cell_center(self._board_row, self._board_col)
+                self._teammate_focus_idx = self._nearest_teammate_idx(cv)
+                self._selected_teammate = self._teammate_focus_idx + 1
+                self._focus_zone = FocusZone.TEAMMATES
             return
 
         if self._focus_zone == FocusZone.EQUIPMENT:
@@ -1688,6 +2163,15 @@ class ControlDispatcher:
                 click_on_pick=False,
             )
             self._set_toast(f"已抓取装备 [{self._equip_idx + 1}]")
+            return
+
+        if self._focus_zone == FocusZone.TOP_INFO:
+            self._activate_top_info_item(viewport)
+            return
+
+        if self._focus_zone == FocusZone.TEAMMATES:
+            self._teammate_cycle_pos = self._teammate_focus_idx + 1
+            self._switch_teammate_view(self._teammate_focus_idx + 1, viewport)
 
     def _handle_holding_button(
         self, button: GamepadButton, viewport: ViewportRect
@@ -1710,6 +2194,13 @@ class ControlDispatcher:
             return
 
         if button == GamepadButton.A:
+            if self._focus_zone == FocusZone.TEAMMATES:
+                mate_num = self._teammate_focus_idx + 1
+                if self.deploy_fsm.gift_holding(mate_num, viewport):
+                    self._selected_teammate = mate_num
+                    self._set_toast(f"已赠予联机队友 {mate_num}")
+                return
+
             if fsm_state == DeployState.HOLDING_UNIT:
                 if self._focus_zone == FocusZone.BENCH:
                     pos = self._bench_mapper.slot_center(self._bench_idx)
@@ -1737,6 +2228,20 @@ class ControlDispatcher:
                     pos = self._bench_mapper.slot_center(self._bench_idx)
                     self.deploy_fsm.equip_target(pos, viewport)
                     self._set_toast("已为整备区干员穿戴装备")
+                elif self._focus_zone == FocusZone.EQUIPMENT:
+                    same_slot = (
+                        self.deploy_fsm.holding_source is not None
+                        and self.deploy_fsm.holding_source.slot_index == self._equip_idx
+                    )
+                    pos = self._equip_mapper.slot_center(self._equip_idx)
+                    self.deploy_fsm.place_on_equip(
+                        pos, viewport, slot_index=self._equip_idx
+                    )
+                    self._set_toast(
+                        "已取消装备选中"
+                        if same_slot
+                        else f"已移至装备栏 [{self._equip_idx + 1}]"
+                    )
 
     # ------------------------------------------------------------------
     # HUD 状态快照构造
@@ -1772,10 +2277,18 @@ class ControlDispatcher:
             return f"棋盘 [{self._board_row + 1},{self._board_col + 1}]"
         if self._focus_zone == FocusZone.EQUIPMENT:
             return f"装备栏 [{self._equip_idx + 1}/{self._equip_mapper.count}]"
+        if self._focus_zone == FocusZone.TOP_INFO:
+            items = self._top_info_items()
+            idx = max(0, min(len(items) - 1, self._top_info_idx))
+            return f"顶部栏 · {items[idx][1]}"
+        if self._focus_zone == FocusZone.TEAMMATES:
+            return f"队友视角 [{self._teammate_focus_idx + 1}/4]"
         if self._focus_zone == FocusZone.CHOICE_CARDS:
             if self._choice_eye_hidden:
                 return "查看战场"
-            return f"三选一 [{self._choice_idx + 1}/{self._choice_count}]"
+            prefix = "六选一" if self._choice_count >= 5 else "三选一"
+            suffix = " · 待确认" if self._selected_choice_idx == self._choice_idx else ""
+            return f"{prefix} [{self._choice_idx + 1}/{self._choice_count}]{suffix}"
         return ""
 
     def _build_prompts(self) -> list[PromptItem]:
@@ -1843,13 +2356,21 @@ class ControlDispatcher:
             ]
         if scene == GameScene.MODAL_CHOICE:
             if self._choice_eye_hidden:
-                return [PromptItem("松开 LT", "恢复三选一弹窗")]
-            return [
+                return [PromptItem("松开 LT", "展开决策弹窗")]
+            confirm_label = (
+                "点击白条确认"
+                if self._selected_choice_idx == self._choice_idx
+                else "选中卡片"
+            )
+            items = [
                 PromptItem(nav_key, "选卡"),
-                PromptItem("A", "选中"),
-                PromptItem("RT+A", "极速拿牌"),
-                PromptItem("按住 LT", "查看战场"),
+                PromptItem("A", confirm_label),
+                PromptItem("RT+A", "一键确认"),
+                PromptItem("按住 LT", "收起看场"),
             ]
+            if self._selected_choice_idx is not None:
+                items.append(PromptItem("B", "重选"))
+            return items
         # 选取角色特写详情态专属底部提示条
         if (
             self._unit_selected
@@ -1868,10 +2389,23 @@ class ControlDispatcher:
             return items
 
         if scene == GameScene.BATTLE_COMBAT:
+            if self._focus_zone == FocusZone.TOP_INFO:
+                return [
+                    PromptItem(nav_key, "本局信息/羁绊/出怪"),
+                    PromptItem("A", "查看详情"),
+                    PromptItem("B", "关闭浮窗"),
+                    PromptItem("下", "返回棋盘"),
+                ]
+            if self._focus_zone == FocusZone.TEAMMATES:
+                return [
+                    PromptItem(nav_key, "选队友"),
+                    PromptItem("A", "切换视角"),
+                    PromptItem("右/B", "返回棋盘"),
+                ]
             return [
-                PromptItem(nav_key, "浏览棋盘"),
+                PromptItem(nav_key, "棋盘(上:羁绊)"),
                 PromptItem("A", "查看详情"),
-                PromptItem("LT+十字键", "盟约/敌情/表情/队友"),
+                PromptItem("LT+十字键", "信息/出怪/表情/队友"),
                 PromptItem("LT+RB", "撤退"),
                 PromptItem("LT+Start", "暂停"),
             ]
@@ -1885,25 +2419,47 @@ class ControlDispatcher:
                 PromptItem("B", "取消落位"),
             ]
         if fsm_state == DeployState.HOLDING_UNIT:
+            a_lbl = "赠予队友" if self._focus_zone == FocusZone.TEAMMATES else "部署/换位"
             return [
                 PromptItem(nav_key, "选目标格"),
                 PromptItem("LB/RB", "整备↔棋盘"),
-                PromptItem("A", "部署/换位"),
+                PromptItem("A", a_lbl),
                 PromptItem("X", "出售"),
                 PromptItem("Y", f"赠队友{self._selected_teammate}"),
                 PromptItem("B", "取消"),
             ]
         if fsm_state == DeployState.HOLDING_EQUIP:
+            if self._focus_zone == FocusZone.EQUIPMENT:
+                eq_a_label = "移动/换位"
+            elif self._focus_zone == FocusZone.TEAMMATES:
+                eq_a_label = "赠予队友"
+            else:
+                eq_a_label = "穿戴装备"
             return [
-                PromptItem(nav_key, "选目标干员"),
-                PromptItem("LB/RB", "棋盘↔整备"),
-                PromptItem("A", "穿戴装备"),
+                PromptItem(nav_key, "选目标槽/干员"),
+                PromptItem("LB/RB", "装备↔棋盘↔整备"),
+                PromptItem("A", eq_a_label),
                 PromptItem("X", "出售"),
                 PromptItem("Y", f"赠队友{self._selected_teammate}"),
                 PromptItem("B", "取消"),
             ]
 
         # BATTLE_PREP + IDLE
+        if self._focus_zone == FocusZone.TOP_INFO:
+            return [
+                PromptItem(nav_key, "本局信息/对称羁绊/出怪"),
+                PromptItem("A", "点击查看"),
+                PromptItem("B", "关闭浮窗"),
+                PromptItem("LB/RB", "切区"),
+                PromptItem("长按Start", "开战"),
+            ]
+        if self._focus_zone == FocusZone.TEAMMATES:
+            return [
+                PromptItem(nav_key, "上下选队友"),
+                PromptItem("A", "查看队友"),
+                PromptItem("右/B", "返回棋盘"),
+                PromptItem("长按Start", "开战"),
+            ]
         if self._focus_zone == FocusZone.SHOP:
             return [
                 PromptItem("A", "选/买"),

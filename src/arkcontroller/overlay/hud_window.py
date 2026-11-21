@@ -64,7 +64,7 @@ SCENE_DISPLAY_NAMES: dict[GameScene, str] = {
     GameScene.PRE_MATCH_SETUP: "战前准备",
     GameScene.SQUAD_EDIT: "编队与甄选",
     GameScene.BATTLE_PREP: "休整运营",
-    GameScene.MODAL_CHOICE: "三选一弹窗",
+    GameScene.MODAL_CHOICE: "决策弹窗",
     GameScene.BATTLE_COMBAT: "作战中",
     GameScene.SETTLEMENT: "对局结算",
     GameScene.UNKNOWN_FREE_CURSOR: "自由光标",
