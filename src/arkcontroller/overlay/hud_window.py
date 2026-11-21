@@ -60,14 +60,11 @@ COLOR_CAPSULE_BG = QColor(12, 16, 22, 212)
 COLOR_CAPSULE_BORDER = QColor(0, 229, 255, 110)
 
 SCENE_DISPLAY_NAMES: dict[GameScene, str] = {
-    GameScene.ACTIVITY_HUB: "活动主界面",
-    GameScene.PRE_MATCH_SETUP: "战前准备",
-    GameScene.SQUAD_EDIT: "编队与甄选",
     GameScene.BATTLE_PREP: "休整运营",
     GameScene.MODAL_CHOICE: "决策弹窗",
+    GameScene.MODAL_CONFIRM: "回合确认",
     GameScene.BATTLE_COMBAT: "作战中",
-    GameScene.SETTLEMENT: "对局结算",
-    GameScene.UNKNOWN_FREE_CURSOR: "自由光标",
+    GameScene.UNKNOWN_FREE_CURSOR: "自由鼠标",
 }
 
 FACE_BUTTON_COLORS: dict[str, tuple[QColor, QColor]] = {
@@ -468,7 +465,12 @@ class HUDWindow(QWidget):
         painter.drawRoundedRect(src_rect, 6.0, 6.0)
 
         # 源槽位顶部标签
-        tag_text = "装备源" if snapshot.deploy_state == DeployState.HOLDING_EQUIP else "抓取源"
+        if snapshot.deploy_state == DeployState.HOLDING_STRATEGY:
+            tag_text = "策略源"
+        elif snapshot.deploy_state == DeployState.HOLDING_EQUIP:
+            tag_text = "装备源"
+        else:
+            tag_text = "抓取源"
         painter.setFont(self._font_small)
         fm = QFontMetrics(self._font_small)
         tw = fm.horizontalAdvance(tag_text) + 10
