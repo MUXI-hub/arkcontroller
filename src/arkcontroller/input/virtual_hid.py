@@ -50,6 +50,15 @@ SM_CYVIRTUALSCREEN = 79
 ULONG_PTR = ctypes.c_size_t
 
 
+class POINT(ctypes.Structure):
+    """对应 Win32 POINT 结构体（8 字节，支持多屏负坐标）。"""
+
+    _fields_ = [
+        ("x", ctypes.c_long),
+        ("y", ctypes.c_long),
+    ]
+
+
 class MOUSEINPUT(ctypes.Structure):
     """对应 Win32 MOUSEINPUT 结构体（64 位下 32 字节）。"""
 
@@ -254,6 +263,17 @@ class VirtualHID:
             dwExtraInfo=0,
         )
         return inp
+
+    def get_cursor_pos(self) -> tuple[int, int] | None:
+        """读取当前物理屏幕鼠标光标坐标 (x, y)；API 失败或不支持平台时安全返回 None。"""
+        try:
+            user32 = self._get_user32()
+            pt = POINT()
+            if not user32.GetCursorPos(ctypes.byref(pt)):
+                return None
+            return (int(pt.x), int(pt.y))
+        except Exception:
+            return None
 
     def move_cursor(self, screen_x: int, screen_y: int) -> None:
         """将鼠标光标绝对移动至指定屏幕物理像素坐标。"""

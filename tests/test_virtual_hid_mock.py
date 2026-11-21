@@ -59,9 +59,21 @@ class _FakeUser32:
         self.sent_packets: list[INPUT] = []
         self.cb_sizes: list[int] = []
         self.mapped_vks: list[tuple[int, int]] = []
+        self.cursor_pos: tuple[int, int] = (640, 360)
+        self.cursor_pos_ok: bool = True
+        self.cursor_pos_error: Exception | None = None
 
     def GetSystemMetrics(self, index: int) -> int:
         return self.metrics[index]
+
+    def GetCursorPos(self, point_ptr: object) -> int:
+        if self.cursor_pos_error is not None:
+            raise self.cursor_pos_error
+        if not self.cursor_pos_ok:
+            return 0
+        pt = point_ptr._obj  # type: ignore[attr-defined]
+        pt.x, pt.y = self.cursor_pos
+        return 1
 
     def MapVirtualKeyW(self, vk: int, map_type: int) -> int:
         self.mapped_vks.append((vk, map_type))
@@ -451,3 +463,45 @@ class TestKeyboardOperationsAndWindllPatch:
             hid.move_cursor(960, 540)
 
         assert recorded == [(1, ctypes.sizeof(INPUT))]
+
+    def test_get_cursor_pos_success_failure_and_mock_compat(self) -> None:
+        """校验 get_cursor_pos 正常读取（含多屏负坐标）、失败返回 None 及无异常降级。"""
+        hid, fake, _ = _make_hid()
+        fake.cursor_pos = (1280, 720)
+        assert hid.get_cursor_pos() == (1280, 720)
+
+        # 多屏左/上副屏负坐标支持
+        fake.cursor_pos = (-480, -120)
+        assert hid.get_cursor_pos() == (-480, -120)
+
+        # Win32 GetCursorPos 返回 0（如安全桌面/锁屏）时安全返回 None
+        fake.cursor_pos_ok = False
+        assert hid.get_cursor_pos() is None
+
+        # Win32 调用抛异常或简化 Mock 缺少 GetCursorPos 方法时绝不抛异常
+        fake.cursor_pos_ok = True
+        fake.cursor_pos_error = OSError("Access denied")
+        assert hid.get_cursor_pos() is None
+
+        minimal_hid = VirtualHID(user32=object(), sleep_fn=lambda _: None)
+        assert minimal_hid.get_cursor_pos() is None
+
+        # 验证直接 Patch ctypes.windll.user32.GetCursorPos 可兼容拦截
+        if hasattr(ctypes, "windll"):
+            def fake_get_cursor_pos(pt_ptr: object) -> int:
+                pt = pt_ptr._obj  # type: ignore[attr-defined]
+                pt.x = 777
+                pt.y = 333
+                return 1
+
+            with patch.object(
+                ctypes.windll.user32,
+                "GetCursorPos",
+                side_effect=fake_get_cursor_pos,
+            ):
+                default_hid = VirtualHID(sleep_fn=lambda _: None)
+                assert default_hid.get_cursor_pos() == (777, 333)
+
+            with patch.object(ctypes.windll.user32, "GetCursorPos", return_value=0):
+                default_hid = VirtualHID(sleep_fn=lambda _: None)
+                assert default_hid.get_cursor_pos() is None
