@@ -155,6 +155,13 @@ _SQUAD_SKILL_BUTTON_KEYS: tuple[tuple[str, str, str], ...] = (
     ("squad_module", "module_slot", "干员模组"),
 )
 
+_UNIT_DETAIL_TABS: tuple[tuple[str, str, float, float], ...] = (
+    ("unit_tab_trait", "特质", 0.045, 0.515),
+    ("unit_tab_skill", "技能", 0.135, 0.515),
+    ("unit_tab_feature", "特性", 0.215, 0.515),
+    ("unit_tab_talent", "天赋", 0.295, 0.515),
+)
+
 _DIRECT_TEAMMATE_BUTTONS: dict[GamepadButton, int] = {
     GamepadButton.A: 1,
     GamepadButton.B: 2,
@@ -244,8 +251,9 @@ class ControlDispatcher:
         self._scroll_v_accum: float = 0.0
         self._scroll_h_accum: float = 0.0
 
-        # 编队技能/模组循环索引、联机队友视角与三选一小眼睛状态
+        # 编队技能/模组循环索引、角色详情标签索引、联机队友视角与三选一小眼睛状态
         self._squad_slot_idx: int = 0
+        self._unit_tab_idx: int = 0
         self._teammate_cycle_pos: int = 0  # 0=未切队友，首次循环落到 1 号位
         self._selected_teammate: int = 1
         self._choice_eye_hidden: bool = False
@@ -449,6 +457,28 @@ class ControlDispatcher:
         self._click_norm(pt.u, pt.v, viewport, anchor=pt.anchor, button="left")
         return True
 
+    def _click_safe_blank(self, viewport: ViewportRect) -> None:
+        """左键点击安全空白区以退出角色详情特写视角（官方 PC 端不识别右键取消）。"""
+        if not self._click_button("safe_blank", viewport):
+            self._click_norm(0.650, 0.880, viewport, button="left")
+
+    def _unit_detail_tab_center(self, idx: int) -> tuple[float, float]:
+        btn_key, _, default_u, default_v = _UNIT_DETAIL_TABS[idx % len(_UNIT_DETAIL_TABS)]
+        pt = self.layout.buttons.get(btn_key)
+        if pt is not None:
+            return (pt.u, pt.v)
+        return (default_u, default_v)
+
+    def _unit_detail_tab_polygon(self, idx: int) -> list[tuple[float, float]]:
+        cu, cv = self._unit_detail_tab_center(idx)
+        hw, hh = 0.038, 0.022
+        return [
+            (cu - hw, cv - hh),
+            (cu + hw, cv - hh),
+            (cu + hw, cv + hh),
+            (cu - hw, cv + hh),
+        ]
+
     def _trigger_action(
         self,
         button_key: str,
@@ -547,7 +577,7 @@ class ControlDispatcher:
         if not force and self._shop_open == target_open:
             return False
 
-        toggled = self._trigger_action("shop_toggle", "shop_toggle", None, viewport)
+        toggled = self._trigger_action("shop_toggle", "shop_toggle", "a", viewport)
         self._shop_open = bool(target_open)
         self._shop_override_until = time.monotonic() + _STATE_SYNC_LOCK_SECONDS
         if self._shop_open:
@@ -598,6 +628,12 @@ class ControlDispatcher:
 
     def _current_snap_center(self) -> tuple[float, float]:
         """获取当前吸附焦点的归一化中心坐标。"""
+        if (
+            self._unit_selected
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and not self.deploy_fsm.is_active
+        ):
+            return self._unit_detail_tab_center(self._unit_tab_idx)
         if self._focus_zone == FocusZone.MENU_NODES:
             mapper = self._menu_mappers.get(self._current_scene)
             node_id = self._menu_node_ids.get(self._current_scene)
@@ -624,6 +660,12 @@ class ControlDispatcher:
             return None
         if self._focus_zone == FocusZone.CHOICE_CARDS and self._choice_eye_hidden:
             return None
+        if (
+            self._unit_selected
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and not self.deploy_fsm.is_active
+        ):
+            return self._unit_detail_tab_polygon(self._unit_tab_idx)
         if self._focus_zone == FocusZone.MENU_NODES:
             mapper = self._menu_mappers.get(self._current_scene)
             node_id = self._menu_node_ids.get(self._current_scene)
@@ -852,7 +894,7 @@ class ControlDispatcher:
     def _trigger_battle_ready(self, viewport: ViewportRect) -> None:
         if self.deploy_fsm.is_active:
             self.deploy_fsm.cancel(viewport)
-        self._trigger_action("battle_ready", "battle_ready", "space", viewport)
+        self._trigger_action("battle_ready", "battle_ready", "c", viewport)
         self._emit_rumble(0.50, 0.50, 80)
         self._set_toast("准备就绪 · 开始战斗")
 
@@ -892,6 +934,7 @@ class ControlDispatcher:
         ):
             if getattr(self.keymap, "auto_toggle_shop", True) and not self._shop_open:
                 self._set_shop_open(True, viewport, announce=False)
+                self._wait_ui_transition(220)
             u, v = self._shop_mapper.slot_center(self._shop_idx)
             sx, sy = viewport.norm_to_screen(u, v)
             self.hid.double_click(sx, sy)
@@ -904,12 +947,13 @@ class ControlDispatcher:
             and self._focus_zone in (FocusZone.BENCH, FocusZone.BOARD)
             and self.deploy_fsm.state == DeployState.IDLE
         ):
-            # 在整备区/棋盘按 RT+A 主动单击查看角色详情，并自动切换至选中角色缩放视图态
+            # 在整备区/棋盘按 RT+A 主动单击查看角色详情，并自动切换至选中角色特写详情态
             u, v = self._current_snap_center()
             self._click_norm(u, v, viewport)
+            self._unit_tab_idx = 0
             self._set_unit_selected(True)
             self._emit_rumble(0.18, 0.25, 35)
-            self._set_toast("查看角色详情（缩放补偿已启用 · 按 B 退出）")
+            self._set_toast("查看角色详情（左右切标签 · X 出售 · Y 撤回 · B 退出）")
             return
 
         if self._current_scene == GameScene.MODAL_CHOICE and not self._choice_eye_hidden:
@@ -935,12 +979,12 @@ class ControlDispatcher:
             return
 
         if button == GamepadButton.DPAD_LEFT:
-            self._trigger_action("covenant_panel", "covenant_panel", "grave", viewport)
+            self._trigger_action("covenant_panel", "covenant_panel", None, viewport)
             self._set_toast("切换盟约详情面板")
             return
 
         if button == GamepadButton.DPAD_UP:
-            self._trigger_action("enemy_preview", "enemy_preview", "tab", viewport)
+            self._trigger_action("enemy_preview", "enemy_preview", "w", viewport)
             self._set_toast("切换敌方波次与路线预览")
             return
 
@@ -979,23 +1023,37 @@ class ControlDispatcher:
         self._emit_rumble(0.18, 0.25, 35)
         self._set_toast(f"切换队友 {idx} 号位视角")
 
+    def _wait_ui_transition(self, duration_ms: int = 220) -> None:
+        """等待游戏端面板/特写过渡动画挂载完毕（单测 MockVirtualHID 无阻塞）。"""
+        wait_fn = getattr(self.hid, "wait_ms", None)
+        if callable(wait_fn):
+            wait_fn(duration_ms)
+
     def _trigger_retreat(self, viewport: ViewportRect) -> None:
-        retreat_key = self._get_shortcut("retreat_unit", "a") or "a"
-        if (
+        retreat_key = self._get_shortcut("retreat_unit", "q") or "q"
+        if self._unit_selected:
+            self.hid.tap_key(retreat_key)
+            self._set_unit_selected(False)
+        elif (
             self.deploy_fsm.state == DeployState.HOLDING_UNIT
             and self.deploy_fsm.holding_source is not None
             and self.deploy_fsm.holding_source.zone == "board"
         ):
+            sx, sy = viewport.norm_to_screen(*self.deploy_fsm.holding_source.norm_pos)
+            self.hid.click(sx, sy, button="left")
+            self._wait_ui_transition(220)
             self.hid.tap_key(retreat_key)
             self.deploy_fsm.reset()
         elif self._focus_zone == FocusZone.BOARD and not self._free_cursor_active:
             u, v = self._board_mapper.cell_center(self._board_row, self._board_col)
             self._click_norm(u, v, viewport)
+            self._wait_ui_transition(220)
             self.hid.tap_key(retreat_key)
+            self._set_unit_selected(False)
         else:
             self.hid.tap_key(retreat_key)
         self._emit_rumble(0.35, 0.40, 55)
-        self._set_toast("撤退场上干员 (A)")
+        self._set_toast(f"撤退场上干员 ({retreat_key.upper()})")
 
     # ------------------------------------------------------------------
     # 常规按键与导航路由
@@ -1062,7 +1120,7 @@ class ControlDispatcher:
                 self._trigger_action("shop_upgrade", "shop_upgrade", None, viewport)
                 self._set_toast("升级商店等级")
             elif button == GamepadButton.RS:
-                self._trigger_action("shop_freeze", "shop_freeze", "r", viewport)
+                self._trigger_action("shop_freeze", "shop_freeze", "s", viewport)
                 self._set_toast("切换商店冻结")
             elif button == GamepadButton.LS:
                 self._trigger_action("emote_wheel", "emote_wheel", "z", viewport)
@@ -1222,6 +1280,55 @@ class ControlDispatcher:
     # 局内作战期处理
     # ------------------------------------------------------------------
 
+    def _handle_unit_selected_button(
+        self,
+        button: GamepadButton,
+        viewport: ViewportRect,
+        *,
+        is_repeat: bool,
+    ) -> None:
+        """选取角色特写详情态专属操控：切换左侧特质/技能/特性/天赋，X 出售，Y 撤退，B 点空白退出。"""
+        if button in (GamepadButton.DPAD_LEFT, GamepadButton.LB):
+            self._unit_tab_idx = (self._unit_tab_idx - 1) % len(_UNIT_DETAIL_TABS)
+            u, v = self._unit_detail_tab_center(self._unit_tab_idx)
+            self._click_norm(u, v, viewport)
+            return
+
+        if button in (GamepadButton.DPAD_RIGHT, GamepadButton.RB):
+            self._unit_tab_idx = (self._unit_tab_idx + 1) % len(_UNIT_DETAIL_TABS)
+            u, v = self._unit_detail_tab_center(self._unit_tab_idx)
+            self._click_norm(u, v, viewport)
+            return
+
+        if is_repeat:
+            return
+
+        if button == GamepadButton.A:
+            u, v = self._unit_detail_tab_center(self._unit_tab_idx)
+            self._click_norm(u, v, viewport)
+            return
+
+        if button == GamepadButton.B:
+            self._click_safe_blank(viewport)
+            self._set_unit_selected(False)
+            self._set_toast("已退出角色详情（恢复标准视角）")
+            return
+
+        if button == GamepadButton.X and self._current_scene == GameScene.BATTLE_PREP:
+            sell_key = self._get_shortcut("sell_board", "x") or "x"
+            self.hid.tap_key(sell_key)
+            self._set_unit_selected(False)
+            self._emit_rumble(0.30, 0.40, 55)
+            self._set_toast(f"已出售选中角色 ({sell_key.upper()})")
+            return
+
+        if button == GamepadButton.Y:
+            retreat_key = self._get_shortcut("retreat_unit", "q") or "q"
+            self.hid.tap_key(retreat_key)
+            self._set_unit_selected(False)
+            self._emit_rumble(0.30, 0.35, 50)
+            self._set_toast(f"已撤回角色 ({retreat_key.upper()})")
+
     def _handle_battle_combat_button(
         self,
         button: GamepadButton,
@@ -1229,6 +1336,10 @@ class ControlDispatcher:
         *,
         is_repeat: bool,
     ) -> None:
+        if self._unit_selected:
+            self._handle_unit_selected_button(button, viewport, is_repeat=is_repeat)
+            return
+
         if button in _DPAD_TO_DIR:
             self._focus_zone = FocusZone.BOARD
             self._board_row, self._board_col, _ = self._board_mapper.move(
@@ -1242,10 +1353,10 @@ class ControlDispatcher:
         if button == GamepadButton.A:
             u, v = self._board_mapper.cell_center(self._board_row, self._board_col)
             self._click_norm(u, v, viewport)
+            self._unit_tab_idx = 0
             self._set_unit_selected(True)
         elif button == GamepadButton.B:
-            u, v = self._board_mapper.cell_center(self._board_row, self._board_col)
-            self._click_norm(u, v, viewport, button="right")
+            self._click_safe_blank(viewport)
             if self._unit_selected:
                 self._set_unit_selected(False)
         elif button == GamepadButton.LS:
@@ -1282,6 +1393,11 @@ class ControlDispatcher:
                 self._set_toast("已取消干员落位")
             return
 
+        # 1b. 选取角色详情特写态优先拦截（避免特写放大时棋盘框选错位）
+        if fsm_state == DeployState.IDLE and self._unit_selected:
+            self._handle_unit_selected_button(button, viewport, is_repeat=is_repeat)
+            return
+
         # 2. LB / RB 分区切换
         if button in (GamepadButton.LB, GamepadButton.RB):
             delta = -1 if button == GamepadButton.LB else 1
@@ -1305,29 +1421,32 @@ class ControlDispatcher:
         if button == GamepadButton.A:
             self._handle_idle_prep_a(viewport)
         elif button == GamepadButton.B:
-            if self._unit_selected:
-                u, v = self._current_snap_center()
-                self._click_norm(u, v, viewport, button="right")
-                self._set_unit_selected(False)
-                self._set_toast("已关闭角色详情（恢复标准视角）")
-            elif self._focus_zone == FocusZone.SHOP and self._shop_open:
+            if self._focus_zone == FocusZone.SHOP and self._shop_open:
                 self._set_shop_open(False, viewport, announce=True)
                 self._focus_zone = FocusZone.BENCH
             else:
-                u, v = self._current_snap_center()
-                self._click_norm(u, v, viewport, button="right")
+                self._click_safe_blank(viewport)
         elif button == GamepadButton.X:
+            if not self._shop_open and getattr(self.keymap, "auto_toggle_shop", True):
+                self._set_shop_open(True, viewport, announce=False)
+                self._wait_ui_transition(220)
             self._trigger_action("shop_refresh", "shop_refresh", "d", viewport)
             self._emit_rumble(0.18, 0.22, 35)
-            self._set_toast("刷新商店")
+            self._set_toast("刷新商店 (D)")
         elif button == GamepadButton.Y:
+            if not self._shop_open and getattr(self.keymap, "auto_toggle_shop", True):
+                self._set_shop_open(True, viewport, announce=False)
+                self._wait_ui_transition(220)
             self._trigger_action("shop_upgrade", "shop_upgrade", None, viewport)
             self._emit_rumble(0.25, 0.30, 45)
             self._set_toast("升级商店等级")
         elif button == GamepadButton.RS:
-            self._trigger_action("shop_freeze", "shop_freeze", "r", viewport)
+            if not self._shop_open and getattr(self.keymap, "auto_toggle_shop", True):
+                self._set_shop_open(True, viewport, announce=False)
+                self._wait_ui_transition(220)
+            self._trigger_action("shop_freeze", "shop_freeze", "s", viewport)
             self._emit_rumble(0.18, 0.22, 35)
-            self._set_toast("切换商店冻结")
+            self._set_toast("切换商店冻结 (S)")
         elif button == GamepadButton.LS:
             self._trigger_action("emote_wheel", "emote_wheel", "z", viewport)
             self._set_toast("呼出联机互动表情轮盘")
@@ -1383,12 +1502,8 @@ class ControlDispatcher:
                 self._board_col = col
             elif exit_dir == "up" and not shop_above_board:
                 cu, cv = self._shop_mapper.slot_center(self._shop_idx)
-                if not equip_vertical:
-                    self._enter_battle_prep_zone(FocusZone.EQUIPMENT, viewport)
-                    self._equip_idx = self._equip_mapper.nearest_slot(cu, cv)
-                else:
-                    self._enter_battle_prep_zone(FocusZone.BENCH, viewport)
-                    self._bench_idx = self._bench_mapper.nearest_slot(cu, cv)
+                self._enter_battle_prep_zone(FocusZone.BENCH, viewport)
+                self._bench_idx = self._bench_mapper.nearest_slot(cu, cv)
             return
 
         if self._focus_zone == FocusZone.BENCH:
@@ -1466,10 +1581,9 @@ class ControlDispatcher:
                 self._board_col = self._board_mapper.cols - 1 if equip_on_right else 0
 
     def _prepare_clean_view_for_drag(self, viewport: ViewportRect) -> None:
-        """在抓取干员/装备前确保退出角色详情缩放态并按需收起商店，恢复标准未缩放坐标系。"""
+        """在抓取干员/装备前确保退出角色详情特写态并按需收起商店，恢复标准未缩放坐标系。"""
         if self._unit_selected:
-            u, v = self._current_snap_center()
-            self._click_norm(u, v, viewport, button="right")
+            self._click_safe_blank(viewport)
             self._set_unit_selected(False)
         if self._shop_open and getattr(self.keymap, "auto_toggle_shop", True):
             self._set_shop_open(False, viewport, announce=False)
@@ -1478,6 +1592,7 @@ class ControlDispatcher:
         if self._focus_zone == FocusZone.SHOP:
             if getattr(self.keymap, "auto_toggle_shop", True) and not self._shop_open:
                 self._set_shop_open(True, viewport, announce=False)
+                self._wait_ui_transition(220)
             u, v = self._shop_mapper.slot_center(self._shop_idx)
             self._click_norm(u, v, viewport)
             return
@@ -1581,6 +1696,13 @@ class ControlDispatcher:
     def _build_focus_label(self) -> str:
         if self._free_cursor_active or self._focus_zone == FocusZone.FREE_CURSOR:
             return "自由光标"
+        if (
+            self._unit_selected
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and not self.deploy_fsm.is_active
+        ):
+            _, tab_label, _, _ = _UNIT_DETAIL_TABS[self._unit_tab_idx % len(_UNIT_DETAIL_TABS)]
+            return f"角色详情 · {tab_label}"
         if self._focus_zone == FocusZone.MENU_NODES:
             mapper = self._menu_mappers.get(self._current_scene)
             node_id = self._menu_node_ids.get(self._current_scene)
@@ -1675,6 +1797,23 @@ class ControlDispatcher:
                 PromptItem("RT+A", "极速拿牌"),
                 PromptItem("按住 LT", "查看战场"),
             ]
+        # 选取角色特写详情态专属底部提示条
+        if (
+            self._unit_selected
+            and scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and not self.deploy_fsm.is_active
+        ):
+            items = [
+                PromptItem(nav_key, "切换特质/技能/特性/天赋"),
+                PromptItem("B", "退出详情"),
+            ]
+            if scene == GameScene.BATTLE_PREP:
+                items.insert(1, PromptItem("X", "出售(X)"))
+                items.insert(2, PromptItem("Y", "撤回(Q)"))
+            else:
+                items.insert(1, PromptItem("Y", "撤退(Q)"))
+            return items
+
         if scene == GameScene.BATTLE_COMBAT:
             return [
                 PromptItem(nav_key, "浏览棋盘"),

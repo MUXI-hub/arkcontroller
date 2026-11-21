@@ -198,8 +198,26 @@ class TestMouseOperations:
         assert step_xs[-1] == 65535
         assert step_ys[-1] == round(500 * 65535 / 1000)
         assert fake.sent_packets[-1].mi.dwFlags == MOUSEEVENTF_LEFTUP
+        # 包含 pre_hover_ms(35ms) + 5 步插值(共 100ms) + post_hold_ms(35ms) = 7 次延时
+        assert len(sleeps) == 7
+        assert sleeps[0] == pytest.approx(0.035)
+        assert sleeps[-1] == pytest.approx(0.035)
+        assert sum(sleeps[1:-1]) == pytest.approx(0.100)
+        assert sum(sleeps) == pytest.approx(0.170)
+
+        # 显式关闭首尾悬停时仅保留插值步长延时
+        sleeps.clear()
+        hid.smooth_drag(
+            start=(0, 0),
+            end=(200, 100),
+            duration_ms=50,
+            steps=5,
+            release_at_end=True,
+            pre_hover_ms=0,
+            post_hold_ms=0,
+        )
         assert len(sleeps) == 5
-        assert sum(sleeps) == pytest.approx(0.100)
+        assert sum(sleeps) == pytest.approx(0.050)
 
         # 测试 release_at_end=False 不自动抬起，后续可手动 mouse_up
         fake.sent_packets.clear()
@@ -257,6 +275,14 @@ class TestMouseOperations:
         assert p_down.mi.mouseData == ((-120) & 0xFFFFFFFF)
         assert p_horiz.mi.dwFlags == MOUSEEVENTF_HWHEEL
         assert p_horiz.mi.mouseData == ((-240) & 0xFFFFFFFF)
+
+    def test_wait_ms_uses_injected_sleep_and_ignores_non_positive(self) -> None:
+        hid, _, sleeps = _make_hid()
+        hid.wait_ms(0)
+        hid.wait_ms(-10)
+        assert sleeps == []
+        hid.wait_ms(220)
+        assert sleeps == [pytest.approx(0.220)]
 
 
 class TestKeyboardOperationsAndWindllPatch:

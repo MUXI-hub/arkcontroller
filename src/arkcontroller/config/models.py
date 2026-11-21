@@ -66,17 +66,17 @@ def _validate_positive_unit(name: str, value: float) -> float:
 
 
 def _default_keyboard_shortcuts() -> dict[str, str]:
-    """返回《明日方舟》官方 PC 客户端卫戍协议默认快捷键映射。"""
+    """返回《明日方舟》官方 PC 客户端卫戍协议实机原生快捷键映射。"""
     return {
-        "shop_toggle": "",
+        "shop_toggle": "a",
+        "shop_freeze": "s",
         "shop_refresh": "d",
-        "shop_freeze": "r",
-        "battle_ready": "space",
-        "sell_board": "e",
-        "sell_bench": "q",
-        "retreat_unit": "a",
-        "covenant_panel": "grave",
-        "enemy_preview": "tab",
+        "battle_ready": "c",
+        "enemy_preview": "w",
+        "sell_board": "x",
+        "sell_bench": "x",
+        "retreat_unit": "q",
+        "covenant_panel": "",
         "emote_wheel": "z",
         "back": "esc",
         "pause_menu": "esc",

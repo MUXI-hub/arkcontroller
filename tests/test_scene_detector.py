@@ -424,6 +424,61 @@ def test_heuristic_battle_prep_and_combat_detection(tmp_path: Path) -> None:
     assert res_combat.confidence >= 0.65
 
 
+def test_heuristic_real_pc_stronghold_prep_shop_and_unit_selected(tmp_path: Path) -> None:
+    """验证实机标定的零模板 HSV 强特征：右上粉红准备按钮、刷冻双色块与左侧角色血条（排除拖拽金框）。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 1. 默认休整期（右上角粉红准备按钮，无商店双按钮、无角色青蓝血条）
+    base = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 45, dtype=np.uint8)
+    # 铺一点灰阶方差避免纯色帧守卫
+    cv2.rectangle(base, (200, 120), (1040, 500), (88, 92, 98), -1)
+    # 右上角粉红准备按钮（BGR: (110, 70, 235) -> HSV H≈172, S≈179, V≈235）
+    cv2.rectangle(base, (1120, 100), (1255, 140), (110, 70, 235), -1)
+
+    res_normal = detector.detect(base)
+    assert res_normal.scene == GameScene.BATTLE_PREP
+    assert res_normal.shop_open is False
+    assert res_normal.unit_selected is False
+    assert res_normal.confidence >= 0.80
+
+    # 2. 商店展开态（在右侧绘制黄色刷新与蓝色冻结双色块）
+    shop_open_frame = base.copy()
+    # 黄色刷新（BGR: (30, 210, 240) -> HSV H≈25, S≈223, V≈240）
+    cv2.rectangle(shop_open_frame, (1125, 430), (1260, 480), (30, 210, 240), -1)
+    # 蓝色冻结（BGR: (230, 140, 20) -> HSV H≈103, S≈233, V≈230）
+    cv2.rectangle(shop_open_frame, (970, 430), (1105, 480), (230, 140, 20), -1)
+
+    res_shop = detector.detect(shop_open_frame)
+    assert res_shop.scene == GameScene.BATTLE_PREP
+    assert res_shop.shop_open is True
+    assert res_shop.unit_selected is False
+
+    # 2b. 商店冻结态（按钮变为青绿色「解冻」，BGR: (170, 180, 40) -> HSV H≈88, S≈198, V≈180）
+    shop_frozen_frame = shop_open_frame.copy()
+    cv2.rectangle(shop_frozen_frame, (970, 430), (1105, 480), (170, 180, 40), -1)
+    res_frozen = detector.detect(shop_frozen_frame)
+    assert res_frozen.scene == GameScene.BATTLE_PREP
+    assert res_frozen.shop_open is True
+    assert res_frozen.unit_selected is False
+
+    # 3. 选取角色特写详情态（左侧青蓝生命条，无右下拖拽售出金框）
+    unit_sel_frame = base.copy()
+    # 青蓝血条（BGR: (240, 185, 25) -> HSV H≈97, S≈228, V≈240）
+    cv2.rectangle(unit_sel_frame, (10, 328), (420, 342), (240, 185, 25), -1)
+
+    res_sel = detector.detect(unit_sel_frame)
+    assert res_sel.scene == GameScene.BATTLE_PREP
+    assert res_sel.shop_open is False
+    assert res_sel.unit_selected is True
+
+    # 4. 拖拽态保护：若右下角出现金黄色拖拽售出区，即使左侧残留青蓝条也不误判为角色详情态
+    dragging_frame = unit_sel_frame.copy()
+    cv2.rectangle(dragging_frame, (1115, 530), (1250, 690), (25, 190, 235), -1)
+    res_drag = detector.detect(dragging_frame)
+    assert res_drag.scene == GameScene.BATTLE_PREP
+    assert res_drag.unit_selected is False
+
+
 # =====================================================================
 # 4. 连续帧防抖测试
 # =====================================================================

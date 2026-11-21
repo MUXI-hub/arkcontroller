@@ -201,7 +201,7 @@ class TestPerspectiveBoardMapper:
         assert mapper.norm_to_cell(0.05, 0.05) is None
 
     def test_trapezoid_homography_roundtrip_and_foreshortening(self) -> None:
-        # 使用真实卫戍协议 16:9 梯形透视棋盘（上窄下宽 5x9）
+        # 使用实机校准后的卫戍协议 16:9 梯形透视棋盘（上窄下宽 4x7）
         _, layout = ConfigLoader(use_user_override=False).load()
         mapper = PerspectiveBoardMapper(layout.board_quad)
 
@@ -211,15 +211,17 @@ class TestPerspectiveBoardMapper:
         identity /= identity[2, 2]
         assert np.allclose(identity, np.eye(3), atol=1e-5)
 
-        # 1. 全棋盘 45 格正逆映射 100% 精准闭合
+        # 1. 全棋盘 28 格正逆映射 100% 精准闭合
         for r in range(mapper.rows):
             for c in range(mapper.cols):
                 cu, cv = mapper.cell_center(r, c)
                 assert mapper.norm_to_cell(cu, cv) == (r, c)
 
-        # 2. 透视近大远小特征：第 0 行（远端）宽度和高度均严格小于第 4 行（近端）
-        top_poly = mapper.cell_polygon(0, 4)
-        bot_poly = mapper.cell_polygon(4, 4)
+        # 2. 透视近大远小特征：第 0 行（远端）宽度和高度均严格小于最底行（近端）
+        last_row = mapper.rows - 1
+        mid_col = mapper.cols // 2
+        top_poly = mapper.cell_polygon(0, mid_col)
+        bot_poly = mapper.cell_polygon(last_row, mid_col)
         top_width = top_poly[1][0] - top_poly[0][0]
         bot_width = bot_poly[1][0] - bot_poly[0][0]
         top_height = top_poly[3][1] - top_poly[0][1]
@@ -229,21 +231,21 @@ class TestPerspectiveBoardMapper:
         assert top_height < bot_height
 
         # 3. 相邻棋盘格共边无缝衔接（无裂缝无错位）
-        left_cell = mapper.cell_polygon(2, 3)
-        right_cell = mapper.cell_polygon(2, 4)
+        left_cell = mapper.cell_polygon(2, mid_col - 1)
+        right_cell = mapper.cell_polygon(2, mid_col)
         assert left_cell[1] == pytest.approx(right_cell[0], abs=1e-6)
         assert left_cell[2] == pytest.approx(right_cell[3], abs=1e-6)
 
-        upper_cell = mapper.cell_polygon(1, 4)
-        lower_cell = mapper.cell_polygon(2, 4)
+        upper_cell = mapper.cell_polygon(1, mid_col)
+        lower_cell = mapper.cell_polygon(2, mid_col)
         assert upper_cell[3] == pytest.approx(lower_cell[0], abs=1e-6)
         assert upper_cell[2] == pytest.approx(lower_cell[1], abs=1e-6)
 
         # 4. 棋盘外坐标检测与最近格裁剪
         assert mapper.norm_to_cell(0.02, 0.50) is None
-        assert mapper.norm_to_cell(0.50, 0.95) is None
-        assert mapper.nearest_cell(0.50, 0.95) == (4, 4)
-        assert mapper.nearest_cell(0.50, 0.05) == (0, 4)
+        assert mapper.norm_to_cell(0.55, 0.95) is None
+        assert mapper.nearest_cell(0.57, 0.95)[0] == last_row
+        assert mapper.nearest_cell(0.55, 0.05)[0] == 0
 
         # 5. 网格预览线段数量与端点吻合外框
         horiz, vert = mapper.grid_lines()
@@ -255,19 +257,21 @@ class TestPerspectiveBoardMapper:
     def test_board_move_and_boundary_exits(self) -> None:
         _, layout = ConfigLoader(use_user_override=False).load()
         mapper = PerspectiveBoardMapper(layout.board_quad)
+        last_r = mapper.rows - 1
+        last_c = mapper.cols - 1
 
         assert mapper.move(0, 0, "up") == (0, 0, "up")
         assert mapper.move(0, 0, "left") == (0, 0, "left")
-        assert mapper.move(0, 0, "left", wrap_cols=True) == (0, 8, None)
-        assert mapper.move(4, 8, "down") == (4, 8, "down")
-        assert mapper.move(4, 8, "right") == (4, 8, "right")
-        assert mapper.move(2, 4, "up") == (1, 4, None)
-        assert mapper.move(2, 4, "right") == (2, 5, None)
+        assert mapper.move(0, 0, "left", wrap_cols=True) == (0, last_c, None)
+        assert mapper.move(last_r, last_c, "down") == (last_r, last_c, "down")
+        assert mapper.move(last_r, last_c, "right") == (last_r, last_c, "right")
+        assert mapper.move(2, 3, "up") == (1, 3, None)
+        assert mapper.move(2, 3, "right") == (2, 4, None)
 
         with pytest.raises(IndexError):
-            mapper.cell_center(5, 0)
+            mapper.cell_center(mapper.rows, 0)
         with pytest.raises(IndexError):
-            mapper.cell_polygon(0, 9)
+            mapper.cell_polygon(0, mapper.cols)
 
     def test_degenerate_and_crossed_quads_raise_value_error(self) -> None:
         # 四点共线

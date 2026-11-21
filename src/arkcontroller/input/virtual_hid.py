@@ -316,11 +316,13 @@ class VirtualHID:
         self,
         start: tuple[int, int],
         end: tuple[int, int],
-        duration_ms: int = 110,
-        steps: int = 10,
+        duration_ms: int = 180,
+        steps: int = 14,
         release_at_end: bool = True,
+        pre_hover_ms: int = 35,
+        post_hold_ms: int = 35,
     ) -> None:
-        """从起点按住左键并分步平滑插值拖拽至终点。
+        """从起点悬停后按住左键并分步平滑插值拖拽至终点。
 
         Args:
             start: 拖拽起点屏幕像素坐标 (x, y)。
@@ -328,6 +330,8 @@ class VirtualHID:
             duration_ms: 总拖拽耗时（毫秒）。
             steps: 线性插值步数（至少为 1）。
             release_at_end: 到达终点后是否自动松开鼠标左键。
+            pre_hover_ms: 移至起点后的悬停等待时长（毫秒），确保 Unity 射线先捕获目标再起拖。
+            post_hold_ms: 到达终点后松开前的短暂停留时长（毫秒），确保目标格稳定吸附。
         """
         total_steps = max(1, int(steps))
         step_sleep_sec = (max(0, int(duration_ms)) / 1000.0) / total_steps
@@ -336,6 +340,8 @@ class VirtualHID:
 
         with self._lock:
             self.move_cursor(sx, sy)
+            if pre_hover_ms > 0:
+                self._sleep(pre_hover_ms / 1000.0)
             self.mouse_down("left")
             for idx in range(1, total_steps + 1):
                 if step_sleep_sec > 0.0:
@@ -345,6 +351,8 @@ class VirtualHID:
                 cy = int(round(sy + (ey - sy) * ratio))
                 self.move_cursor(cx, cy)
             if release_at_end:
+                if post_hold_ms > 0:
+                    self._sleep(post_hold_ms / 1000.0)
                 self.mouse_up("left")
 
     def directional_flick(
@@ -363,9 +371,11 @@ class VirtualHID:
         self.smooth_drag(
             start=(int(origin[0]), int(origin[1])),
             end=target,
-            duration_ms=90,
-            steps=8,
+            duration_ms=110,
+            steps=10,
             release_at_end=True,
+            pre_hover_ms=30,
+            post_hold_ms=20,
         )
 
     def key_down(self, key_name: str) -> None:
@@ -397,3 +407,8 @@ class VirtualHID:
         with self._lock:
             inp = self._make_mouse_input(mouse_data=delta, flags=flag)
             self._send_inputs(inp)
+
+    def wait_ms(self, duration_ms: int) -> None:
+        """按指定毫秒数等待客户端 UI 过渡动画完成（复用可注入 sleep_fn，单测零阻塞）。"""
+        if duration_ms > 0:
+            self._sleep(duration_ms / 1000.0)

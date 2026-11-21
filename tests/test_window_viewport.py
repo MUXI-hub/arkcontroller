@@ -367,16 +367,19 @@ class TestConfigSystem:
             assert 0.0 <= pt.v <= 1.0
 
         assert "shop_toggle" in layout.buttons
+        assert "safe_blank" in layout.buttons
         assert "shop_open" in layout.view_overrides
         assert "unit_selected" in layout.view_overrides
         assert layout.resolve_board_quad("shop_open") != layout.board_quad
-        assert layout.resolve_board_quad("unit_selected") != layout.board_quad
+        assert layout.resolve_bench_zone("shop_open") != layout.bench_zone
+        assert layout.resolve_equip_zone("shop_open") != layout.equip_zone
 
+        assert layout.shop_zone.count == 4
         assert layout.bench_zone.count == 10
         assert layout.equip_zone.count == 5
         assert layout.choice_zone.count == 3
-        assert layout.board_quad.rows == 5
-        assert layout.board_quad.cols == 9
+        assert layout.board_quad.rows == 4
+        assert layout.board_quad.cols == 7
         assert len(layout.activity_hub_nodes) >= 5
         assert len(layout.pre_match_nodes) >= 4
         assert len(layout.squad_edit_nodes) >= 12
@@ -418,8 +421,8 @@ class TestConfigSystem:
         assert keymap.use_native_keyboard_shortcuts is False
         assert keymap.left_deadzone == pytest.approx(0.18)
         assert layout.board_quad.top_left == pytest.approx((0.21, 0.27))
-        # 未覆盖的顶点保持默认值
-        assert layout.board_quad.top_right == pytest.approx((0.775, 0.285))
+        # 未覆盖的顶点保持实机校准后的默认值
+        assert layout.board_quad.top_right == pytest.approx((0.76823, 0.28519))
 
         raw_override = json.loads(override_path.read_text(encoding="utf-8"))
         assert raw_override["keymap"]["ready_hold_ms"] == 500

@@ -49,17 +49,17 @@ DEFAULT_SCENE_ROIS: dict[GameScene, tuple[float, float, float, float]] = {
     GameScene.ACTIVITY_HUB: (0.03, 0.04, 0.28, 0.14),
     GameScene.PRE_MATCH_SETUP: (0.68, 0.78, 0.28, 0.16),
     GameScene.SQUAD_EDIT: (0.04, 0.04, 0.30, 0.12),
-    GameScene.BATTLE_PREP: (0.76, 0.78, 0.22, 0.18),
+    GameScene.BATTLE_PREP: (0.86, 0.12, 0.13, 0.10),
     GameScene.MODAL_CHOICE: (0.20, 0.22, 0.60, 0.56),
     GameScene.BATTLE_COMBAT: (0.38, 0.02, 0.24, 0.10),
     GameScene.SETTLEMENT: (0.06, 0.14, 0.34, 0.20),
 }
 
-# 休整期商店展开状态辅助模板默认 ROI: (u, v, w, h)
-DEFAULT_SHOP_OPEN_ROI: tuple[float, float, float, float] = (0.14, 0.58, 0.68, 0.20)
+# 休整期商店展开状态辅助模板默认 ROI: (u, v, w, h) —— 右侧冻结+刷新按钮带
+DEFAULT_SHOP_OPEN_ROI: tuple[float, float, float, float] = (0.75, 0.58, 0.24, 0.12)
 
-# 局内选中角色详情侧栏辅助模板默认 ROI: (u, v, w, h)
-DEFAULT_UNIT_SELECTED_ROI: tuple[float, float, float, float] = (0.0, 0.16, 0.24, 0.68)
+# 局内选中角色详情侧栏辅助模板默认 ROI: (u, v, w, h) —— 左侧生命条与特质/技能栏
+DEFAULT_UNIT_SELECTED_ROI: tuple[float, float, float, float] = (0.0, 0.44, 0.35, 0.12)
 
 _VALID_SCENE_VALUES: dict[str, GameScene] = {
     scene.value: scene
@@ -479,18 +479,87 @@ class SceneDetector:
         return self._detect_shop_open_heuristic(frame)
 
     @staticmethod
+    def _measure_top_right_ready_pink_ratio(hsv: np.ndarray) -> float:
+        """测量官方 PC 端卫戍协议右上角粉红色「准备就绪」按钮像素占比（1280x720 实机标定）。"""
+        roi = hsv[95:145, 1115:1260]
+        pink_mask = (
+            ((roi[:, :, 0] >= 155) | (roi[:, :, 0] <= 10))
+            & (roi[:, :, 1] >= 110)
+            & (roi[:, :, 2] >= 130)
+        )
+        return float(pink_mask.mean())
+
+    @staticmethod
+    def _measure_shop_action_buttons(hsv: np.ndarray) -> tuple[float, float]:
+        """测量商店展开时右侧「黄色刷新 + 蓝色冻结」双按钮像素占比（实机展开 ~0.61，收起 0.0）。"""
+        y_roi = hsv[425:485, 1120:1265]
+        refresh_yellow = float(
+            (
+                (y_roi[:, :, 0] >= 15)
+                & (y_roi[:, :, 0] <= 35)
+                & (y_roi[:, :, 1] >= 110)
+                & (y_roi[:, :, 2] >= 140)
+            ).mean()
+        )
+        b_roi = hsv[425:485, 965:1110]
+        # 同时覆盖常规「冻结」（深蓝 H≈105..120）与已冻结「解冻」（青绿 H≈85..95）双态按钮
+        freeze_blue = float(
+            (
+                (b_roi[:, :, 0] >= 80)
+                & (b_roi[:, :, 0] <= 125)
+                & (b_roi[:, :, 1] >= 90)
+                & (b_roi[:, :, 2] >= 90)
+            ).mean()
+        )
+        return (refresh_yellow, freeze_blue)
+
+    @staticmethod
+    def _detect_unit_selected_heuristic(frame: np.ndarray) -> bool:
+        """基于左侧角色青蓝生命条（排除拖拽售出态）判断角色详情特写面板是否展开。"""
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        ready_pink = SceneDetector._measure_top_right_ready_pink_ratio(hsv)
+        if ready_pink < 0.28:
+            return False
+        hp_roi = hsv[325:345, 5:430]
+        hp_blue = float(
+            (
+                (hp_roi[:, :, 0] >= 92)
+                & (hp_roi[:, :, 0] <= 115)
+                & (hp_roi[:, :, 1] >= 150)
+                & (hp_roi[:, :, 2] >= 150)
+            ).mean()
+        )
+        sell_roi = hsv[520:700, 1105:1260]
+        sell_gold = float(
+            (
+                (sell_roi[:, :, 0] >= 16)
+                & (sell_roi[:, :, 0] <= 32)
+                & (sell_roi[:, :, 1] >= 130)
+                & (sell_roi[:, :, 2] >= 140)
+            ).mean()
+        )
+        return hp_blue >= 0.26 and sell_gold < 0.04
+
+    @staticmethod
     def _detect_shop_open_heuristic(frame: np.ndarray) -> bool:
-        """基于商店区域亮度与垂直卡牌分隔边缘估算商店是否展开。"""
+        """判断休整期商店是否处于展开状态（兼容实机右侧刷新/冻结色块与通用卡牌边缘特征）。"""
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        ready_pink = SceneDetector._measure_top_right_ready_pink_ratio(hsv)
+        refresh_yellow, freeze_blue = SceneDetector._measure_shop_action_buttons(hsv)
+
+        # 实机休整期画面（右上角存在粉红准备就绪按钮）：直接采用零误差的刷新/冻结双按钮色块判别
+        if ready_pink >= 0.28:
+            return refresh_yellow >= 0.25 and freeze_blue >= 0.25
+
+        # 兼容非实机布局/自定义主题及单元测试合成帧
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         shop_roi = gray[410:555, 180:1030]
         mean_val = float(shop_roi.mean())
         std_val = float(shop_roi.std())
 
-        # 若该区域极暗且平坦，通常意味着商店面板已折叠收起
         if mean_val < 38.0 and std_val < 16.0:
             return False
 
-        # 检测商店卡牌的横向分隔边缘
         edges = cv2.Canny(shop_roi, 45, 130)
         edge_density = float((edges > 0).mean())
         if mean_val < 48.0 and edge_density < 0.015:
@@ -505,7 +574,7 @@ class SceneDetector:
         if unit_template is not None:
             score = self._match_template(frame, unit_template)
             return score >= unit_template.threshold
-        return False
+        return self._detect_unit_selected_heuristic(frame)
 
     def _detect_heuristic(
         self,
@@ -530,7 +599,21 @@ class SceneDetector:
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # 2. 检测底部整备槽位条纹特征（局内休整期 / 作战期共有基础特征）
+        # 2a. 实机官方 PC 端卫戍协议休整期强特征：右上角粉红「准备就绪」按钮（~0.52）
+        top_ready_pink = self._measure_top_right_ready_pink_ratio(hsv)
+        if top_ready_pink >= 0.28:
+            shop_open = self._detect_shop_open(frame, shop_template)
+            unit_selected = self._detect_unit_selected(frame, unit_template)
+            confidence = min(0.90, 0.72 + 0.30 * min(top_ready_pink, 0.60))
+            return SceneDetectionResult(
+                scene=GameScene.BATTLE_PREP,
+                confidence=round(confidence, 4),
+                shop_open=shop_open,
+                choice_count=3,
+                unit_selected=unit_selected,
+            )
+
+        # 2b. 通用底部整备槽位条纹特征（兼容旧主题与合成测试帧）
         bench_score = self._measure_bench_slots_score(gray)
         if bench_score >= 0.60:
             # 右下角准备就绪按钮区饱和高亮色块特征

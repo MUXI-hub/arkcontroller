@@ -274,9 +274,11 @@ class DeployFSM:
             and viewport is not None
             and self._aim_origin_norm is not None
         ):
-            origin_xy = viewport.norm_to_screen(*self._aim_origin_norm)
-            # 在定朝向圆盘展开态下发送右键安全撤销落位，避免误触 Esc 弹出暂停菜单
-            self._hid.click(origin_xy[0], origin_xy[1], button="right")
+            # 实机验证：官方 PC 端不识别鼠标右键撤销，需左键点击定朝向菱形左上角的「× 点击取消」按钮
+            cancel_u = max(0.04, min(0.96, self._aim_origin_norm[0] - 0.10))
+            cancel_v = max(0.04, min(0.96, self._aim_origin_norm[1] - 0.15))
+            cancel_xy = viewport.norm_to_screen(cancel_u, cancel_v)
+            self._hid.click(cancel_xy[0], cancel_xy[1], button="left")
 
         self._emit_rumble(0.15, 0.15, 30)
         self.reset()
@@ -285,8 +287,8 @@ class DeployFSM:
     def sell_holding(self, viewport: ViewportRect) -> bool:
         """快速出售当前抓取的干员或装备。
 
-        开启原生快捷键时：场上干员按 E，整备区干员或装备按 Q；
-        关闭原生快捷键时：从抓取源平滑拖拽至布局配置的 sell_dropzone 坐标。
+        开启原生快捷键时：先选中源槽位再触发官方出售键（默认 X）；
+        关闭原生快捷键时：从抓取源平滑拖拽至右下角金黄色 sell_dropzone 热区。
         """
         if (
             self._state not in (DeployState.HOLDING_UNIT, DeployState.HOLDING_EQUIP)
@@ -298,11 +300,14 @@ class DeployFSM:
             if not self._holding_source.clicked_in_game:
                 start_xy = viewport.norm_to_screen(*self._holding_source.norm_pos)
                 self._hid.click(start_xy[0], start_xy[1], button="left")
+                wait_fn = getattr(self._hid, "wait_ms", None)
+                if callable(wait_fn):
+                    wait_fn(220)
             shortcuts = getattr(self._keymap, "keyboard_shortcuts", {}) or {}
             if self._holding_source.zone == "board":
-                sell_key = shortcuts.get("sell_board", "e")
+                sell_key = shortcuts.get("sell_board", "x")
             else:
-                sell_key = shortcuts.get("sell_bench", "q")
+                sell_key = shortcuts.get("sell_bench", "x")
             self._hid.tap_key(sell_key)
         else:
             sell_pt = self._layout.buttons.get("sell_dropzone")
