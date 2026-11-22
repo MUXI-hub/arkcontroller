@@ -2,6 +2,20 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] - 2026-11-22
+
+### 新增、变更与修复 (Added, Changed & Fixed)
+- **安全取消点击区迁至左上延迟区 + 多人队友抽屉按 `B` 必关 (`arkcontroller.config` & `arkcontroller.control`)**：
+  - 将 `safe_blank` 从原右侧策略头像下方 `(0.955, 0.445, right_edge)` 迁移至左上角退出按钮右侧延迟胶囊区 `(0.1172, 0.0903, left_edge)`，彻底杜绝多人查看队友抽屉时按 `B` 误触右侧队友策略。
+  - `ControlDispatcher` 新增 `_teammate_panel_open` 追踪：在 `BATTLE_PREP`、`BATTLE_COMBAT` 与 `FREE_CURSOR` 下按 **`B`** 时，若队友面板已展开或焦点位于 `FocusZone.TEAMMATES`，优先点击左上延迟区安全关闭队友抽屉并切回 `BOARD`。
+- **修复实机作战期展开队友抽屉误判为休整期商店 (`arkcontroller.vision.scene_detector`)**：
+  - 新增 `_has_real_pc_combat_cost_bar()` 检测右下作战期费用栏 `◆ C <费用>` 及底部白色回复进度条，在 `_detect_heuristic` 的 `2a` 与 `2b` 之间优先直判 `GameScene.BATTLE_COMBAT (shop_open=False)`，彻底根除作战期右下亮地形叠加 4 人队友抽屉误判 `BATTLE_PREP + shop_open=True`。
+- **彻底移除不存在的「赠送队友」功能 (`arkcontroller.config` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 移除 `DeployFSM.gift_holding()`、`ControlDispatcher` 中抓取干员/装备时按 `Y` 与移入队友栏按 `A` 的赠送分支及提示、`default_bindings.json` / `KeymapConfig` 的 `gift_teammate` 以及主控台键位手册对应文案（保留正常的点击左侧队友头像与 `LT+右` / `LT+A/B/X/Y` 切换队友战场视角功能）。
+- **新增无序 `LT + RT` 一键点击右侧本局策略头像 + 休整/作战双态策略坐标 (`arkcontroller.config` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 实机标定作战期下移后的策略锚点 `strategy_avatar_combat (0.9602, 0.7486, right_edge)` 与 `strategy_inspect_combat (0.9051, 0.7493, right_edge)`，`FocusZone.STRATEGY` 与 `DeployFSM` 随当前场景在休整期/作战期间自动切换精准坐标；
+  - 新增 `LT + RT`（无序双扳机组合，兼容 `LT->RT`、`RT->LT`、同帧双按）一键释放当前阶段右侧本局策略头像，与决策弹窗按住 `LT` 看场及干员/装备拖拽零冲突；同步写入 `lt_chords.use_strategy` 与主控台键位手册。
+
 ## [0.3.1] - 2026-11-22
 
 ### 新增与修复 (Added & Fixed)
