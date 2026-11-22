@@ -35,10 +35,17 @@
 ## 环境要求与安装
 
 - **操作系统**：Windows 10 / Windows 11（64 位）
-- **Python 版本**：Python `3.12` 或更高版本
+- **Python 版本**（仅源码运行或自行打包需要）：Python `3.12` 或更高版本
 - **手柄设备**：支持标准 XInput 协议的 Xbox Series / Xbox One / Xbox 360 手柄或兼容手柄
 
-### 1. 创建虚拟环境并安装依赖
+### 方式一：直接运行独立可执行程序（推荐，免安装 Python）
+
+直接双击运行已构建的 **`dist/ArkController.exe`**（无控制台黑框窗口）：
+- **双层配置自适应**：程序默认优先读取 `ArkController.exe` 同级目录 `configs/` 下的配置文件（`dist/configs/` 已随包附带干净的默认 `default_bindings.json` 与 `stronghold_layout_16_9.json`）；即使你将单个 `ArkController.exe` 单独复制到任意空文件夹运行，程序也会自动回退加载内置默认配置；
+- **个性化配置持久化**：在主控台调校手感或完成可视化校准后，所有修改会自动保存至 `ArkController.exe` 同级的 `configs/user_override.json`（场景模板保存至 `assets/templates/`），升级覆盖 `.exe` 不会丢失本机配置；
+- **命令行参数通用**：可在快捷方式或终端中附带参数运行，例如 `.\dist\ArkController.exe --minimized`（静默常驻托盘）或 `.\dist\ArkController.exe --no-elevate --dry-run`（冒烟自检）。
+
+### 方式二：源码安装与运行
 
 在项目根目录 `arkcontroller` 下打开 PowerShell：
 
@@ -53,7 +60,7 @@ python -m venv .venv
 .\.venv\Scripts\pip install -e ".[dev]"
 ```
 
-### 2. 启动运行
+启动运行：
 
 ```powershell
 # 标准启动（默认检测并在需要时请求管理员 UAC 提权）
@@ -63,7 +70,18 @@ python -m venv .venv
 .\.venv\Scripts\python -m arkcontroller.main
 ```
 
-### 3. 命令行参数说明
+### 方式三：自行构建独立 `.exe`（PyInstaller）
+
+安装可选打包依赖并执行内置构建脚本（自动生成多尺寸 `assets/arkcontroller.ico`、嵌入版本号并裁剪冗余大型 Qt 模块）：
+
+```powershell
+.\.venv\Scripts\pip install -e ".[build]"
+.\.venv\Scripts\python scripts/build_exe.py
+```
+
+构建完成后将在 `dist/ArkController.exe` 产出无黑框单文件程序，并自动在 `dist/configs/` 同步一份干净的默认配置（不会拷贝本机 `user_override.json`）。
+
+### 命令行参数说明
 
 | 参数 | 说明 |
 | :--- | :--- |

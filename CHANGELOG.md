@@ -2,6 +2,27 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [1.0.0] - 2026-11-22
+
+> **正式版里程碑基线（General Availability）**：完成从 `v0.2.2` 以来涵盖纯白极简 PRTS 桌面主控台、H1/H2/S3 鼠标穿透悬浮窗、三套卫戍主题全置灰鲁棒识别、Boss 战镜像战场、`>7` 盟约任意相位吸附与 Windows 独立单文件 `.exe` 打包的完整闭环，建立 `v1.0.0` 正式发版基线。
+
+### 新增与打包发版能力 (Added & Packaging)
+- **Windows 独立无控制台单文件可执行程序（`dist/ArkController.exe`）与可复现构建脚本 (`scripts/build_exe.py`)**：
+  - `pyproject.toml` 新增可选构建依赖分组 `[project.optional-dependencies].build = ["pyinstaller>=6.0.0"]`；
+  - 生成标准多尺寸（`16/32/48/64/128/256`）罗德岛 PRTS 纯白极简 + 源石琥珀几何图标 `assets/arkcontroller.ico`，并在 `main.py` 启动时为 `QApplication` 绑定窗口/任务栏图标；
+  - `scripts/build_exe.py` 支持一键构建无黑框 GUI 单文件 `dist/ArkController.exe`（嵌入 `1.0.0.0` Windows 版本资源与多尺寸图标，剔除 WebEngine/Qml/Quick/3D/Multimedia/Pdf/Sql/Network 等冗余扩展模块以精简体积），构建完成后自动同步干净默认配置至 `dist/configs/`（不复制本机 `user_override.json`）。
+- **PyInstaller 冻结运行环境（`sys.frozen`）全链路加固 (`arkcontroller.config` & `arkcontroller.platform` & `arkcontroller.main`)**：
+  - `ConfigLoader` 补全 `_LAYOUT_TOP_LEVEL_KEYS` 与 `_KEYMAP_TOP_LEVEL_KEYS` 全部字段，并在冻结态实现双层配置解析：优先读取 `.exe` 同级 `configs/`，纯单文件拷入空目录运行时自动回退读取 `_MEIPASS/configs/` 内置默认配置；用户持久化覆盖 `user_override.json` 始终写入可写的 `<exe_dir>/configs/user_override.json` 并自动建目录；
+  - `main.py` 在无控制台模式（`console=False`）最开头自动检测并为 `None` 的 `sys.stdout` / `sys.stderr` 挂载安全 `os.devnull` 流；`_resolve_templates_dir` 与 `_resolve_writable_templates_dir` 支持冻结态优先外置、回退 `_MEIPASS` 读取、校准保存始终写回 `<exe_dir>/assets/templates`；
+  - `uac.py:relaunch_as_admin` 在冻结态显式将 `ShellExecuteW` 工作目录锁定为 `<exe_dir>`，避免 UAC 提权重启后工作目录漂移至 `System32`；
+  - 新增冻结环境专项单元测试套件 `tests/test_frozen_packaging.py`。
+
+### 1.0.0 正式版核心能力汇总 (Highlights since v0.2.2)
+- **纯白极简 PRTS 桌面主控台（方案 B v2）+ H1/H2/S3 鼠标穿透悬浮 HUD**：四分区终端（`总览` 16Hz 实时手柄靶盘与 8 项快捷开关、`调校` 7 项手感滑块与实时响应曲线、`键位` 9 卡矢量手柄图示简报、`系统` 诊断档案）；HUD 升级为 **S3 加粗取景折角 + 四边半透细连线 + 外角琥珀微刻线**（棋盘格自动切为清爽短折角，多选一决策卡外扩 `+11px` 彻底错开白边且待确认态琥珀框完整包裹放大整卡与确认白条），支持 `WDA_EXCLUDEFROMCAPTURE` ↔ `WDA_NONE`（录屏/屏幕共享可见且零视觉自污染）热切换。
+- **三套卫戍协议主题全置灰鲁棒视觉识别**：完整覆盖闭合紫粉电玩风 / 乌萨斯复古辉光管风 / 罗德岛战术青绿风，新增刷新+冻结双灰按钮零色相三联结构商店识别、三主题置灰升级卡/准备按钮加固、右下费用栏直判作战期防止队友抽屉误报，以及宽纯白 HUD+Toast 两翼黑条防跌回护航。
+- **Boss 战右侧镜像战场与多盟约任意相位吸附**：自动检测并防抖锁存多人 Boss 战右侧分配时的 3D 棋盘（`4x7`）与 5 槽装备台水平镜像（保持 10 槽整备区与底部商店原位不变，HUD 显示 ` · 镜像战场`）；`>7` 溢出盟约支持 `RS` / `LB`/`RB` 顶部安全带平滑拖拽滑动与任意水平停靠相位实测圆心精确吸附（兼容满层高光徽章）。
+- **全流程防误触交互打磨**：商店连按两次 `A` 防误触购卡与 `RT+A` 查详情、无序 `LT+RT` 一键释放休整/作战双态本局策略头像、左上延迟区 `safe_blank` 确保队友抽屉按 `B` 必关、移除不存在的赠卡分支、`2x3` 交流表情面板锁焦翻页防逃逸，以及棋盘干员双击 `A` 原地回环转向。
+
 ## [0.3.4] - 2026-11-22
 
 ### 新增与优化 (Added & Changed)

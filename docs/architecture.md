@@ -215,23 +215,38 @@ stateDiagram-v2
 
 ---
 
-## 7. 目录结构速览
+## 7. PyInstaller 独立单文件打包与冻结环境适配
+
+为支持零 Python 环境的绿色独立分发，系统通过 `scripts/build_exe.py` 构建无控制台单文件 `dist/ArkController.exe`（`--onefile --windowed`，嵌入多尺寸 `assets/arkcontroller.ico` 与 Windows `VSVersionInfo`，并剔除 `QtWebEngine`/`QtQml`/`QtQuick`/`Qt3D`/`QtMultimedia`/`QtPdf`/`QtSql`/`QtNetwork` 等未使用模块），在 `getattr(sys, "frozen", False)` 冻结态下执行四项运行期加固：
+
+1. **双层配置解析（`ConfigLoader`）**：默认优先读取 `<exe_dir>/configs/`；若用户仅拷走单个 `.exe` 至空目录运行，则 `keymap_path` / `layout_path` 无缝回退读取 PyInstaller 解包目录 `_MEIPASS/configs/` 的内置默认 JSON；而 `override_path` 始终指向可写的 `<exe_dir>/configs/user_override.json`（保存时自动创建父目录并合并重载）。
+2. **模板目录读写分离（`main.py`）**：`SceneDetector` 优先读取 `<exe_dir>/assets/templates`（不存在时兼容回退 `_MEIPASS/assets/templates`），`VisionCalibrator` 校准采样始终写入可写的 `<exe_dir>/assets/templates`，并在保存或重载后自动将识别器切换至外置目录。
+3. **无控制台流安全护栏（`main.py`）**：GUI `console=False` 启动时 `sys.stdout` / `sys.stderr` 可能为 `None`，`main()` 最开头立即调用 `_ensure_stdio_streams()` 挂载 `os.devnull` 文本流，防止 `argparse`、`logging` 或输出语句抛出异常。
+4. **UAC 提权工作目录锁定（`platform/uac.py`）**：冻结态调用 `ShellExecuteW("runas", ...)` 时显式传入 `<exe_dir>` 作为工作目录，避免从快捷方式或系统上下文提权后工作目录飘移至 `System32`。
+
+---
+
+## 8. 目录结构速览
 
 ```text
 arkcontroller/
 ├── configs/
 │   ├── default_bindings.json        # 手柄手感、防误触阈值、原生快捷键与按键映射预设
-│   ├── stronghold_layout_16_9.json  # 卫戍协议局内 16:9 归一化锚点、策略/确认窗与 4x7 透视棋盘
+│   ├── stronghold_layout_16_9.json  # 卫戍协议局内 16:9 归一化锚点、镜像棋盘/装备与多选一配置
 │   └── user_override.json           # (运行校准后自动生成) 用户个性化覆盖配置
-├── assets/templates/                # 用户采集的局部 ROI 场景识别模板 (.png + .json)
+├── assets/
+│   ├── arkcontroller.ico            # 多尺寸 (16..256) PRTS 纯白极简 + 源石琥珀应用图标
+│   └── templates/                   # 用户采集的局部 ROI 场景识别模板 (.png + .json)
+├── scripts/
+│   └── build_exe.py                 # PyInstaller 独立单文件 GUI 构建与图标生成脚本
 ├── src/arkcontroller/
-│   ├── config/                      # 强类型模型 (models.py) 与配置加载器 (loader.py)
+│   ├── config/                      # 强类型模型 (models.py) 与冻结兼容配置加载器 (loader.py)
 │   ├── platform/                    # UAC / DPI V2 (uac.py) 与窗口视口追踪 (window_tracker.py)
 │   ├── input/                       # XInput 驱动、手势引擎与 Win32 SendInput 合成器
 │   ├── vision/                      # 异步截屏、双层场景识别与模板校准器
 │   ├── control/                     # 透视网格映射、两段式部署状态机与调度中枢
-│   ├── overlay/                     # 纯白极简穿透 HUD (含通用手柄矢量图示)、方案B v2 桌面主控台、校准向导与托盘
-│   └── main.py                      # CLI 入口（含 --minimized）与多频事件循环装配
-├── tests/                           # 7 个核心模块单元测试套件（含离屏 UI 测试）
+│   ├── overlay/                     # 纯白极简穿透 HUD (S3 选框与矢量图示)、方案B v2 主控台、校准向导与托盘
+│   └── main.py                      # CLI/GUI 主入口（含冻结适配与 --minimized）及多频事件循环装配
+├── tests/                           # 8 个核心模块单元测试套件（含离屏 UI 与冻结打包测试）
 └── docs/                            # 架构设计与手柄操作手册
 ```
