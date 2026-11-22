@@ -2,6 +2,26 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-11-22
+
+### 新增与修复 (Added & Fixed)
+- **截屏 / 屏幕共享可见 HUD 热切换开关与开战充能环避让盟约栏 (`arkcontroller.config` & `arkcontroller.overlay` & `arkcontroller.main`)**：
+  - `configs/default_bindings.json` 与 `KeymapConfig` 新增 `hide_hud_from_capture: bool = True`（默认防自污染隐藏，兼容旧配置缺省回退）；
+  - `hud_window.py` 新增 `WDA_NONE = 0x00000000`、`apply_win32_display_affinity()` 与 `HUDWindow.set_hide_from_capture(enabled)`，支持运行中实时热切换 `WDA_EXCLUDEFROMCAPTURE` ↔ `WDA_NONE`（关闭后 OBS 录屏、截图与屏幕共享可直接捕获纯白极简 HUD），同时将长按开战充能环圆心下移至 `cy = max(142.0, h * 0.012 + 134.0)` 位于顶部盟约文字正下方，对顶部盟约栏零遮挡；
+  - `PRTSDashboardWindow` 总览页快捷开关双列网格补齐第 8 项空心框黄勾「截屏/共享时隐藏 HUD」，系统页「截屏隔离」文案随状态动态更新；`ControllerTray` 托盘右键菜单同步新增对应勾选项，并由 `ArkControllerApp` 统一热生效与持久化至 `configs/user_override.json`。
+- **三套卫戍协议主题 UI 全链路自适应识别 (`arkcontroller.vision.scene_detector`)**：
+  - 全面兼容**主题一（闭合紫粉电玩风）**、**主题二（乌萨斯复古辉光管风）**与**主题三（罗德岛战术青绿风）**，在严格保持局外 0 误判双锚点门禁的前提下：
+    - `_has_real_pc_prep_banner` 覆盖三主题准备按钮、顶中横幅与左右双放大镜共现（防止开启共享可见时 Toast 瞬态遮挡）；
+    - `_measure_shop_action_buttons` 扩展冻结青蓝（`H∈[78..125]`）与刷新黄掩码，商店展开态与动态槽位在三套主题下 100% 稳定识别；
+    - `_detect_shop_slot_count_heuristic` 升级为三主题商品卡底条并集（紫蓝 / 红棕 / 青绿）、亮态 + 暗屏绿黑 CRT / 灰 `LEVEL` 升级卡双分支与抗鼠标压边的深灰/暗蓝 `[ NO INFO ]` 空槽判定。
+- **顶部 `1~7` 多盟约间距精准校准与 `>7` 溢出态左右拖拽滑动 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 按实机像素校准 `SymmetricCovenantZone(v=0.1208, step_u=0.0625, overflow_start_u=0.2961)` 并扩展 `slot_center` / `slot_polygon(..., overflow=...)` 支持超过 7 枚盟约时的左对齐 7 槽排布；
+  - `SceneDetector` 新增脱离色相的 `HSV-V` 36 点圆环法向梯度（四象限门限排除矩形键帽）+ 多数鲁棒门限 + `covenant_overflow` 溢出检测，彻底解决乌萨斯银灰环 / 罗德岛青绿半环及单枚弱分回退 `n=1` 问题；
+  - `ControlDispatcher` 在 `FocusZone.TOP_INFO` 实时同步 `covenant_overflow`（溢出态显示 `羁绊 [k/7+]`），支持推右摇杆 **`RS`**（水平或垂直）及作战期 **`LB`/`RB`** 在顶部安全带 `u ∈ [0.38..0.62], v=0.1208` 执行平滑拖拽左右滑动盟约栏（远离两侧放大镜不误触）。
+- **彻底修复表情面板（`FocusZone.EMOTE_PANEL`）滑动翻页逃逸入棋盘 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - 升级 `_detect_emote_panel_open_heuristic` 为去色相结构化面板检测（暗底 + 上/右/下三边外框 + 泛亮前景与底部居中分页点对比），兼容非青绿及稀疏末页表情；
+  - `ControlDispatcher` 在进入 `EMOTE_PANEL` 及每次面板内导航/翻页/发送操作时自动续期 `1.8s` 保护锁、强制锁定吸附态（屏蔽 `L3` 误按与 `left_stick_mode="cursor"` 自由光标逃逸）、支持 `RS` 上下与左右推杆统一悬停面板中心滚轮翻页，并对视觉关闭检测增加连续 4 帧防抖，彻底根除翻页时选框逃逸进棋盘。
+
 ## [0.3.0] - 2026-11-22
 
 ### 新增与重绘 (Added & Redesigned)

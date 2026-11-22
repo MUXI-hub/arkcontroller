@@ -145,7 +145,7 @@ flowchart TD
 | **零内存/零注入** | 严禁调用 `OpenProcess` 读写内存、DLL 注入或 Hook 游戏进程；仅使用公开 Win32 输入与窗口查询 API |
 | **UIPI 权限合规** | 通过标准 UAC 提权与官方 PC 客户端（`Arknights.exe`）对齐完整性级别，避免任何绕过安全检查的行为 |
 | **64 位 SendInput 对齐** | `VirtualHID` 在 `ctypes.Union` 中完整定义 `MOUSEINPUT`、`KEYBDINPUT`、`HARDWAREINPUT`，确保 64 位 Windows 下 `ctypes.sizeof(INPUT) == 40`，并使用 `MapVirtualKeyW` 发送硬件扫描码（`KEYEVENTF_SCANCODE`） |
-| **HUD 绝对不抢焦点 & 防截屏污染** | `HUDWindow` 同时启用 Qt `WindowTransparentForInput` + `WA_ShowWithoutActivating`、Win32 `SetWindowLongW(GWL_EXSTYLE, WS_EX_LAYERED \| WS_EX_TRANSPARENT \| WS_EX_NOACTIVATE \| WS_EX_TOPMOST)` 以及 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`，确保所有点击 100% 穿透至游戏窗口，且后台 `mss` / DWM 截屏自动忽略透明 HUD 图层，杜绝青色选框干扰视觉识别 |
+| **HUD 绝对不抢焦点 & 截屏隔离可切换** | `HUDWindow` 同时启用 Qt `WindowTransparentForInput` + `WA_ShowWithoutActivating`、Win32 `SetWindowLongW(GWL_EXSTYLE, WS_EX_LAYERED \| WS_EX_TRANSPARENT \| WS_EX_NOACTIVATE \| WS_EX_TOPMOST)` 以及 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE / WDA_NONE)` 热切换（默认启用 `WDA_EXCLUDEFROMCAPTURE` 令 `mss`/DWM 忽略 HUD；关闭后切至 `WDA_NONE` 供录屏/共享可见，且纯白极简 HUD 经 20/20 压测对视觉识别零干扰） |
 | **失焦自动挂起** | `ControlDispatcher` 在每帧核对 `viewport is not None and viewport.is_foreground`，游戏切出前台或暂停时立刻隐藏 HUD 并停止所有键鼠模拟 |
 
 ---
@@ -169,8 +169,10 @@ Windows UAC 提权切回安全桌面瞬间可能导致后台线程首次初始�
    - **局外 100% 防误判双锚点门禁**：`BATTLE_PREP` / `BATTLE_COMBAT` 启发式分支强制校验 `_has_stronghold_in_game_chrome()`（左上深红退出门 + 顶部中央深黑状态栏双锚点同时命中），并将右上准备按钮色相收窄至真实粉红区间 `(H >= 158) | (H <= 4)`，同时要求所有弹窗分支满足 `modal_chrome`（顶部青色标题带或右侧方形收起按钮），确保主界面、活动横幅、战前编队、干员列表与基建画面 100% 保持在 `UNKNOWN_FREE_CURSOR`；
    - **回合结束 & `ESC` 退出确认弹窗（`MODAL_CONFIRM`）**：优先于右上角准备按钮检测，采用黑底分位数约束（`dark_ratio >= 0.82 & p80 < 30`）、左下纯灰取消带与避开右下机械剪影的暗红确认带联合判定，并通过中央上方亮像素占比输出 `confirm_has_dont_ask` 自动区分三项回合确认窗与双项 `ESC` 暂时离开窗；
    - **自适应决策弹窗（`MODAL_CHOICE`：`1x2` / `1x3` / `2x3`）**：基于 Sobel 垂直卡片边框梯度与白色「确认选择」底条检测，按 `6 选一（支持官方 PC 16:9 与旧宽屏双布局，单槽兼容未选暗卡与 1~5 张已被队友选走的均匀浅灰卡） -> 3 选一 -> 2 选一` 顺序零模板区分并实时追踪 `selected_choice_index`；二选一两翼外围检测采用按列垂直均值再取列峰（`mean(axis=0).max()`）免疫压暗雪山纹理背景；
-   - **休整运营、0 资金商店与左下 `2x3` 表情面板（`BATTLE_PREP`）**：支持右上角粉红准备按钮或联机 `LOADING...` 顶部「休息一下」紫框 + 放大镜双路径判定；商店展开与槽数检测彻底脱离 `refresh_yellow` 资金颜色依赖，升级为 `(freeze_blue >= 0.45) or (refresh_yellow >= 0.25 and freeze_blue >= 0.25)`，在 0 资金刷新变灰后仍稳判 `shop_open=True` 与 `4/5/6` 槽；`±12px` 峰值搜索兼容紫红 `[G]` 升级卡与已售空 `NO INFO` 空槽；非商店/非详情态下同步检测左下 `2x3` 表情面板（`emote_panel_open`）、顶部居中对称羁绊数量（`0~9`）及多人左侧队友头像。
-3. **连续帧防抖与不打断保护**：连续 `debounce_frames = 2` 帧一致后切换稳定场景；干员/装备/策略抓取与定朝向期间不强行切层。即便用户通过 `Back` 键处于**手动锁层**，只要同为 `BATTLE_PREP`、`MODAL_CHOICE` 或 `MODAL_CONFIRM`，`ControlDispatcher` 依然实时同步 `shop_open`、`shop_slot_count`、`unit_selected`、`emote_panel_open`、`covenant_count`、`has_teammates`、`choice_count`、`selected_choice_index` 与 `confirm_has_dont_ask`；当商店收起时自动将空闲 `FocusZone.SHOP` 退回 `FocusZone.BENCH` 防止残留选框。
+   - **三套卫戍协议主题全适配（`BATTLE_PREP` / `BATTLE_COMBAT`）**：在 `_has_stronghold_in_game_chrome()` 双锚点门禁下，`_has_real_pc_prep_banner` 同时支持主题一（紫粉准备 / 顶紫框 + 放大镜 / 左右双放大镜共现防 Toast 瞬态遮挡）、主题二（乌萨斯浅灰绿椭圆 + 上暗边 + 右金黄放大镜）与主题三（罗德岛青绿准备按钮 / 顶青绿八角框）；商店动作按钮覆盖冻结青蓝（`H∈[78..125]`）与刷新黄，脱离 `refresh_yellow` 强依赖兼容 0 资金灰刷新；动态 4/5/6 槽识别采用三主题商品卡底条并集（紫蓝 / 红棕 / 青绿）、亮态 + 绿黑 CRT / 灰 `LEVEL` 升级卡双分支及抗鼠标压边的深灰/暗蓝 `[ NO INFO ]` 空槽判定；
+   - **脱离色相 `HSV-V` 多盟约（`0~7`）与 `>7` 溢出检测**：采用 `V` 通道 `r=22.5px` 36 点圆环法向梯度（四象限门限排除矩形键帽）+ 环内外亮度差 + 正下方文字高对比带，以实测步距 `step_u=0.0625`（`80px`）优先检测 `>7` 左对齐溢出态（`overflow_start_u=0.2961` + 右/左半露徽章 -> `covenant_count=7, covenant_overflow=True`），否则降序 `7..1` 采用两端必达 + 鲁棒多数门限，彻底兼容三套主题银灰/青绿/紫蓝盟约；
+   - **去色相结构化表情面板检测与防逃逸锁焦**：`_detect_emote_panel_open_heuristic` 联合判定暗底 + 上/右/下三边外框 + 泛亮前景与底部居中分页点对比，兼容任意色相及稀疏末页表情；`ControlDispatcher` 配合入口/全交互 `1.8s` 续期保护锁与视觉关闭 4 帧连续防抖、屏蔽 `L3` 误按及 `cursor` 模式逃逸，确保表情翻页全程稳锁在 `FocusZone.EMOTE_PANEL`。
+3. **连续帧防抖与不打断保护**：连续 `debounce_frames = 2` 帧一致后切换稳定场景；干员/装备/策略抓取与定朝向期间不强行切层。即便用户通过 `Back` 键处于**手动锁层**，只要同为 `BATTLE_PREP`、`MODAL_CHOICE` 或 `MODAL_CONFIRM`，`ControlDispatcher` 依然实时同步 `shop_open`、`shop_slot_count`、`unit_selected`、`emote_panel_open`、`covenant_count`、`covenant_overflow`、`has_teammates`、`choice_count`、`selected_choice_index` 与 `confirm_has_dont_ask`；当商店收起时自动将空闲 `FocusZone.SHOP` 退回 `FocusZone.BENCH` 防止残留选框。
 
 ---
 
