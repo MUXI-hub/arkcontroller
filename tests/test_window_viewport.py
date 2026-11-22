@@ -381,6 +381,8 @@ class TestConfigSystem:
             "pause_menu": "esc",
         }
         assert "menu" not in keymap.bindings
+        assert "gift_teammate" not in keymap.bindings["holding"]
+        assert keymap.bindings["lt_chords"]["use_strategy"] == "LT+RT"
         assert keymap.bindings["modal_confirm"] == {
             "confirm": "A",
             "cancel": "B",
@@ -412,9 +414,15 @@ class TestConfigSystem:
             assert not hasattr(layout, removed_attr)
             assert removed_attr not in layout.to_dict()
 
-        # 验证新增策略头像、交流面板与回合确认弹窗实测按钮锚点
+        # 验证新增策略头像（休整/作战双态）、交流面板与回合确认弹窗实测按钮锚点
         assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
         assert layout.buttons["strategy_inspect"] == NormalizedPoint(0.9047, 0.3236, "right_edge")
+        assert layout.buttons["strategy_avatar_combat"] == NormalizedPoint(
+            0.9602, 0.7486, "right_edge"
+        )
+        assert layout.buttons["strategy_inspect_combat"] == NormalizedPoint(
+            0.9051, 0.7493, "right_edge"
+        )
         assert layout.buttons["confirm_no"] == NormalizedPoint(0.2496, 0.6729, "center_16_9")
         assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
         assert layout.buttons["confirm_dont_ask"] == NormalizedPoint(0.4992, 0.5597, "center_16_9")
@@ -425,9 +433,8 @@ class TestConfigSystem:
         assert "shop_toggle" in layout.buttons
         assert "safe_blank" in layout.buttons
         assert "choice_toggle_eye_6" in layout.buttons
-        # 验证安全空白区已移至右侧策略头像正下方安全带，绝不落入底部商店卡牌区
-        assert layout.buttons["safe_blank"].u >= 0.90
-        assert 0.39 <= layout.buttons["safe_blank"].v <= 0.50
+        # 验证安全空白区已迁至左上退出按钮右侧延迟区，绝不误触右侧队友策略或底部商店
+        assert layout.buttons["safe_blank"] == NormalizedPoint(0.1172, 0.0903, "left_edge")
         # 验证二选一、三选一与多人六选一卡片及底部白色确认条几何关系
         assert layout.choice_2_zone.count == 2
         assert "choice_2_zone" in layout.to_dict()
@@ -571,8 +578,11 @@ class TestConfigSystem:
         raw_layout.pop("emote_top_zone", None)
         raw_layout.pop("emote_bottom_zone", None)
         for new_key in (
+            "safe_blank",
             "strategy_avatar",
             "strategy_inspect",
+            "strategy_avatar_combat",
+            "strategy_inspect_combat",
             "confirm_no",
             "confirm_yes",
             "confirm_dont_ask",
@@ -587,8 +597,15 @@ class TestConfigSystem:
         assert layout.resolve_choice_card_center(1, 2) == pytest.approx((0.6477, 0.5000))
         assert layout.resolve_emote_slot_center(0) == pytest.approx((0.0582, 0.6771))
         assert layout.resolve_emote_slot_center(5) == pytest.approx((0.1996, 0.8016))
+        assert layout.buttons["safe_blank"] == NormalizedPoint(0.1172, 0.0903, "left_edge")
         assert layout.buttons["emote_panel_center"] == NormalizedPoint(0.1290, 0.7400, "left_edge")
         assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
+        assert layout.buttons["strategy_avatar_combat"] == NormalizedPoint(
+            0.9602, 0.7486, "right_edge"
+        )
+        assert layout.buttons["strategy_inspect_combat"] == NormalizedPoint(
+            0.9051, 0.7493, "right_edge"
+        )
         assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
 
         # 模拟旧 user_override.json 残留局外节点键时 ConfigLoader 正常加载不报错

@@ -55,7 +55,6 @@
       "place_or_confirm": "A",
       "cancel": "B",
       "quick_sell": "X",
-      "gift_teammate": "Y",
       "toggle_bench_board": "LB/RB"
     },
     "modal_choice": {
@@ -76,6 +75,7 @@
       "cycle_teammate": "LT+DPAD_RIGHT",
       "toggle_shop": "LT+LB",
       "retreat_unit": "LT+RB",
+      "use_strategy": "LT+RT",
       "pause_menu": "LT+START"
     }
   }

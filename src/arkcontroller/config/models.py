@@ -109,7 +109,6 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "place_or_confirm": "A",
             "cancel": "B",
             "quick_sell": "X",
-            "gift_teammate": "Y",
             "toggle_bench_board": "LB/RB",
         },
         "modal_choice": {
@@ -130,6 +129,7 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "cycle_teammate": "LT+DPAD_RIGHT",
             "toggle_shop": "LT+LB",
             "retreat_unit": "LT+RB",
+            "use_strategy": "LT+RT",
             "pause_menu": "LT+START",
         },
     }
@@ -553,10 +553,13 @@ def _default_emote_bottom_zone() -> LinearZone:
 
 
 def _default_fallback_buttons() -> dict[str, NormalizedPoint]:
-    """返回回合确认弹窗、策略头像与交流面板的默认实测按钮锚点（兼容精简配置字典）。"""
+    """返回回合确认弹窗、安全空白区、策略头像与交流面板的默认实测按钮锚点（兼容精简配置字典）。"""
     return {
+        "safe_blank": NormalizedPoint(u=0.1172, v=0.0903, anchor="left_edge"),
         "strategy_avatar": NormalizedPoint(u=0.9605, v=0.3243, anchor="right_edge"),
         "strategy_inspect": NormalizedPoint(u=0.9047, v=0.3236, anchor="right_edge"),
+        "strategy_avatar_combat": NormalizedPoint(u=0.9602, v=0.7486, anchor="right_edge"),
+        "strategy_inspect_combat": NormalizedPoint(u=0.9051, v=0.7493, anchor="right_edge"),
         "confirm_no": NormalizedPoint(u=0.2496, v=0.6729, anchor="center_16_9"),
         "confirm_yes": NormalizedPoint(u=0.7496, v=0.6729, anchor="center_16_9"),
         "confirm_dont_ask": NormalizedPoint(u=0.4992, v=0.5597, anchor="center_16_9"),
