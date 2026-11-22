@@ -751,3 +751,132 @@ def test_main_app_hide_capture_persist_and_hot_apply(qapp, tmp_configs) -> None:
     finally:
         app.shutdown()
         _dispose(qapp, app.dashboard, app.hud)
+
+
+# ----------------------------------------------------------------------
+# v0.3.4：S3 加粗取景折角选择框与棋盘紧凑短折角
+# ----------------------------------------------------------------------
+def _count_pixels(img: QImage, x0: int, y0: int, x1: int, y1: int, pred) -> int:
+    total = 0
+    for y in range(max(0, y0), min(img.height(), y1)):
+        for x in range(max(0, x0), min(img.width(), x1)):
+            if pred(img.pixelColor(x, y)):
+                total += 1
+    return total
+
+
+def test_hud_s3_focus_box_normal_vs_pending_colors(qapp) -> None:
+    hud = HUDWindow()
+    # 模拟 1280x720 下外扩 11px 的多选一大框（308x263px）
+    poly_norm = [
+        (300 / 1280, 220 / 720),
+        (608 / 1280, 220 / 720),
+        (608 / 1280, 483 / 720),
+        (300 / 1280, 483 / 720),
+    ]
+    is_white = lambda c: c.alpha() > 210 and c.red() > 235 and c.green() > 235 and c.blue() > 235
+    is_amber = lambda c: c.alpha() > 200 and c.red() > 205 and 120 < c.green() < 190 and c.blue() < 60
+    is_visible_side = lambda c: c.alpha() > 90 and c.red() > 140
+
+    # 1. 常规态：纯白粗折角 + 半透白细连线 + 外角琥珀微刻线
+    img_norm = _render(
+        hud,
+        _snapshot(
+            scene=GameScene.MODAL_CHOICE,
+            focus_zone=FocusZone.CHOICE_CARDS,
+            focus_label="六选一 [1/6]",
+            focus_polygon_norm=poly_norm,
+            prompts=[],
+        ),
+    )
+    assert _count_pixels(img_norm, 298, 217, 332, 224, is_white) > 40
+    assert _count_pixels(img_norm, 430, 218, 480, 223, is_visible_side) > 20
+    assert _count_pixels(img_norm, 289, 209, 299, 219, is_amber) >= 3
+
+    # 2. 待确认态：琥珀粗折角 + 外角纯白微刻线
+    img_pend = _render(
+        hud,
+        _snapshot(
+            scene=GameScene.MODAL_CHOICE,
+            focus_zone=FocusZone.CHOICE_CARDS,
+            focus_label="六选一 [2/6] · 待确认",
+            focus_polygon_norm=poly_norm,
+            prompts=[],
+        ),
+    )
+    assert _count_pixels(img_pend, 298, 217, 332, 224, is_amber) > 40
+    assert _count_pixels(img_pend, 289, 209, 299, 219, is_white) >= 3
+
+
+def test_hud_s3_board_compact_corners_shorter_than_choice_box(qapp) -> None:
+    from PySide6.QtCore import QPointF
+
+    hud = HUDWindow()
+
+    def _rect(x0: float, y0: float, w: float, h: float) -> list[QPointF]:
+        return [QPointF(x0, y0), QPointF(x0 + w, y0), QPointF(x0 + w, y0 + h), QPointF(x0, y0 + h)]
+
+    # 1. 指标参数校验：棋盘紧凑短折角 vs 多选一大框长折角 + 1080p 缩放
+    _, arm_shop_board, ratio_b, halo_b, cw_b, ts_b, te_b, tw_b = HUDWindow._focus_box_metrics(
+        1280.0, 720.0, _rect(400, 260, 66, 54), compact=True
+    )
+    assert 10.0 <= arm_shop_board <= 12.5
+    assert ratio_b == pytest.approx(0.21)
+    assert (halo_b, cw_b, ts_b, te_b, tw_b) == pytest.approx((5.8, 3.0, 3.5, 7.8, 1.2))
+
+    _, arm_norm_board, *_ = HUDWindow._focus_box_metrics(
+        1280.0, 720.0, _rect(400, 260, 110, 90), compact=True
+    )
+    assert arm_norm_board == pytest.approx(12.5)
+
+    # 非棋盘紧凑小槽位（min_dim < 78）自动启用短折角
+    _, arm_small_slot, ratio_s, *_ = HUDWindow._focus_box_metrics(
+        1280.0, 720.0, _rect(100, 500, 60, 60), compact=False
+    )
+    assert arm_small_slot <= 12.5 and ratio_s == pytest.approx(0.21)
+
+    # 多选一大框保持 S3 长折角参数
+    _, arm_choice, ratio_c, halo_c, cw_c, ts_c, te_c, tw_c = HUDWindow._focus_box_metrics(
+        1280.0, 720.0, _rect(300, 220, 308, 263), compact=False
+    )
+    assert arm_choice == pytest.approx(30.0)
+    assert ratio_c == pytest.approx(0.34)
+    assert (halo_c, cw_c, ts_c, te_c, tw_c) == pytest.approx((6.6, 3.4, 4.5, 10.5, 1.3))
+
+    # 1920x1080 (scale=1.5) 等比放大
+    scale_1080, arm_choice_1080, *_ = HUDWindow._focus_box_metrics(
+        1920.0, 1080.0, _rect(450, 330, 462, 394.5), compact=False
+    )
+    assert scale_1080 == pytest.approx(1.5)
+    assert arm_choice_1080 == pytest.approx(45.0)
+
+    # 2. 像素级对比：同等 110x90px 框在 BOARD 下折角短于 SHOP/大框
+    same_poly = [
+        (400 / 1280, 260 / 720),
+        (510 / 1280, 260 / 720),
+        (510 / 1280, 350 / 720),
+        (400 / 1280, 350 / 720),
+    ]
+    img_board = _render(
+        hud,
+        _snapshot(focus_zone=FocusZone.BOARD, focus_polygon_norm=same_poly, prompts=[]),
+    )
+    img_shop = _render(
+        hud,
+        _snapshot(focus_zone=FocusZone.SHOP, focus_polygon_norm=same_poly, prompts=[]),
+    )
+    is_thick_white = lambda c: c.alpha() > 215 and c.red() > 235 and c.green() > 235 and c.blue() > 235
+    # 距左上角 15~21px 区间：棋盘短折角(12.5px)已结束仅剩半透细线，大框折角(20px)仍为高不透明粗白线
+    board_far = _count_pixels(img_board, 415, 258, 421, 263, is_thick_white)
+    shop_far = _count_pixels(img_shop, 415, 258, 421, 263, is_thick_white)
+    assert shop_far > board_far + 8
+
+    # 3. 向后兼容：直接调用 _draw_focus_polygon 不传 compact 关键字参数
+    compat_img = QImage(1280, 720, QImage.Format.Format_ARGB32)
+    compat_img.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(compat_img)
+    try:
+        hud._draw_focus_polygon(painter, 1280.0, 720.0, same_poly, hud_window.COLOR_WHITE, pending=False)
+    finally:
+        painter.end()
+    assert _non_transparent_pixels(compat_img, step=2) > 200

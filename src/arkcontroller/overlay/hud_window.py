@@ -33,7 +33,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from arkcontroller.control.deploy_fsm import DeployState
-from arkcontroller.control.dispatcher import HUDStateSnapshot, PromptItem
+from arkcontroller.control.dispatcher import FocusZone, HUDStateSnapshot, PromptItem
 from arkcontroller.platform.window_tracker import ViewportRect
 from arkcontroller.vision.scene_detector import GameScene
 
@@ -760,7 +760,7 @@ class HUDWindow(QWidget):
         if snapshot.holding_source_norm is not None:
             self._draw_holding_source_and_trajectory(painter, w, h, snapshot)
 
-        # 2. 四角细折标选择框（支持标准矩形与 3D 透视棋盘梯形格）
+        # 2. S3 加粗取景折角选择框（支持标准矩形与 3D 透视棋盘梯形格，棋盘自动启用紧凑短折角）
         if (
             snapshot.focus_polygon_norm
             and len(snapshot.focus_polygon_norm) >= 3
@@ -768,8 +768,13 @@ class HUDWindow(QWidget):
         ):
             pending = self._is_pending(snapshot)
             self._draw_focus_polygon(
-                painter, w, h, snapshot.focus_polygon_norm,
-                COLOR_AMBER if pending else COLOR_WHITE, pending=pending,
+                painter,
+                w,
+                h,
+                snapshot.focus_polygon_norm,
+                COLOR_AMBER if pending else COLOR_WHITE,
+                pending=pending,
+                compact=(snapshot.focus_zone == FocusZone.BOARD),
             )
 
         # 3. 自由光标细线准星
@@ -803,6 +808,29 @@ class HUDWindow(QWidget):
     # ------------------------------------------------------------------
     # 选择框
     # ------------------------------------------------------------------
+    @staticmethod
+    def _focus_box_metrics(
+        w: float,
+        h: float,
+        pts: Sequence[QPointF],
+        *,
+        compact: bool = False,
+    ) -> tuple[float, float, float, float, float, float, float, float]:
+        """计算 S3 选取框在当前分辨率与尺寸档位下的自适应几何参数。
+
+        返回 ``(scale, arm, ratio, halo_w, corner_w, tick_start, tick_end, tick_w)``。
+        """
+        scale = max(0.75, min(w / 1280.0, h / 720.0))
+        xs = [p.x() for p in pts]
+        ys = [p.y() for p in pts]
+        min_dim = min(max(xs) - min(xs), max(ys) - min(ys))
+        use_compact = compact or (min_dim < 78.0 * scale)
+        if use_compact:
+            arm = max(10.0 * scale, min(12.5 * scale, min_dim * 0.19))
+            return (scale, arm, 0.21, 5.8 * scale, 3.0 * scale, 3.5 * scale, 7.8 * scale, 1.2 * scale)
+        arm = max(20.0 * scale, min(30.0 * scale, min_dim * 0.12))
+        return (scale, arm, 0.34, 6.6 * scale, 3.4 * scale, 4.5 * scale, 10.5 * scale, 1.3 * scale)
+
     def _draw_focus_polygon(
         self,
         painter: QPainter,
@@ -812,27 +840,57 @@ class HUDWindow(QWidget):
         color: QColor,
         *,
         pending: bool = False,
+        compact: bool = False,
     ) -> None:
-        """H1：四角 10px 纯白 2px 细折标（外衬暗描边，内部全留空）；待确认态在四角内侧点琥珀微点。"""
+        """S3：加粗取景折角 + 四边半透细连线 + 外角微刻线；棋盘与紧凑槽位自动切换短折角。"""
         del color
         pts = [QPointF(u * w, v * h) for u, v in polygon_norm]
-        segs = _corner_segments(pts, 10.0, 0.3)
+        if len(pts) < 3:
+            return
+
+        scale, arm, ratio, halo_w, corner_w, tick_start, tick_end, tick_w = self._focus_box_metrics(
+            w, h, pts, compact=compact
+        )
+        col = COLOR_AMBER if pending else COLOR_WHITE
+        tick_col = COLOR_WHITE if pending else COLOR_AMBER
+
+        # 1. 四边半透细连线（暗底衬边 + 主色半透细框）
+        poly = QPolygonF(pts)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        for pn in (_pen(COLOR_HALO, 3.6), _pen(COLOR_WHITE, 2.0)):
+        painter.setPen(_pen(QColor(0, 0, 0, 90), 2.6 * scale))
+        painter.drawPolygon(poly)
+        painter.setPen(_pen(_alpha(col, 150), 1.1 * scale))
+        painter.drawPolygon(poly)
+
+        # 2. 加粗取景折角（深炭黑衬边 + 主色粗折角）
+        segs = _corner_segments(pts, arm, ratio)
+        corner_paths: list[QPainterPath] = []
+        for a, c, b in segs:
+            path = QPainterPath(a)
+            path.lineTo(c)
+            path.lineTo(b)
+            corner_paths.append(path)
+
+        for pn in (_pen(QColor(12, 12, 12, 185), halo_w), _pen(col, corner_w)):
             painter.setPen(pn)
-            for a, c, b in segs:
-                path = QPainterPath(a)
-                path.lineTo(c)
-                path.lineTo(b)
+            for path in corner_paths:
                 painter.drawPath(path)
-        if pending:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(COLOR_AMBER))
-            for a, c, b in segs:
-                ix = a.x() + b.x() - c.x()
-                iy = a.y() + b.y() - c.y()
-                # 折标内侧（两臂合成方向的一半处）
-                painter.drawEllipse(QPointF((c.x() + ix) / 2.0, (c.y() + iy) / 2.0), 2.0, 2.0)
+
+        # 3. 外角微刻线（常规态琥珀 / 待确认态纯白，FlatCap）
+        n = len(pts)
+        cx = sum(p.x() for p in pts) / n
+        cy = sum(p.y() for p in pts) / n
+        painter.setPen(_pen(tick_col, tick_w, cap=Qt.PenCapStyle.FlatCap))
+        for p in pts:
+            ox, oy = p.x() - cx, p.y() - cy
+            ol = math.hypot(ox, oy)
+            if ol < 1e-3:
+                continue
+            ux, uy = ox / ol, oy / ol
+            painter.drawLine(
+                QPointF(p.x() + ux * tick_start, p.y() + uy * tick_start),
+                QPointF(p.x() + ux * tick_end, p.y() + uy * tick_end),
+            )
 
     # ------------------------------------------------------------------
     # 抓取源与连线
