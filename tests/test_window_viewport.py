@@ -14,12 +14,15 @@ from arkcontroller.config.models import (
     REQUIRED_BUTTON_KEYS,
     KeymapConfig,
     LayoutProfile,
+    LayoutViewState,
     LinearZone,
     NavNode,
     NormalizedPoint,
     NormalizedRect,
     PerspectiveQuad,
     SymmetricCovenantZone,
+    ViewLayoutOverride,
+    ViewportTransform,
 )
 from arkcontroller.platform import uac
 from arkcontroller.platform.window_tracker import ViewportRect, WindowTracker
@@ -577,6 +580,8 @@ class TestConfigSystem:
         raw_layout.pop("choice_2_zone", None)
         raw_layout.pop("emote_top_zone", None)
         raw_layout.pop("emote_bottom_zone", None)
+        raw_layout.pop("mirrored_board_quad", None)
+        raw_layout.pop("mirrored_equip_zone", None)
         for new_key in (
             "safe_blank",
             "strategy_avatar",
@@ -597,6 +602,11 @@ class TestConfigSystem:
         assert layout.resolve_choice_card_center(1, 2) == pytest.approx((0.6477, 0.5000))
         assert layout.resolve_emote_slot_center(0) == pytest.approx((0.0582, 0.6771))
         assert layout.resolve_emote_slot_center(5) == pytest.approx((0.1996, 0.8016))
+        assert layout.mirrored_board_quad.top_left == pytest.approx((0.17357, 0.28519))
+        assert layout.mirrored_board_quad.bottom_right == pytest.approx((0.61576, 0.66019))
+        assert layout.mirrored_equip_zone.name == "equip_mirrored"
+        assert layout.mirrored_equip_zone.start_u == pytest.approx(0.22475)
+        assert layout.mirrored_equip_zone.end_u == pytest.approx(0.50715)
         assert layout.buttons["safe_blank"] == NormalizedPoint(0.1172, 0.0903, "left_edge")
         assert layout.buttons["emote_panel_center"] == NormalizedPoint(0.1290, 0.7400, "left_edge")
         assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
@@ -633,6 +643,112 @@ class TestConfigSystem:
         assert loaded_layout.buttons["confirm_dont_ask"] == NormalizedPoint(
             0.4992, 0.5597, "center_16_9"
         )
+
+    def test_mirrored_board_and_equip_resolution_and_serialization(self) -> None:
+        """验证 Boss 战右侧镜像棋盘/装备台配置加载、序列化往返、1280x720 实测投影与防覆写回归。"""
+        loader = ConfigLoader(use_user_override=False)
+        _, layout = loader.load()
+
+        # 1. 默认 JSON 精确读取与逻辑左→右列序检查
+        m_quad = layout.mirrored_board_quad
+        m_equip = layout.mirrored_equip_zone
+        assert m_quad.rows == 4
+        assert m_quad.cols == 7
+        assert m_quad.top_left == pytest.approx((0.17357, 0.28519))
+        assert m_quad.top_right == pytest.approx((0.59649, 0.27870))
+        assert m_quad.bottom_right == pytest.approx((0.61576, 0.66019))
+        assert m_quad.bottom_left == pytest.approx((0.12774, 0.66759))
+        assert m_quad.top_left[0] < m_quad.top_right[0]
+        assert m_quad.bottom_left[0] < m_quad.bottom_right[0]
+
+        assert m_equip.name == "equip_mirrored"
+        assert m_equip.count == 5
+        assert m_equip.start_u == pytest.approx(0.22475)
+        assert m_equip.start_v == pytest.approx(0.71705)
+        assert m_equip.end_u == pytest.approx(0.50715)
+        assert m_equip.end_v == pytest.approx(0.71705)
+        assert m_equip.slot_w == pytest.approx(0.068)
+        assert m_equip.slot_h == pytest.approx(0.088)
+
+        # 2. 序列化往返保持完整一致
+        dumped = layout.to_dict()
+        assert "mirrored_board_quad" in dumped
+        assert "mirrored_equip_zone" in dumped
+        restored = LayoutProfile.from_dict(dumped)
+        assert restored.mirrored_board_quad == layout.mirrored_board_quad
+        assert restored.mirrored_equip_zone == layout.mirrored_equip_zone
+
+        # 3. 10 槽整备区不随 Boss 镜像发生翻转
+        assert layout.resolve_bench_zone(
+            LayoutViewState.NORMAL, mirrored=True
+        ) == layout.resolve_bench_zone(LayoutViewState.NORMAL, mirrored=False)
+        assert layout.resolve_bench_zone(
+            LayoutViewState.SHOP_OPEN, mirrored=True
+        ) == layout.resolve_bench_zone(LayoutViewState.SHOP_OPEN, mirrored=False)
+
+        # 4. NORMAL 态解析
+        assert layout.resolve_board_quad(LayoutViewState.NORMAL, mirrored=True) == m_quad
+        assert layout.resolve_equip_zone(LayoutViewState.NORMAL, mirrored=True) == m_equip
+        assert layout.resolve_board_quad(LayoutViewState.NORMAL, mirrored=False) == layout.board_quad
+        assert layout.resolve_equip_zone(LayoutViewState.NORMAL, mirrored=False) == layout.equip_zone
+
+        # 5. 1280x720 下 SHOP_OPEN 态镜像投影与实机测绘像素对齐（误差 < 1.5px）
+        w, h = 1280, 720
+        shop_m_quad = layout.resolve_board_quad(LayoutViewState.SHOP_OPEN, mirrored=True)
+        expected_corners_px = {
+            "top_left": (257.2, 166.1),
+            "top_right": (705.3, 162.4),
+            "bottom_right": (725.7, 379.6),
+            "bottom_left": (208.6, 383.8),
+        }
+        for attr, (exp_x, exp_y) in expected_corners_px.items():
+            u, v = getattr(shop_m_quad, attr)
+            assert u * w == pytest.approx(exp_x, abs=1.5)
+            assert v * h == pytest.approx(exp_y, abs=1.5)
+
+        shop_m_equip = layout.resolve_equip_zone(LayoutViewState.SHOP_OPEN, mirrored=True)
+        expected_equip_xs = [311.4, 386.2, 461.0, 535.8, 610.6]
+        for idx, exp_x in enumerate(expected_equip_xs):
+            u, v = shop_m_equip.slot_center(idx)
+            assert u * w == pytest.approx(exp_x, abs=1.5)
+            assert v * h == pytest.approx(412.0, abs=1.5)
+
+        # 6. 防回归：当 view_overrides 同时含静态非镜像覆写与 transform 时，
+        # mirrored=True 不得误用静态非镜像覆写，必须对镜像基准施加 transform
+        static_board = PerspectiveQuad(
+            top_left=(0.40, 0.30),
+            top_right=(0.80, 0.30),
+            bottom_right=(0.82, 0.60),
+            bottom_left=(0.38, 0.60),
+            rows=4,
+            cols=7,
+        )
+        static_equip = LinearZone("static_eq", 5, 0.45, 0.65, 0.75, 0.65, 0.06, 0.08)
+        tf = ViewportTransform(
+            scale_x=0.82772,
+            scale_y=0.79099,
+            offset_u=-0.02889,
+            offset_v=-0.09946,
+            pivot_u=0.5,
+            pivot_v=0.5,
+        )
+        layout_with_static = LayoutProfile.from_dict(dumped)
+        layout_with_static.view_overrides["shop_open"] = ViewLayoutOverride(
+            board_quad=static_board,
+            equip_zone=static_equip,
+            board_transform=tf,
+            equip_transform=tf,
+        )
+        # 非镜像仍遵循静态覆写
+        assert layout_with_static.resolve_board_quad("shop_open", mirrored=False) == static_board
+        assert layout_with_static.resolve_equip_zone("shop_open", mirrored=False) == static_equip
+        # 镜像跳过静态非镜像覆写，直接基于镜像基准应用 transform
+        resolved_m_board = layout_with_static.resolve_board_quad("shop_open", mirrored=True)
+        resolved_m_equip = layout_with_static.resolve_equip_zone("shop_open", mirrored=True)
+        assert resolved_m_board == tf.apply_quad(layout_with_static.mirrored_board_quad)
+        assert resolved_m_equip == tf.apply_zone(layout_with_static.mirrored_equip_zone)
+        assert resolved_m_board != static_board
+        assert resolved_m_equip != static_equip
 
     def test_save_user_override_merge_and_reload(self, tmp_path: Path) -> None:
         repo_configs = Path(__file__).resolve().parents[1] / "configs"

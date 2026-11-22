@@ -106,6 +106,24 @@
     "rows": 4,
     "cols": 7
   },
+  "mirrored_board_quad": {
+    "top_left": [0.17357, 0.28519],
+    "top_right": [0.59649, 0.27870],
+    "bottom_right": [0.61576, 0.66019],
+    "bottom_left": [0.12774, 0.66759],
+    "rows": 4,
+    "cols": 7
+  },
+  "mirrored_equip_zone": {
+    "name": "equip_mirrored",
+    "count": 5,
+    "start_u": 0.22475,
+    "start_v": 0.71705,
+    "end_u": 0.50715,
+    "end_v": 0.71705,
+    "slot_w": 0.068,
+    "slot_h": 0.088
+  },
   "buttons": {
     "back": { "u": 0.046, "v": 0.062, "anchor": "left_edge" },
     "shop_toggle": { "u": 0.930, "v": 0.935, "anchor": "right_edge" },

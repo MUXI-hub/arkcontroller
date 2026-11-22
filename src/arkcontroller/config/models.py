@@ -552,6 +552,32 @@ def _default_emote_bottom_zone() -> LinearZone:
     )
 
 
+def _default_mirrored_board_quad() -> PerspectiveQuad:
+    """返回 Boss 战右侧分配时水平镜像的 4x7 棋盘透视四角（保持逻辑左→右列序）。"""
+    return PerspectiveQuad(
+        top_left=(0.17357, 0.28519),
+        top_right=(0.59649, 0.27870),
+        bottom_right=(0.61576, 0.66019),
+        bottom_left=(0.12774, 0.66759),
+        rows=4,
+        cols=7,
+    )
+
+
+def _default_mirrored_equip_zone() -> LinearZone:
+    """返回 Boss 战右侧分配时水平镜像的 5 槽装备台线性区域。"""
+    return LinearZone(
+        name="equip_mirrored",
+        count=5,
+        start_u=0.22475,
+        start_v=0.71705,
+        end_u=0.50715,
+        end_v=0.71705,
+        slot_w=0.068,
+        slot_h=0.088,
+    )
+
+
 def _default_fallback_buttons() -> dict[str, NormalizedPoint]:
     """返回回合确认弹窗、安全空白区、策略头像与交流面板的默认实测按钮锚点（兼容精简配置字典）。"""
     return {
@@ -747,6 +773,8 @@ class LayoutProfile:
     emote_top_zone: LinearZone = field(default_factory=_default_emote_top_zone)
     emote_bottom_zone: LinearZone = field(default_factory=_default_emote_bottom_zone)
     covenant_zone: SymmetricCovenantZone = field(default_factory=SymmetricCovenantZone)
+    mirrored_board_quad: PerspectiveQuad = field(default_factory=_default_mirrored_board_quad)
+    mirrored_equip_zone: LinearZone = field(default_factory=_default_mirrored_equip_zone)
 
     def __post_init__(self) -> None:
         missing = [key for key in REQUIRED_BUTTON_KEYS if key not in self.buttons]
@@ -762,22 +790,39 @@ class LayoutProfile:
         return self.view_overrides.get(key)
 
     def resolve_board_quad(
-        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+        self,
+        view_state: LayoutViewState | str = LayoutViewState.NORMAL,
+        *,
+        mirrored: bool = False,
     ) -> PerspectiveQuad:
-        """按当前镜头缩放态解析生效的棋盘透视四角。"""
+        """按当前镜头缩放态与 Boss 战镜像标志解析生效的棋盘透视四角。
+
+        当 ``mirrored=True``（如 Boss 战被分配至右侧）时，始终以
+        ``self.mirrored_board_quad`` 为基准，跳过仅针对非镜像布局的静态
+        ``override.board_quad`` 覆盖，直接套用 ``override.board_transform``。
+        """
+        base_quad = self.mirrored_board_quad if mirrored else self.board_quad
         override = self._get_view_override(view_state)
         if override is None:
-            return self.board_quad
-        if override.board_quad is not None:
+            return base_quad
+        if not mirrored and override.board_quad is not None:
             return override.board_quad
         if override.board_transform is not None:
-            return override.board_transform.apply_quad(self.board_quad)
-        return self.board_quad
+            return override.board_transform.apply_quad(base_quad)
+        return base_quad
 
     def resolve_bench_zone(
-        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+        self,
+        view_state: LayoutViewState | str = LayoutViewState.NORMAL,
+        *,
+        mirrored: bool = False,
     ) -> LinearZone:
-        """按当前镜头缩放态解析生效的整备区线性槽位。"""
+        """按当前镜头缩放态解析生效的整备区线性槽位。
+
+        实机测绘确认 Boss 战左右切换时 10 槽整备区与 2D UI 均不镜像，
+        保留 ``mirrored`` 关键字参数以保持调用方接口一致。
+        """
+        _ = mirrored
         override = self._get_view_override(view_state)
         if override is None:
             return self.bench_zone
@@ -788,17 +833,26 @@ class LayoutProfile:
         return self.bench_zone
 
     def resolve_equip_zone(
-        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+        self,
+        view_state: LayoutViewState | str = LayoutViewState.NORMAL,
+        *,
+        mirrored: bool = False,
     ) -> LinearZone:
-        """按当前镜头缩放态解析生效的装备栏线性槽位。"""
+        """按当前镜头缩放态与 Boss 战镜像标志解析生效的装备栏线性槽位。
+
+        当 ``mirrored=True`` 时以 ``self.mirrored_equip_zone`` 为基准，
+        忽略仅针对非镜像布局的静态 ``override.equip_zone``，直接套用
+        ``override.equip_transform``。
+        """
+        base_zone = self.mirrored_equip_zone if mirrored else self.equip_zone
         override = self._get_view_override(view_state)
         if override is None:
-            return self.equip_zone
-        if override.equip_zone is not None:
+            return base_zone
+        if not mirrored and override.equip_zone is not None:
             return override.equip_zone
         if override.equip_transform is not None:
-            return override.equip_transform.apply_zone(self.equip_zone)
-        return self.equip_zone
+            return override.equip_transform.apply_zone(base_zone)
+        return base_zone
 
     def resolve_shop_zone(
         self,
@@ -1004,6 +1058,8 @@ class LayoutProfile:
             "emote_bottom_zone": self.emote_bottom_zone.to_dict(),
             "covenant_zone": self.covenant_zone.to_dict(),
             "board_quad": self.board_quad.to_dict(),
+            "mirrored_board_quad": self.mirrored_board_quad.to_dict(),
+            "mirrored_equip_zone": self.mirrored_equip_zone.to_dict(),
             "buttons": {k: v.to_dict() for k, v in self.buttons.items()},
         }
         if self.view_overrides:
@@ -1014,7 +1070,7 @@ class LayoutProfile:
     def from_dict(cls, data: Mapping[str, Any]) -> LayoutProfile:
         """从合并后的字典反序列化 LayoutProfile 并校验完整性。
 
-        自动静默忽略旧版残留的局外节点字段，并为新增的策略头像与回合确认按钮提供默认坐标兜底。
+        自动静默忽略旧版残留的局外节点字段，并为新增的策略头像、镜像棋盘/装备区与回合确认按钮提供默认坐标兜底。
         """
         buttons_raw = data.get("buttons", {})
         buttons: dict[str, NormalizedPoint] = {
@@ -1029,6 +1085,8 @@ class LayoutProfile:
         raw_em_top = data.get("emote_top_zone")
         raw_em_bot = data.get("emote_bottom_zone")
         raw_cov = data.get("covenant_zone")
+        raw_m_board = data.get("mirrored_board_quad")
+        raw_m_equip = data.get("mirrored_equip_zone")
         return cls(
             shop_zone=(
                 data["shop_zone"]
@@ -1109,6 +1167,24 @@ class LayoutProfile:
                     SymmetricCovenantZone.from_dict(raw_cov)
                     if isinstance(raw_cov, Mapping)
                     else SymmetricCovenantZone()
+                )
+            ),
+            mirrored_board_quad=(
+                raw_m_board
+                if isinstance(raw_m_board, PerspectiveQuad)
+                else (
+                    PerspectiveQuad.from_dict(raw_m_board)
+                    if isinstance(raw_m_board, Mapping)
+                    else _default_mirrored_board_quad()
+                )
+            ),
+            mirrored_equip_zone=(
+                raw_m_equip
+                if isinstance(raw_m_equip, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_m_equip)
+                    if isinstance(raw_m_equip, Mapping)
+                    else _default_mirrored_equip_zone()
                 )
             ),
         )
