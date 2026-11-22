@@ -2,6 +2,22 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [0.3.4] - 2026-11-22
+
+### 新增与优化 (Added & Changed)
+- **HUD 选取框升级为 S3 加粗取景折角方案 + 棋盘紧凑短折角自适应 (`arkcontroller.overlay.hud_window`)**：
+  - `HUDWindow._draw_focus_polygon` 全面升级为 **S3 取景折角风格**：四边绘制暗底衬边（`2.6*scale`）与半透细连线（`1.1*scale`），四角采用高反差深炭黑衬边 + 加粗纯白折角（常规态配琥珀 `#F59E0B` 外角微刻线；待确认/抓取目标态切换为琥珀折角配纯白外角微刻线），并随视口分辨率基于 `1280×720` 等比缩放；
+  - 新增静态几何计算 `HUDWindow._focus_box_metrics` 并由 `render_snapshot` 透传 `compact=(snapshot.focus_zone == FocusZone.BOARD)`：
+    - **棋盘格与紧凑小槽位**（`compact=True` 或短边 `< 78*scale`）：折角自动缩短至 `10.0~12.5*scale`（线宽 `3.0*scale`，外角刻线 `3.5->7.8*scale`），在 4×7 密集透视棋盘上清爽利落不拥挤；
+    - **商店卡槽、整备区、多选一决策卡与确认弹窗**：保持醒目长折角 `20.0~30.0*scale`（线宽 `3.4*scale`，外角刻线 `4.5->10.5*scale`），跨场景辨识度显著提升。
+- **多选一官方 PC 16:9 卡片微校准 + `+11px` 外扩错开白边 + 待确认整卡包裹框 (`arkcontroller.config`)**：
+  - 按官方 PC 16:9 实机截图（二选一 / 三选一 / 六选一）微校准 `choice_zone`、`choice_2_zone`、`choice_6_top_zone`、`choice_6_bottom_zone` 卡片本体白边尺寸（`0.22344 × 0.33403~0.33472`）与中心步距，并同步更新 `models.py` 默认工厂；
+  - `resolve_choice_card_polygon` 四边向卡片白边外侧统一扩大 **`11px`**（`pad_u=11/1280, pad_v=11/720`，安全夹紧至 `[0.004, 0.996]`），彻底错开卡片自带亮白边框落入深暗背景遮罩区（`1280×720` 下横向邻列与 `2×3` 上下排均保留 `34px` 净空绝不重叠）；
+  - `resolve_choice_confirm_polygon` 升级为包裹点中放大后整张卡片与底部「确认选择」白条再外扩 `11px` 的琥珀选框（`2×3` 上下排点中态均与对排卡片保持 `>= 15.5px` 净空），同时将 `resolve_choice_confirm_point` 微调至 `cv + sh * 0.513` 零误差命中底部「☑ 确认选择」白条正中；
+  - 经 `WDA_NONE`（截屏可见 HUD）26/26 端到端压测验证，加粗 S3 底边对 `SceneDetector`（含 `selected_choice_index` 白条判定与 `shop_open`）零自污染。
+- **确认弹窗选框左右贴边防裁切微调 (`arkcontroller.control.dispatcher`)**：
+  - `MODAL_CONFIRM` 取消/确认按钮选框横坐标从贴死屏幕极边的 `0.0..0.50` / `0.50..1.0` 微收至 `0.008..0.495` 与 `0.505..0.992`（点击中心保持不变），保障 S3 加粗折角与外角 `10.5px` 琥珀微刻线完整显示不被视口边界截断。
+
 ## [0.3.3] - 2026-11-22
 
 ### 新增、优化与修复 (Added, Changed & Fixed)

@@ -135,7 +135,8 @@ flowchart TD
 4. **多视图态镜头缩放补偿、Boss 战镜像棋盘与动态商店左延**：
    - `LayoutProfile` 支持 `LayoutViewState`（`normal` / `shop_open` / `unit_selected`）视图覆写与 `ViewportTransform` 仿射缩放平移补偿（经 OpenCV SIFT 实机配准，`shop_open` 下同步缩放棋盘、整备区与装备栏，中位误差 `1.1px`）；
    - 针对多人 Boss 战分配至右侧时 3D 棋盘与 5 槽装备台沿 `u_axis_normal ≈ 0.4709` 水平镜像（而 10 槽整备区与底部 2D 商店保持原位不变）的几何规律，`LayoutProfile` 内置实测 `mirrored_board_quad`（保持逻辑左→右列序）与 `mirrored_equip_zone`，`resolve_board_quad` / `resolve_equip_zone` 支持 `mirrored: bool = False` 关键字参数并在镜像态直接复用 `view_overrides` 缩放矩阵（跳过静态非镜像覆写），`ControlDispatcher` 预建 `mirrored in (False, True)` 双套三视图映射器按 `board_mirrored` 实时无损切换；
-   - `resolve_shop_zone` 与 `resolve_shop_upgrade_point` 支持商店升至二本（5 槽）与四本（6 槽）时以最右卡槽为锚点按固定步距向左动态延伸，并同步左移升级灰卡点击坐标。
+   - `resolve_shop_zone` 与 `resolve_shop_upgrade_point` 支持商店升至二本（5 槽）与四本（6 槽）时以最右卡槽为锚点按固定步距向左动态延伸，并同步左移升级灰卡点击坐标；
+   - **多选一卡片点击中心与 `+11px` 外扩选取框解耦**：`choice_zone` / `choice_2_zone` / `choice_6_top_zone` / `choice_6_bottom_zone` 严格存储官方 PC 16:9 卡片白边本体尺寸，保障 `resolve_choice_card_center` 与 `resolve_choice_confirm_point`（`cv + sh * 0.513`）零误差命中点击中心；`resolve_choice_card_polygon` 与 `resolve_choice_confirm_polygon` 则在渲染多边形层面向外扩展 `11px`（待确认态包裹放大整卡 + 底部确认白条，安全夹紧 `[0.004, 0.996]`），彻底避开卡片亮白实线边框并保障 `2×3` 上下排留足暗区净空。
 
 ---
 
@@ -146,7 +147,7 @@ flowchart TD
 | **零内存/零注入** | 严禁调用 `OpenProcess` 读写内存、DLL 注入或 Hook 游戏进程；仅使用公开 Win32 输入与窗口查询 API |
 | **UIPI 权限合规** | 通过标准 UAC 提权与官方 PC 客户端（`Arknights.exe`）对齐完整性级别，避免任何绕过安全检查的行为 |
 | **64 位 SendInput 对齐** | `VirtualHID` 在 `ctypes.Union` 中完整定义 `MOUSEINPUT`、`KEYBDINPUT`、`HARDWAREINPUT`，确保 64 位 Windows 下 `ctypes.sizeof(INPUT) == 40`，并使用 `MapVirtualKeyW` 发送硬件扫描码（`KEYEVENTF_SCANCODE`） |
-| **HUD 绝对不抢焦点 & 截屏隔离可切换** | `HUDWindow` 同时启用 Qt `WindowTransparentForInput` + `WA_ShowWithoutActivating`、Win32 `SetWindowLongW(GWL_EXSTYLE, WS_EX_LAYERED \| WS_EX_TRANSPARENT \| WS_EX_NOACTIVATE \| WS_EX_TOPMOST)` 以及 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE / WDA_NONE)` 热切换（默认启用 `WDA_EXCLUDEFROMCAPTURE` 令 `mss`/DWM 忽略 HUD；关闭后切至 `WDA_NONE` 供录屏/共享可见，配合 `_has_stronghold_in_game_chrome` 顶部两翼黑条兜底，宽白顶签 + Toast 同现下仍对视觉识别零干扰） |
+| **HUD 绝对不抢焦点 & S3 选框截屏隔离可切换** | `HUDWindow` 同时启用 Qt `WindowTransparentForInput` + `WA_ShowWithoutActivating`、Win32 `SetWindowLongW(GWL_EXSTYLE, WS_EX_LAYERED \| WS_EX_TRANSPARENT \| WS_EX_NOACTIVATE \| WS_EX_TOPMOST)` 以及 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE / WDA_NONE)` 热切换；选取框采用 **S3 加粗取景折角 + 四边半透细线 + 外角琥珀微刻线**（`FocusZone.BOARD` 与紧凑槽位自动切换短折角，`MODAL_CONFIRM` 选框微收防极边裁切），配合 `_has_stronghold_in_game_chrome` 顶部两翼黑条兜底，开启 `WDA_NONE` 后经全场景 26/26 压测对视觉识别零干扰 |
 | **失焦自动挂起** | `ControlDispatcher` 在每帧核对 `viewport is not None and viewport.is_foreground`，游戏切出前台或暂停时立刻隐藏 HUD 并停止所有键鼠模拟 |
 
 ---
