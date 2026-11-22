@@ -28,7 +28,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QDialog,
     QFrame,
@@ -49,6 +48,7 @@ from arkcontroller.config.models import (
     PerspectiveQuad,
 )
 from arkcontroller.control.grid_mapper import LinearZoneMapper, PerspectiveBoardMapper
+from arkcontroller.overlay.dashboard_window import AmberCheckBox, form_control_qss
 from arkcontroller.overlay.hud_window import (
     COLOR_AMBER,
     COLOR_CYAN,
@@ -306,10 +306,10 @@ class _CalibrationCanvas(QWidget):
             painter.fillRect(self.rect(), QColor(8, 12, 18, 128))
 
             # 16:9 视口校准参考外框：细虚线 + 四角罗德岛战术 L 折角
-            painter.setPen(QPen(QColor(0, 200, 255, 110), 1.2, Qt.PenStyle.DashLine))
+            painter.setPen(QPen(QColor(255, 255, 255, 140), 1.0, Qt.PenStyle.DashLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0))
-            corner_pen = QPen(COLOR_CYAN, 3.0)
+            corner_pen = QPen(QColor("#FFFFFF"), 2.0)
             corner_pen.setCapStyle(Qt.PenCapStyle.SquareCap)
             painter.setPen(corner_pen)
             arm = 26.0
@@ -485,7 +485,7 @@ class _CalibrationCanvas(QWidget):
         painter.setBrush(QBrush(handle.color))
         painter.drawPolygon(diamond_polygon(hx, hy, r))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor("#0B0E14")))
+        painter.setBrush(QBrush(QColor("#FFFFFF")))
         painter.drawPolygon(diamond_polygon(hx, hy, r * 0.38))
 
         # 标签与归一化坐标提示（斜切黑晶铭牌 + 左侧色条）
@@ -500,13 +500,13 @@ class _CalibrationCanvas(QWidget):
         ty = max(6.0, min(h - th - 6.0, hy - th / 2.0))
 
         badge_rect = QRectF(tx, ty, tw, th)
-        painter.setPen(QPen(handle.color, 1.0))
-        painter.setBrush(QBrush(QColor(11, 14, 20, 232)))
+        painter.setPen(QPen(QColor("#BDBDBD"), 1.0))
+        painter.setBrush(QBrush(QColor(255, 255, 255, 240)))
         painter.drawPolygon(chamfer_polygon(badge_rect, tl=5.0, br=5.0))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(handle.color))
         painter.drawRect(QRectF(badge_rect.left() + 3.0, badge_rect.top() + 3.0, 2.5, th - 6.0))
-        painter.setPen(QPen(QColor("#F4F6F9")))
+        painter.setPen(QPen(QColor("#1A1A1A")))
         painter.drawText(badge_rect.adjusted(6.0, 0.0, 0.0, 0.0), Qt.AlignmentFlag.AlignCenter, text)
 
 
@@ -565,99 +565,77 @@ class CalibrationDialog(QDialog):
         dock.setStyleSheet(
             """
             QFrame#CalibrationDock {
-                background-color: rgba(11, 14, 20, 236);
-                border: 1px solid rgba(0, 200, 255, 170);
-                border-left: 4px solid #00C8FF;
+                background-color: rgba(255, 255, 255, 246);
+                border: 1px solid #E0E0E0;
+                border-left: 2px solid #F59E0B;
                 border-radius: 0px;
             }
             QLabel {
-                color: #E2E8F0;
+                color: #1A1A1A;
                 font-family: "Microsoft YaHei UI";
                 font-size: 9pt;
-            }
-            QCheckBox {
-                color: #E2E8F0;
-                font-family: "Microsoft YaHei UI";
-                font-size: 9pt;
-                spacing: 6px;
-            }
-            QCheckBox::indicator {
-                width: 11px;
-                height: 11px;
-                background-color: #121822;
-                border: 1px solid #2C3A4D;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #00C8FF;
-                border: 1px solid #F4F6F9;
             }
             QComboBox, QSpinBox {
-                background-color: #121822;
-                color: #F4F6F9;
-                border: 1px solid #2C3A4D;
+                background-color: #FFFFFF;
+                color: #1A1A1A;
+                border: 1px solid #D9D9D9;
                 border-radius: 0px;
                 padding: 4px 8px;
                 font-family: "Microsoft YaHei UI";
                 font-size: 9pt;
             }
             QComboBox:hover, QSpinBox:hover {
-                border-color: #00C8FF;
+                border-color: #BDBDBD;
             }
             QComboBox QAbstractItemView {
-                background-color: #0B0E14;
-                color: #F4F6F9;
-                selection-background-color: rgba(0, 200, 255, 70);
-                border: 1px solid #00C8FF;
+                background-color: #FFFFFF;
+                color: #1A1A1A;
+                selection-background-color: #FFF7E6;
+                selection-color: #1A1A1A;
+                border: 1px solid #D9D9D9;
             }
             QPushButton {
-                background-color: #151C27;
-                color: #F4F6F9;
-                border: 1px solid #2C3A4D;
+                background-color: #FFFFFF;
+                color: #1A1A1A;
+                border: 1px solid #E0E0E0;
                 border-radius: 0px;
                 padding: 6px 10px;
                 font-family: "Microsoft YaHei UI";
                 font-size: 9pt;
-                font-weight: bold;
             }
             QPushButton:hover {
-                border-color: #00C8FF;
-                background-color: #1B2533;
+                border-color: #BDBDBD;
+            }
+            QPushButton:pressed {
+                background-color: #F5F5F5;
             }
             QPushButton#SaveBtn {
-                background-color: #FF9800;
-                color: #120C02;
-                border: 1px solid #FFD08A;
-            }
-            QPushButton#SaveBtn:hover {
-                background-color: #FFB547;
+                font-weight: bold;
+                border-bottom: 2px solid #F59E0B;
             }
             QPushButton#CaptureBtn {
-                background-color: rgba(0, 200, 255, 40);
-                color: #F4F6F9;
-                border: 1px solid #00C8FF;
-            }
-            QPushButton#CaptureBtn:hover {
-                background-color: rgba(0, 200, 255, 80);
+                color: #1A1A1A;
             }
             """
         )
+        dock.setStyleSheet(dock.styleSheet() + form_control_qss())
 
         vbox = QVBoxLayout(dock)
         vbox.setContentsMargins(14, 12, 14, 12)
         vbox.setSpacing(8)
 
-        title = QLabel("PRTS // CALIBRATION  卫戍协议可视化校准向导")
-        title.setStyleSheet("color: #00C8FF; font-size: 10pt; font-weight: bold; border-bottom: 1px solid #1F2A38; padding-bottom: 4px;")
+        title = QLabel("卫戍协议可视化校准向导")
+        title.setStyleSheet("color: #1A1A1A; font-size: 11pt; font-weight: bold; border-bottom: 1px solid #EDEDED; padding-bottom: 6px;")
         vbox.addWidget(title)
 
         desc = QLabel("先选择界面缩放态，再拖动菱形控制点对齐游戏画面并保存。")
         desc.setWordWrap(True)
-        desc.setStyleSheet("color: #8A99AD; font-size: 8pt;")
+        desc.setStyleSheet("color: #8C8C8C; font-size: 8pt;")
         vbox.addWidget(desc)
 
         # 校准视图态切换（默认态 / 商店展开态 / 选中角色态）
         view_label = QLabel("当前校准视图态（应对界面缩放错位）：")
-        view_label.setStyleSheet("color: #FF9800; font-weight: bold;")
+        view_label.setStyleSheet("color: #1A1A1A; font-weight: bold;")
         vbox.addWidget(view_label)
 
         self._view_state_combo = QComboBox()
@@ -668,10 +646,10 @@ class CalibrationDialog(QDialog):
 
         # 图层开关行
         layer_row1 = QHBoxLayout()
-        cb_board = QCheckBox("棋盘透视")
+        cb_board = AmberCheckBox("棋盘透视")
         cb_board.setChecked(True)
         cb_board.toggled.connect(lambda v: self._canvas.set_group_visible("board", v))
-        cb_shop = QCheckBox("商店槽位")
+        cb_shop = AmberCheckBox("商店槽位")
         cb_shop.setChecked(True)
         cb_shop.toggled.connect(lambda v: self._canvas.set_group_visible("shop", v))
         layer_row1.addWidget(cb_board)
@@ -679,10 +657,10 @@ class CalibrationDialog(QDialog):
         vbox.addLayout(layer_row1)
 
         layer_row2 = QHBoxLayout()
-        cb_bench = QCheckBox("整备区 (10格)")
+        cb_bench = AmberCheckBox("整备区 (10格)")
         cb_bench.setChecked(True)
         cb_bench.toggled.connect(lambda v: self._canvas.set_group_visible("bench", v))
-        cb_equip = QCheckBox("装备栏 (5格)")
+        cb_equip = AmberCheckBox("装备栏 (5格)")
         cb_equip.setChecked(True)
         cb_equip.toggled.connect(lambda v: self._canvas.set_group_visible("equip", v))
         layer_row2.addWidget(cb_bench)
@@ -710,12 +688,12 @@ class CalibrationDialog(QDialog):
         # 分割线
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.Shape.HLine)
-        sep1.setStyleSheet("color: #1F2A38;")
+        sep1.setStyleSheet("color: #EDEDED;")
         vbox.addWidget(sep1)
 
         # 场景识别模板采样区域
         tpl_title = QLabel("场景视觉模板采样（提升自动切层精准度）")
-        tpl_title.setStyleSheet("color: #FF9800; font-weight: bold;")
+        tpl_title.setStyleSheet("color: #1A1A1A; font-weight: bold;")
         vbox.addWidget(tpl_title)
 
         self._scene_combo = QComboBox()
@@ -734,7 +712,7 @@ class CalibrationDialog(QDialog):
         # 状态提示栏
         self._status_label = QLabel("提示：按 Esc 或点击关闭可立即返回游戏穿透操控。")
         self._status_label.setWordWrap(True)
-        self._status_label.setStyleSheet("color: #8A99AD; font-size: 8pt;")
+        self._status_label.setStyleSheet("color: #8C8C8C; font-size: 8pt;")
         vbox.addWidget(self._status_label)
 
         # 底部操作按钮
@@ -814,7 +792,7 @@ class CalibrationDialog(QDialog):
         self._spin_rows.blockSignals(False)
         self._spin_cols.blockSignals(False)
         self._canvas.reset_from_layout(self._layout, view_state=vs)
-        self._set_status(f"已切换校准视图态：{VIEW_STATE_DISPLAY_NAMES[vs]}", "#00E5FF")
+        self._set_status(f"已切换校准视图态：{VIEW_STATE_DISPLAY_NAMES[vs]}", "#1A1A1A")
 
     def _on_board_dim_changed(self) -> None:
         self._canvas.set_board_dimensions(self._spin_rows.value(), self._spin_cols.value())
@@ -829,12 +807,12 @@ class CalibrationDialog(QDialog):
         self._spin_rows.blockSignals(False)
         self._spin_cols.blockSignals(False)
         self._canvas.reset_from_layout(self._layout, view_state=vs)
-        self._set_status("已重置为当前生效配置。", "#94A3B8")
+        self._set_status("已重置为当前生效配置。", "#8C8C8C")
 
     def _on_capture_template_clicked(self) -> None:
         """截取游戏原始干净画面并写入对应场景/状态识别模板，随即热重载检测器。"""
         if self._calibrator is None:
-            self._set_status("校准器未初始化，无法保存场景模板。", "#F44336")
+            self._set_status("校准器未初始化，无法保存场景模板。", "#DC2626")
             return
 
         target = self._scene_combo.currentData()
@@ -856,7 +834,7 @@ class CalibrationDialog(QDialog):
         if frame is None:
             self._set_status(
                 "未获取到游戏画面帧：请先确保《明日方舟》窗口可见且未被最小化。",
-                "#FFB300",
+                "#B45309",
             )
             return
 
@@ -870,9 +848,9 @@ class CalibrationDialog(QDialog):
                 saved_path = self._calibrator.capture_scene_template(frame, scene_enum)
             if self._scene_detector is not None:
                 self._scene_detector.reload_templates()
-            self._set_status(f"模板已保存并热重载：{saved_path.name}", "#4CAF50")
+            self._set_status(f"模板已保存并热重载：{saved_path.name}", "#16A34A")
         except Exception as exc:
-            self._set_status(f"模板截取失败：{exc}", "#F44336")
+            self._set_status(f"模板截取失败：{exc}", "#DC2626")
 
     def _on_save_clicked(self) -> None:
         """保存校准参数至 user_override.json 并立即刷新核心调度器。"""
@@ -881,7 +859,7 @@ class CalibrationDialog(QDialog):
             self._config_loader.save_user_override(override_data)
             new_keymap, new_layout = self._config_loader.reload()
         except Exception as exc:
-            self._set_status(f"保存失败（请检查棋盘四角是否交叉）：{exc}", "#F44336")
+            self._set_status(f"保存失败（请检查棋盘四角是否交叉）：{exc}", "#DC2626")
             return
 
         self._layout = new_layout
