@@ -172,6 +172,14 @@ _SCROLL_WHEEL_DELTA: int = 120
 _TOAST_TTL_SECONDS: float = 1.8
 _STATE_SYNC_LOCK_SECONDS: float = 0.50
 _SHOP_PENDING_BUY_TTL_SECONDS: float = 2.0
+_EMOTE_LOCK_SECONDS: float = 1.8
+_EMOTE_CLOSE_DEBOUNCE_FRAMES: int = 4
+_EMOTE_SAME_RESULT_SKIP_MIN_SEC: float = 0.002
+_EMOTE_SAME_RESULT_SKIP_MAX_SEC: float = 0.25
+_COVENANT_DRAG_COOLDOWN_SECONDS: float = 0.30
+_COVENANT_DRAG_V_NORM: float = 0.1208
+_COVENANT_DRAG_LEFT_U: float = 0.38
+_COVENANT_DRAG_RIGHT_U: float = 0.62
 
 
 def _clamp01(value: float) -> float:
@@ -245,12 +253,17 @@ class ControlDispatcher:
         self._confirm_idx: int = 1  # 0=取消, 1=确认(默认), 2=本局不再提示
         self._confirm_has_dont_ask: bool = True
         self._covenant_count: int = self.layout.covenant_zone.default_count
+        self._covenant_overflow: bool = False
+        self._last_covenant_drag_at: float = -1e9
         self._top_info_idx: int = 0
         self._has_teammates: bool = False
         self._teammate_focus_idx: int = 0
         self._emote_panel_open: bool = False
         self._emote_idx: int = 0
         self._emote_override_until: float = 0.0
+        self._emote_false_streak: int = 0
+        self._last_emote_false_scene: SceneDetectionResult | None = None
+        self._last_emote_false_ts: float = -1e9
         self._zone_before_emote: FocusZone = FocusZone.BOARD
         self._info_overlay: Literal["match_info", "enemy_preview"] | None = None
         self._board_row: int = self._board_mapper.rows // 2
@@ -319,6 +332,10 @@ class ControlDispatcher:
         return self._covenant_count
 
     @property
+    def covenant_overflow(self) -> bool:
+        return self._covenant_overflow
+
+    @property
     def has_teammates(self) -> bool:
         return self._has_teammates
 
@@ -345,6 +362,10 @@ class ControlDispatcher:
     def set_covenant_count(self, count: int) -> None:
         """设置顶部栏正下方居中对称羁绊槽位数（0~9）并安全同步顶部焦点索引。"""
         self._apply_covenant_count(count)
+
+    def set_covenant_overflow(self, enabled: bool) -> None:
+        """设置顶部多盟约栏是否处于 >7 枚左对齐溢出可滑动状态。"""
+        self._covenant_overflow = bool(enabled)
 
     def set_has_teammates(self, enabled: bool) -> None:
         """设置当前对局是否启用左侧多人联机队友头像栏。"""
@@ -644,13 +665,22 @@ class ControlDispatcher:
         ]
 
         cov_zone = self.layout.covenant_zone
+        cov_total_label = "7+" if self._covenant_overflow else str(self._covenant_count)
         for k in range(self._covenant_count):
-            cu, cv = cov_zone.slot_center(k, count=self._covenant_count)
-            poly = cov_zone.slot_polygon(k, count=self._covenant_count)
+            try:
+                cu, cv = cov_zone.slot_center(
+                    k, count=self._covenant_count, overflow=self._covenant_overflow
+                )
+                poly = cov_zone.slot_polygon(
+                    k, count=self._covenant_count, overflow=self._covenant_overflow
+                )
+            except TypeError:
+                cu, cv = cov_zone.slot_center(k, count=self._covenant_count)
+                poly = cov_zone.slot_polygon(k, count=self._covenant_count)
             items.append(
                 (
                     "covenant",
-                    f"羁绊 [{k + 1}/{self._covenant_count}]",
+                    f"羁绊 [{k + 1}/{cov_total_label}]",
                     (cu, cv),
                     "center_16_9",
                     poly,
@@ -667,6 +697,36 @@ class ControlDispatcher:
             )
         )
         return items
+
+    def _scroll_covenant_bar(
+        self, direction: Literal["left", "right"], viewport: ViewportRect
+    ) -> bool:
+        """在远离两侧放大镜的安全带 (0.62, 0.1208) <-> (0.38, 0.1208) 平滑拖拽滑动顶部多盟约栏。"""
+        now = time.monotonic()
+        if now - self._last_covenant_drag_at < _COVENANT_DRAG_COOLDOWN_SECONDS:
+            return False
+
+        if direction == "right":
+            start_u, end_u = _COVENANT_DRAG_RIGHT_U, _COVENANT_DRAG_LEFT_U
+            toast = "向右滑动查看更多盟约"
+        else:
+            start_u, end_u = _COVENANT_DRAG_LEFT_U, _COVENANT_DRAG_RIGHT_U
+            toast = "向左滑回前序盟约"
+
+        start_xy = viewport.norm_to_screen(start_u, _COVENANT_DRAG_V_NORM)
+        end_xy = viewport.norm_to_screen(end_u, _COVENANT_DRAG_V_NORM)
+        self.hid.smooth_drag(
+            start_xy,
+            end_xy,
+            duration_ms=140,
+            steps=12,
+            release_at_end=True,
+        )
+        self._last_covenant_drag_at = now
+        self._last_cmd_cursor_px = end_xy
+        self._emit_rumble(0.14, 0.18, 28)
+        self._set_toast(toast)
+        return True
 
     def _nearest_top_info_idx(self, u: float) -> int:
         items = self._top_info_items()
@@ -930,6 +990,13 @@ class ControlDispatcher:
             )
         self._focus_zone = target
 
+    def _refresh_emote_lock(self) -> None:
+        """刷新表情面板保护窗并清零视觉连续 False 防抖计数。"""
+        self._emote_override_until = time.monotonic() + _EMOTE_LOCK_SECONDS
+        self._emote_false_streak = 0
+        self._last_emote_false_scene = None
+        self._last_emote_false_ts = -1e9
+
     def _toggle_emote_panel(
         self,
         viewport: ViewportRect,
@@ -950,12 +1017,11 @@ class ControlDispatcher:
                 self._set_shop_open(False, viewport, announce=False)
                 self._wait_ui_transition(220)
             self._remember_zone_before_emote()
-            if self._free_cursor_active:
-                self._free_cursor_active = False
+            self._free_cursor_active = False
             bu, bv, b_anchor = self._emote_button_point()
             self._click_norm(bu, bv, viewport, anchor=b_anchor, button="left")
             self._emote_panel_open = True
-            self._emote_override_until = time.monotonic() + _STATE_SYNC_LOCK_SECONDS
+            self._refresh_emote_lock()
             self._focus_zone = FocusZone.EMOTE_PANEL
             self._emote_idx = max(0, min(5, self._emote_idx))
             self._wait_ui_transition(120)
@@ -967,6 +1033,9 @@ class ControlDispatcher:
         bu, bv, b_anchor = self._emote_button_point()
         self._click_norm(bu, bv, viewport, anchor=b_anchor, button="left")
         self._emote_panel_open = False
+        self._emote_false_streak = 0
+        self._last_emote_false_scene = None
+        self._last_emote_false_ts = -1e9
         self._emote_override_until = time.monotonic() + _STATE_SYNC_LOCK_SECONDS
         self._restore_zone_after_emote()
         self._emit_rumble(0.14, 0.18, 30)
@@ -986,6 +1055,7 @@ class ControlDispatcher:
             else:
                 self._emote_idx = 3 + ((self._emote_idx - 3 - 1) % 3)
             self._move_cursor_to_emote_slot(viewport)
+            self._refresh_emote_lock()
             return
         if button == GamepadButton.DPAD_RIGHT:
             if self._emote_idx < 3:
@@ -993,19 +1063,23 @@ class ControlDispatcher:
             else:
                 self._emote_idx = 3 + ((self._emote_idx - 3 + 1) % 3)
             self._move_cursor_to_emote_slot(viewport)
+            self._refresh_emote_lock()
             return
         if button in (GamepadButton.DPAD_UP, GamepadButton.DPAD_DOWN):
             # 2x3 网格严格上下跨排映射：0<->3, 1<->4, 2<->5
             self._emote_idx = (self._emote_idx + 3) % 6
             self._move_cursor_to_emote_slot(viewport)
+            self._refresh_emote_lock()
             return
         if button == GamepadButton.LB:
             self._move_cursor_to_emote_panel_center(viewport)
+            self._refresh_emote_lock()
             self.hid.scroll(_SCROLL_WHEEL_DELTA * 2, horizontal=False)
             self._set_toast("表情面板向上翻页")
             return
         if button == GamepadButton.RB:
             self._move_cursor_to_emote_panel_center(viewport)
+            self._refresh_emote_lock()
             self.hid.scroll(-_SCROLL_WHEEL_DELTA * 2, horizontal=False)
             self._set_toast("表情面板向下翻页")
             return
@@ -1018,10 +1092,14 @@ class ControlDispatcher:
             sx, sy = viewport.norm_to_screen(u, v, anchor="left_edge")
             self.hid.click(sx, sy, button="left")
             self._last_cmd_cursor_px = (sx, sy)
+            self._refresh_emote_lock()
             self._emit_rumble(0.22, 0.28, 40)
             self._set_toast(f"已发送交流表情 [{self._emote_idx + 1}/6]")
-        elif button in (GamepadButton.B, GamepadButton.LS):
+        elif button == GamepadButton.B:
             self._toggle_emote_panel(viewport, target_open=False)
+        elif button == GamepadButton.LS:
+            # 表情面板内忽略 L3 误按（仅由 B 与 LT+DPAD_DOWN 显式关闭）
+            return
         elif (
             button == GamepadButton.START
             and self._current_scene == GameScene.BATTLE_PREP
@@ -1066,19 +1144,52 @@ class ControlDispatcher:
     def _sync_emote_panel_open(
         self, scene_result: SceneDetectionResult, now: float
     ) -> None:
-        """同步视觉检测到的左下表情面板开关状态，并自动切换/恢复 FocusZone.EMOTE_PANEL。"""
-        if now < self._emote_override_until:
-            return
+        """同步视觉检测到的左下表情面板开关状态，并对关闭路径施加连续帧防抖。"""
         detected_emote = bool(getattr(scene_result, "emote_panel_open", False))
-        if detected_emote == self._emote_panel_open:
+        if now < self._emote_override_until:
+            if detected_emote:
+                self._emote_false_streak = 0
+                self._last_emote_false_scene = None
             return
-        self._emote_panel_open = detected_emote
+
         if detected_emote:
+            self._emote_false_streak = 0
+            self._last_emote_false_scene = None
+            if self._emote_panel_open:
+                return
+            self._emote_panel_open = True
             if not self.deploy_fsm.is_active and not self._unit_selected:
                 self._clear_shop_pending_buy()
                 self._remember_zone_before_emote()
+                self._free_cursor_active = False
                 self._focus_zone = FocusZone.EMOTE_PANEL
-        elif self._focus_zone == FocusZone.EMOTE_PANEL:
+                self._emote_override_until = now + _EMOTE_LOCK_SECONDS
+            return
+
+        if not self._emote_panel_open:
+            self._emote_false_streak = 0
+            self._last_emote_false_scene = None
+            return
+
+        # 防止 125Hz 输入循环将同一 5Hz 视觉结果帧在 ~200ms 内重复计为多帧
+        elapsed = now - self._last_emote_false_ts
+        if (
+            scene_result is self._last_emote_false_scene
+            and _EMOTE_SAME_RESULT_SKIP_MIN_SEC <= elapsed < _EMOTE_SAME_RESULT_SKIP_MAX_SEC
+        ):
+            return
+
+        self._last_emote_false_scene = scene_result
+        self._last_emote_false_ts = now
+        self._emote_false_streak += 1
+        if self._emote_false_streak < _EMOTE_CLOSE_DEBOUNCE_FRAMES:
+            return
+
+        self._emote_false_streak = 0
+        self._last_emote_false_scene = None
+        self._last_emote_false_ts = -1e9
+        self._emote_panel_open = False
+        if self._focus_zone == FocusZone.EMOTE_PANEL:
             self._restore_zone_after_emote()
 
     def _sync_shop_closed_fallback(self) -> None:
@@ -1135,6 +1246,9 @@ class ControlDispatcher:
                 detected_cov = getattr(scene_result, "covenant_count", None)
                 if isinstance(detected_cov, int) and detected_cov >= 0:
                     self._apply_covenant_count(detected_cov)
+                self._covenant_overflow = bool(
+                    getattr(scene_result, "covenant_overflow", False)
+                )
                 if now >= self._shop_override_until:
                     self._shop_open = bool(scene_result.shop_open)
                 if now >= self._unit_override_until:
@@ -1161,6 +1275,9 @@ class ControlDispatcher:
                 detected_cov = getattr(scene_result, "covenant_count", None)
                 if isinstance(detected_cov, int) and detected_cov >= 0:
                     self._apply_covenant_count(detected_cov)
+                self._covenant_overflow = bool(
+                    getattr(scene_result, "covenant_overflow", False)
+                )
                 if now >= self._unit_override_until:
                     self._unit_selected = bool(getattr(scene_result, "unit_selected", False))
                     if not self._unit_selected:
@@ -1197,12 +1314,12 @@ class ControlDispatcher:
             self._has_teammates = True
 
         detected_cov = getattr(scene_result, "covenant_count", None)
-        if (
-            scene_result.scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
-            and isinstance(detected_cov, int)
-            and detected_cov >= 0
-        ):
-            self._apply_covenant_count(detected_cov)
+        if scene_result.scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT):
+            if isinstance(detected_cov, int) and detected_cov >= 0:
+                self._apply_covenant_count(detected_cov)
+            self._covenant_overflow = bool(
+                getattr(scene_result, "covenant_overflow", False)
+            )
 
         if now >= self._shop_override_until:
             self._shop_open = bool(scene_result.shop_open)
@@ -1278,6 +1395,10 @@ class ControlDispatcher:
             self._unit_override_until = 0.0
             self._emote_panel_open = False
             self._emote_override_until = 0.0
+            self._emote_false_streak = 0
+            self._last_emote_false_scene = None
+            self._last_emote_false_ts = -1e9
+            self._covenant_overflow = False
             self._info_overlay = None
         if target_scene != GameScene.BATTLE_PREP:
             self._shop_override_until = 0.0
@@ -1340,6 +1461,9 @@ class ControlDispatcher:
             self._unit_detail_from_shop = False
             self._unit_override_until = now + _STATE_SYNC_LOCK_SECONDS
             self._emote_panel_open = False
+            self._emote_false_streak = 0
+            self._last_emote_false_scene = None
+            self._last_emote_false_ts = -1e9
             self._emote_override_until = now + _STATE_SYNC_LOCK_SECONDS
         self._refresh_view_state()
         if announce:
@@ -1505,10 +1629,17 @@ class ControlDispatcher:
         if self._paused:
             return
 
-        # 2. 全局 Back 单击手动切层；left_stick_mode="dpad" 下按 LS 一键切换自由光标
+        # 2. 全局 Back 单击手动切层；EMOTE_PANEL 内忽略 LS 误按；left_stick_mode="dpad" 下按 LS 一键切换自由光标
         if isinstance(event, ButtonTap):
             if event.button == GamepadButton.BACK:
                 self._cycle_manual_layer()
+                return
+            if (
+                event.button == GamepadButton.LS
+                and self._focus_zone == FocusZone.EMOTE_PANEL
+                and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+                and not self.deploy_fsm.is_active
+            ):
                 return
             if (
                 event.button == GamepadButton.LS
@@ -1605,12 +1736,21 @@ class ControlDispatcher:
         """左摇杆离散四向事件直接等效于十字键，驱动全场景吸附导航。"""
         if event.stick != "left":
             return
-        if getattr(self.keymap, "left_stick_mode", "dpad") != "dpad":
+        in_emote_panel = (
+            self._focus_zone == FocusZone.EMOTE_PANEL
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and not self.deploy_fsm.is_active
+        )
+        if not in_emote_panel and getattr(self.keymap, "left_stick_mode", "dpad") != "dpad":
             return
         if self.deploy_fsm.state == DeployState.AIMING_DIRECTION:
             return
-        if self._free_cursor_active or self._current_scene == GameScene.UNKNOWN_FREE_CURSOR:
+        if not in_emote_panel and (
+            self._free_cursor_active or self._current_scene == GameScene.UNKNOWN_FREE_CURSOR
+        ):
             return
+        if in_emote_panel and self._free_cursor_active:
+            self._free_cursor_active = False
 
         dpad_btn = _DIR_TO_DPAD[event.direction]
         self._handle_button_action(dpad_btn, viewport, is_repeat=event.is_repeat)
@@ -1631,6 +1771,14 @@ class ControlDispatcher:
             return
 
         if event.stick == "left":
+            # 表情面板活跃期间严禁左摇杆连续运动激活自由光标（即便 left_stick_mode="cursor" 也稳锁面板内）
+            if (
+                self._focus_zone == FocusZone.EMOTE_PANEL
+                and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+                and not self.deploy_fsm.is_active
+            ):
+                self._free_cursor_active = False
+                return
             # 左摇杆代替十字键模式下，仅在显式开启自由光标或未知自由层时移动鼠标光标
             if (
                 getattr(self.keymap, "left_stick_mode", "dpad") == "dpad"
@@ -1664,6 +1812,26 @@ class ControlDispatcher:
         raw_v = -event.dy_px
         raw_h = event.dx_px
 
+        # 表情面板活跃期间：无论上下推杆还是按底部「■ · ·」直觉左右推杆，统一映射为垂直滚轮翻页并续期保护锁
+        if (
+            self._focus_zone == FocusZone.EMOTE_PANEL
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and not self._free_cursor_active
+            and not self.deploy_fsm.is_active
+        ):
+            primary_delta = raw_v if abs(raw_v) >= abs(raw_h) else -raw_h
+            if primary_delta * self._scroll_v_accum < 0.0:
+                self._scroll_v_accum = 0.0
+            self._scroll_v_accum += primary_delta * scroll_scale
+            self._scroll_h_accum = 0.0
+            if abs(self._scroll_v_accum) >= _SCROLL_STEP_PX:
+                ticks = int(self._scroll_v_accum / _SCROLL_STEP_PX)
+                self._scroll_v_accum -= ticks * _SCROLL_STEP_PX
+                self._move_cursor_to_emote_panel_center(viewport)
+                self._refresh_emote_lock()
+                self.hid.scroll(ticks * _SCROLL_WHEEL_DELTA, horizontal=False)
+            return
+
         # 反向推杆时清零异号滚轮余量，消除换向迟滞
         if raw_v * self._scroll_v_accum < 0.0:
             self._scroll_v_accum = 0.0
@@ -1673,18 +1841,35 @@ class ControlDispatcher:
         self._scroll_v_accum += raw_v * scroll_scale
         self._scroll_h_accum += raw_h * scroll_scale
 
+        # 顶部多盟约栏（TOP_INFO）：右摇杆水平右/左（或垂直下/上）平滑拖拽滑动顶部盟约栏
+        if (
+            self._focus_zone == FocusZone.TOP_INFO
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and not self._free_cursor_active
+            and not self.deploy_fsm.is_active
+        ):
+            if abs(self._scroll_h_accum) >= _SCROLL_STEP_PX:
+                drag_dir: Literal["left", "right"] = (
+                    "right" if self._scroll_h_accum > 0.0 else "left"
+                )
+                self._scroll_h_accum = 0.0
+                self._scroll_v_accum = 0.0
+                self._scroll_covenant_bar(drag_dir, viewport)
+            elif abs(self._scroll_v_accum) >= _SCROLL_STEP_PX:
+                drag_dir = "right" if self._scroll_v_accum < 0.0 else "left"
+                self._scroll_h_accum = 0.0
+                self._scroll_v_accum = 0.0
+                self._scroll_covenant_bar(drag_dir, viewport)
+            return
+
         if abs(self._scroll_v_accum) >= _SCROLL_STEP_PX:
             ticks = int(self._scroll_v_accum / _SCROLL_STEP_PX)
             self._scroll_v_accum -= ticks * _SCROLL_STEP_PX
-            if self._focus_zone == FocusZone.EMOTE_PANEL and not self._free_cursor_active:
-                self._move_cursor_to_emote_panel_center(viewport)
             self.hid.scroll(ticks * _SCROLL_WHEEL_DELTA, horizontal=False)
 
         if abs(self._scroll_h_accum) >= _SCROLL_STEP_PX:
             ticks = int(self._scroll_h_accum / _SCROLL_STEP_PX)
             self._scroll_h_accum -= ticks * _SCROLL_STEP_PX
-            if self._focus_zone == FocusZone.EMOTE_PANEL and not self._free_cursor_active:
-                self._move_cursor_to_emote_panel_center(viewport)
             self.hid.scroll(ticks * _SCROLL_WHEEL_DELTA, horizontal=True)
 
     # ------------------------------------------------------------------
@@ -1712,6 +1897,9 @@ class ControlDispatcher:
         self._unit_detail_from_shop = False
         self._unit_override_until = 0.0
         self._emote_panel_open = False
+        self._emote_false_streak = 0
+        self._last_emote_false_scene = None
+        self._last_emote_false_ts = -1e9
         self._emote_override_until = 0.0
         self._trigger_action("battle_ready", "battle_ready", "c", viewport)
         self._emit_rumble(0.50, 0.50, 80)
@@ -2285,6 +2473,15 @@ class ControlDispatcher:
 
         if self._focus_zone == FocusZone.EMOTE_PANEL:
             self._handle_emote_panel_button(button, viewport, is_repeat=is_repeat)
+            return
+
+        if self._focus_zone == FocusZone.TOP_INFO and button in (
+            GamepadButton.LB,
+            GamepadButton.RB,
+        ):
+            self._scroll_covenant_bar(
+                "left" if button == GamepadButton.LB else "right", viewport
+            )
             return
 
         if button in _DPAD_TO_DIR:
@@ -3020,12 +3217,15 @@ class ControlDispatcher:
 
         if scene == GameScene.BATTLE_COMBAT:
             if self._focus_zone == FocusZone.TOP_INFO:
-                return [
+                items = [
                     PromptItem(nav_key, "本局信息/羁绊/出怪"),
                     PromptItem("A", "查看详情"),
                     PromptItem("B", "关闭浮窗"),
                     PromptItem("下", "返回棋盘"),
                 ]
+                if self._covenant_overflow or self._covenant_count >= 7:
+                    items.insert(1, PromptItem("RS", "左右滑动盟约"))
+                return items
             if self._focus_zone == FocusZone.TEAMMATES:
                 return [
                     PromptItem(nav_key, "选队友"),
@@ -3116,13 +3316,16 @@ class ControlDispatcher:
                 PromptItem("B", "关闭说明"),
             ]
         if self._focus_zone == FocusZone.TOP_INFO:
-            return [
+            items = [
                 PromptItem(nav_key, "本局信息/对称羁绊/出怪"),
                 PromptItem("A", "点击查看"),
                 PromptItem("B", "关闭浮窗"),
                 PromptItem("LB/RB", "切区"),
                 PromptItem("长按Start", "开战"),
             ]
+            if self._covenant_overflow or self._covenant_count >= 7:
+                items.insert(1, PromptItem("RS", "左右滑动盟约"))
+            return items
         if self._focus_zone == FocusZone.TEAMMATES:
             return [
                 PromptItem(nav_key, "上下选队友"),

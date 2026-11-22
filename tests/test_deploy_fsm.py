@@ -2283,8 +2283,30 @@ class TestV022ShopEmoteManualSyncAndConfirmAdapt:
         assert snap_from_mates.focus_zone == FocusZone.EMOTE_PANEL
         assert ("click", emote_btn_xy[0], emote_btn_xy[1], "left") in hid.calls
 
-        # 6. 视觉同步 emote_panel_open=False（超过防抖窗后）自动退出 EMOTE_PANEL
-        now += 1.0
+        # 6. 视觉同步 emote_panel_open=False：1.8s 保护窗内与超窗后连续 3 帧 False 均不退出，第 4 帧 False 才自动退出 EMOTE_PANEL
+        now += 1.0  # 仍在 1.8s 保护窗内
+        snap_in_lock = dispatcher.process_tick(
+            vp,
+            SceneDetectionResult(
+                GameScene.BATTLE_PREP, 0.96, shop_open=False, emote_panel_open=False
+            ),
+            [],
+        )
+        assert dispatcher.emote_panel_open is True
+        assert snap_in_lock.focus_zone == FocusZone.EMOTE_PANEL
+
+        now += 1.0  # 超过 1.8s 保护窗，需要连续 4 帧 False 才退出
+        for _ in range(3):
+            snap_hold = dispatcher.process_tick(
+                vp,
+                SceneDetectionResult(
+                    GameScene.BATTLE_PREP, 0.96, shop_open=False, emote_panel_open=False
+                ),
+                [],
+            )
+            assert dispatcher.emote_panel_open is True
+            assert snap_hold.focus_zone == FocusZone.EMOTE_PANEL
+
         snap_vis_close = dispatcher.process_tick(
             vp,
             SceneDetectionResult(
@@ -2459,3 +2481,310 @@ class TestV022ShopEmoteManualSyncAndConfirmAdapt:
         hid2.clear()
         dispatcher2.process_tick(vp, esc_confirm, [ButtonTap(GamepadButton.X)])
         assert hid2.calls == []
+
+
+class TestV032CovenantOverflowAndEmoteLock:
+    """v0.3.2 专项验证：顶部 >7 盟约溢出左对齐坐标与 RS/LB/RB 平滑拖拽滑动、表情面板全链路锁焦防逃逸。"""
+
+    def test_covenant_overflow_left_aligned_coords_and_smooth_drag_scroll(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """需求 2：同步 covenant_overflow、左对齐 7 槽坐标与 7+ 标签、RS 横纵推杆与作战期 LB/RB 平滑拖拽盟约栏。"""
+        now = 4000.0
+        monkeypatch.setattr("arkcontroller.control.dispatcher.time.monotonic", lambda: now)
+
+        dispatcher, hid, _, _, layout, vp = _make_env()
+        prep_overflow = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=False,
+            covenant_count=7,
+            covenant_overflow=True,
+        )
+        # 进入休整期并切至棋盘最顶行再上跨进入 FocusZone.TOP_INFO
+        dispatcher.process_tick(vp, prep_overflow, [ButtonTap(GamepadButton.RB)])  # BENCH -> BOARD
+        assert dispatcher.covenant_count == 7
+        assert dispatcher.covenant_overflow is True
+
+        snap_top = dispatcher.process_tick(
+            vp, prep_overflow, [ButtonTap(GamepadButton.DPAD_UP)] * 6
+        )
+        assert snap_top.focus_zone == FocusZone.TOP_INFO
+        assert any(p.button == "RS" and "滑动盟约" in p.label for p in snap_top.prompts)
+
+        # 导航到最左端「查看本局信息」后右移 1 格命中第 1 枚溢出羁绊，核对左对齐坐标与「7+」标签
+        for _ in range(10):
+            snap_top = dispatcher.process_tick(
+                vp, prep_overflow, [ButtonTap(GamepadButton.DPAD_LEFT)]
+            )
+            if "查看本局信息" in snap_top.focus_label:
+                break
+        snap_cov0 = dispatcher.process_tick(
+            vp, prep_overflow, [ButtonTap(GamepadButton.DPAD_RIGHT)]
+        )
+        expected_overflow_u0, expected_v = layout.covenant_zone.slot_center(
+            0, count=7, overflow=True
+        )
+        centered_u0, _ = layout.covenant_zone.slot_center(0, count=7, overflow=False)
+        assert expected_overflow_u0 == pytest.approx(0.2961, abs=1e-4)
+        assert expected_overflow_u0 != pytest.approx(centered_u0, abs=1e-3)
+        assert snap_cov0.cursor_norm == pytest.approx((expected_overflow_u0, expected_v))
+        assert "羁绊 [1/7+]" in snap_cov0.focus_label
+
+        # 安全带平滑拖拽坐标：right -> 0.62 拖向 0.38；left -> 0.38 拖向 0.62（v=0.1208）
+        left_xy = vp.norm_to_screen(0.38, 0.1208)
+        right_xy = vp.norm_to_screen(0.62, 0.1208)
+
+        # 1. RS 水平向右推 -> 从 right_xy 拖向 left_xy
+        hid.clear()
+        dispatcher.process_tick(
+            vp, prep_overflow, [StickMotion("right", 0.85, 0.0, 26.0, 0.0)]
+        )
+        assert hid.calls == [("smooth_drag", right_xy, left_xy, True)]
+
+        # 0.30s 冷却内再次推杆不重复拖拽，也不穿透发 scroll
+        hid.clear()
+        now += 0.10
+        dispatcher.process_tick(
+            vp, prep_overflow, [StickMotion("right", 0.85, 0.0, 26.0, 0.0)]
+        )
+        assert hid.calls == []
+
+        # 冷却结束后水平向左推 -> 从 left_xy 拖向 right_xy
+        now += 0.30
+        dispatcher.process_tick(
+            vp, prep_overflow, [StickMotion("right", -0.85, 0.0, -26.0, 0.0)]
+        )
+        assert hid.calls == [("smooth_drag", left_xy, right_xy, True)]
+
+        # 垂直向下推（dy_px > 0 -> 映射向右滑）与垂直向上推（dy_px < 0 -> 映射向左滑）
+        hid.clear()
+        now += 0.35
+        dispatcher.process_tick(
+            vp, prep_overflow, [StickMotion("right", 0.0, -0.85, 0.0, 26.0)]
+        )
+        now += 0.35
+        dispatcher.process_tick(
+            vp, prep_overflow, [StickMotion("right", 0.0, 0.85, 0.0, -26.0)]
+        )
+        assert hid.calls == [
+            ("smooth_drag", right_xy, left_xy, True),
+            ("smooth_drag", left_xy, right_xy, True),
+        ]
+
+        # 2. 手动锁层 BATTLE_PREP 同样实时同步 covenant_overflow
+        dispatcher.process_tick(vp, prep_overflow, [ButtonTap(GamepadButton.BACK)])
+        assert dispatcher.scene_locked_manual is True
+        prep_no_overflow = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=False,
+            covenant_count=5,
+            covenant_overflow=False,
+        )
+        dispatcher.process_tick(vp, prep_no_overflow, [])
+        assert dispatcher.covenant_overflow is False
+        assert dispatcher.covenant_count == 5
+        dispatcher.process_tick(vp, prep_overflow, [])
+        assert dispatcher.covenant_overflow is True
+        assert dispatcher.covenant_count == 7
+
+        # 3. 作战期 BATTLE_COMBAT 在 TOP_INFO 下按 RB / LB 亦可向右/向左平滑拖拽
+        dispatcher_c, hid_c, _, _, _, _ = _make_env()
+        combat_overflow = SceneDetectionResult(
+            GameScene.BATTLE_COMBAT,
+            0.95,
+            covenant_count=7,
+            covenant_overflow=True,
+        )
+        snap_c_top = dispatcher_c.process_tick(
+            vp, combat_overflow, [ButtonTap(GamepadButton.DPAD_UP)] * 6
+        )
+        assert snap_c_top.focus_zone == FocusZone.TOP_INFO
+        assert any(p.button == "RS" and "滑动盟约" in p.label for p in snap_c_top.prompts)
+        hid_c.clear()
+        now += 0.35
+        dispatcher_c.process_tick(vp, combat_overflow, [ButtonTap(GamepadButton.RB)])
+        now += 0.35
+        dispatcher_c.process_tick(vp, combat_overflow, [ButtonTap(GamepadButton.LB)])
+        assert hid_c.calls == [
+            ("smooth_drag", right_xy, left_xy, True),
+            ("smooth_drag", left_xy, right_xy, True),
+        ]
+
+        # 4. 兼容旧式不接收 overflow 参数的自定义 covenant_zone（TypeError 安全兜底）
+        class LegacyCovenantZone:
+            default_count = 3
+
+            def slot_center(self, index: int, count: int | None = None) -> tuple[float, float]:
+                return (0.4 + 0.1 * index, 0.12)
+
+            def slot_polygon(
+                self, index: int, count: int | None = None
+            ) -> list[tuple[float, float]]:
+                return [(0.38, 0.08), (0.42, 0.08), (0.42, 0.16), (0.38, 0.16)]
+
+        dispatcher_c.layout.covenant_zone = LegacyCovenantZone()  # type: ignore[assignment]
+        snap_legacy = dispatcher_c.process_tick(vp, combat_overflow, [])
+        assert snap_legacy.focus_zone == FocusZone.TOP_INFO
+
+    def test_emote_panel_lock_rs_both_axes_l3_cursor_mode_and_4frame_debounce(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """需求 4：表情面板内 RS 横纵翻页、保护锁续期、L3 误按忽略、cursor 模式锁死与连续 4 帧 False 防抖。"""
+        now = 5000.0
+        monkeypatch.setattr("arkcontroller.control.dispatcher.time.monotonic", lambda: now)
+
+        # 1. left_stick_mode="cursor" 下从 BOARD 打开 EMOTE_PANEL：左摇杆连续运动严禁激活自由光标、离散四向仍可 2x3 跳格、LS 误按忽略
+        dispatcher_cur, hid_cur, _, _, layout, vp = _make_env(left_stick_mode="cursor")
+        center_btn = layout.buttons["emote_panel_center"]
+        center_xy = vp.norm_to_screen(center_btn.u, center_btn.v, center_btn.anchor)
+        emote_btn = layout.buttons["emote_wheel"]
+        emote_btn_xy = vp.norm_to_screen(emote_btn.u, emote_btn.v, emote_btn.anchor)
+
+        prep_closed = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=False, emote_panel_open=False
+        )
+        dispatcher_cur.process_tick(vp, prep_closed, [ButtonTap(GamepadButton.RB)])  # BENCH -> BOARD
+        snap_open = dispatcher_cur.process_tick(
+            vp, prep_closed, [ChordTriggered(GamepadButton.LT, GamepadButton.DPAD_DOWN)]
+        )
+        assert snap_open.focus_zone == FocusZone.EMOTE_PANEL
+        assert snap_open.free_cursor_active is False
+
+        # 推左摇杆连续运动（cursor 模式下原本会激活自由光标）+ 误按 L3（LS） -> 全部稳锁在 EMOTE_PANEL！
+        hid_cur.clear()
+        snap_locked = dispatcher_cur.process_tick(
+            vp,
+            prep_closed,
+            [
+                StickMotion("left", 0.9, 0.1, 20.0, 2.0),
+                ButtonTap(GamepadButton.LS),
+            ],
+        )
+        assert snap_locked.focus_zone == FocusZone.EMOTE_PANEL
+        assert snap_locked.free_cursor_active is False
+        assert hid_cur.calls == []
+
+        # cursor 模式下左摇杆离散四向仍驱动 2x3 表情选格
+        snap_dir = dispatcher_cur.process_tick(
+            vp, prep_closed, [StickDirection("left", "right")]
+        )
+        assert snap_dir.focus_zone == FocusZone.EMOTE_PANEL
+        assert dispatcher_cur.emote_index == 1
+
+        # 2. left_stick_mode="dpad" 下验证 RS 横纵双轴均映射垂直翻页、续期 1.8s 保护锁、L3 忽略及 4 帧连续 False 防抖
+        dispatcher, hid, _, _, _, _ = _make_env(left_stick_mode="dpad")
+        dispatcher.process_tick(vp, prep_closed, [ButtonTap(GamepadButton.RB)])  # -> BOARD
+        dispatcher.process_tick(
+            vp, prep_closed, [ChordTriggered(GamepadButton.LT, GamepadButton.DPAD_DOWN)]
+        )
+        assert dispatcher.emote_panel_open is True
+
+        # 误按 LS（dpad 模式下原本会切自由光标）-> 必须完全忽略，留在 EMOTE_PANEL
+        hid.clear()
+        snap_ls = dispatcher.process_tick(vp, prep_closed, [ButtonTap(GamepadButton.LS)])
+        assert snap_ls.focus_zone == FocusZone.EMOTE_PANEL
+        assert snap_ls.free_cursor_active is False
+        assert hid.calls == []
+
+        # RS 直觉向右推（下一页 -> scroll -120, horizontal=False）与向左推（上一页 -> scroll +120, horizontal=False）
+        now += 1.2  # 即将到期前执行翻页 -> 刷新 1.8s 保护锁！
+        hid.clear()
+        dispatcher.process_tick(
+            vp, prep_closed, [StickMotion("right", 0.85, 0.0, 26.0, 0.0)]
+        )
+        assert hid.calls == [
+            ("move_cursor", center_xy[0], center_xy[1]),
+            ("scroll", -120, False),
+        ]
+
+        hid.clear()
+        dispatcher.process_tick(
+            vp, prep_closed, [StickMotion("right", -0.85, 0.0, -26.0, 0.0)]
+        )
+        assert hid.calls == [
+            ("move_cursor", center_xy[0], center_xy[1]),
+            ("scroll", 120, False),
+        ]
+
+        # 续期后过 1.0s（总耗时距打开 2.2s，但距上次翻页仅 1.0s < 1.8s）：连续多帧 False 均被保护锁拦下！
+        now += 1.0
+        for _ in range(5):
+            snap_protected = dispatcher.process_tick(
+                vp,
+                SceneDetectionResult(
+                    GameScene.BATTLE_PREP, 0.96, shop_open=False, emote_panel_open=False
+                ),
+                [],
+            )
+            assert snap_protected.focus_zone == FocusZone.EMOTE_PANEL
+            assert dispatcher.emote_panel_open is True
+
+        # 超过 1.8s 保护窗后：先模拟 125Hz 主循环（每 8ms 复用同一个 False 视觉帧 10 次）-> 仅计为 1 个视觉帧，绝不退出！
+        now += 1.0
+        shared_false_frame = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=False, emote_panel_open=False
+        )
+        for _ in range(10):
+            now += 0.008
+            snap_125hz = dispatcher.process_tick(vp, shared_false_frame, [])
+            assert snap_125hz.focus_zone == FocusZone.EMOTE_PANEL
+            assert dispatcher.emote_panel_open is True
+
+        # 再来 2 个新视觉帧 False（累计 3 帧 < 4 帧）仍不逃逸入 BOARD
+        for _ in range(2):
+            now += 0.20
+            snap_f = dispatcher.process_tick(
+                vp,
+                SceneDetectionResult(
+                    GameScene.BATTLE_PREP, 0.96, shop_open=False, emote_panel_open=False
+                ),
+                [],
+            )
+            assert snap_f.focus_zone == FocusZone.EMOTE_PANEL
+
+        # 中途来 1 帧 True -> 防抖计数立即归零！随后再来 3 个新视觉帧 False 依然稳锁 EMOTE_PANEL
+        now += 0.20
+        dispatcher.process_tick(
+            vp,
+            SceneDetectionResult(
+                GameScene.BATTLE_PREP, 0.96, shop_open=False, emote_panel_open=True
+            ),
+            [],
+        )
+        for _ in range(3):
+            now += 0.20
+            snap_reset = dispatcher.process_tick(
+                vp,
+                SceneDetectionResult(
+                    GameScene.BATTLE_PREP, 0.96, shop_open=False, emote_panel_open=False
+                ),
+                [],
+            )
+            assert snap_reset.focus_zone == FocusZone.EMOTE_PANEL
+
+        # 真正连续第 4 个视觉帧 False -> 安全退回原区域 BOARD
+        now += 0.20
+        snap_exit = dispatcher.process_tick(
+            vp,
+            SceneDetectionResult(
+                GameScene.BATTLE_PREP, 0.96, shop_open=False, emote_panel_open=False
+            ),
+            [],
+        )
+        assert dispatcher.emote_panel_open is False
+        assert snap_exit.focus_zone == FocusZone.BOARD
+
+        # 3. 显式 LT+DPAD_DOWN 打开后再按 LT+DPAD_DOWN 显式关闭，点击 emote_wheel 并回到 BOARD
+        dispatcher.process_tick(
+            vp, prep_closed, [ChordTriggered(GamepadButton.LT, GamepadButton.DPAD_DOWN)]
+        )
+        assert dispatcher.emote_panel_open is True
+        hid.clear()
+        snap_lt_close = dispatcher.process_tick(
+            vp, prep_closed, [ChordTriggered(GamepadButton.LT, GamepadButton.DPAD_DOWN)]
+        )
+        assert snap_lt_close.focus_zone == FocusZone.BOARD
+        assert dispatcher.emote_panel_open is False
+        assert hid.calls == [("click", emote_btn_xy[0], emote_btn_xy[1], "left")]
