@@ -491,12 +491,12 @@ def _default_choice_2_zone() -> LinearZone:
     return LinearZone(
         name="choice_2",
         count=2,
-        start_u=0.3809,
-        start_v=0.5000,
-        end_u=0.6477,
-        end_v=0.5000,
-        slot_w=0.2188,
-        slot_h=0.3306,
+        start_u=0.38086,
+        start_v=0.50347,
+        end_u=0.64805,
+        end_v=0.50347,
+        slot_w=0.22344,
+        slot_h=0.33403,
     )
 
 
@@ -504,12 +504,12 @@ def _default_choice_6_top_zone() -> LinearZone:
     return LinearZone(
         name="choice_6_top",
         count=3,
-        start_u=0.2473,
-        start_v=0.2931,
-        end_u=0.7816,
-        end_v=0.2931,
-        slot_w=0.2180,
-        slot_h=0.3306,
+        start_u=0.24727,
+        start_v=0.29722,
+        end_u=0.78164,
+        end_v=0.29722,
+        slot_w=0.22344,
+        slot_h=0.33472,
     )
 
 
@@ -517,12 +517,12 @@ def _default_choice_6_bottom_zone() -> LinearZone:
     return LinearZone(
         name="choice_6_bottom",
         count=3,
-        start_u=0.2473,
-        start_v=0.7083,
-        end_u=0.7816,
-        end_v=0.7083,
-        slot_w=0.2180,
-        slot_h=0.3306,
+        start_u=0.24727,
+        start_v=0.70972,
+        end_u=0.78164,
+        end_v=0.70972,
+        slot_w=0.22344,
+        slot_h=0.33472,
     )
 
 
@@ -983,36 +983,44 @@ class LayoutProfile:
         """解析卡片被选中后底部弹出的白色「确认选择」条归一化中心点击坐标。"""
         cu, cv = self.resolve_choice_card_center(index, choice_count)
         _, sh = self.resolve_choice_card_size(index, choice_count)
-        confirm_v = max(0.0, min(0.98, cv + sh * 0.505))
+        confirm_v = max(0.0, min(0.98, cv + sh * 0.513))
         return (float(cu), float(confirm_v))
 
     def resolve_choice_card_polygon(
         self, index: int, choice_count: int = 3
     ) -> list[tuple[float, float]]:
-        """返回未确认阶段第 index 张决策卡片的 4 顶点归一化矩形。"""
+        """返回未确认阶段第 index 张决策卡片外扩 11px（错开卡片白边）的 4 顶点归一化矩形。"""
         cu, cv = self.resolve_choice_card_center(index, choice_count)
         sw, sh = self.resolve_choice_card_size(index, choice_count)
-        hw, hh = sw * 0.5, sh * 0.5
+        hw = sw * 0.5 + 11.0 / 1280.0
+        hh = sh * 0.5 + 11.0 / 720.0
+        left_u = max(0.004, min(0.996, cu - hw))
+        right_u = max(0.004, min(0.996, cu + hw))
+        top_v = max(0.004, min(0.996, cv - hh))
+        bot_v = max(0.004, min(0.996, cv + hh))
         return [
-            (cu - hw, cv - hh),
-            (cu + hw, cv - hh),
-            (cu + hw, cv + hh),
-            (cu - hw, cv + hh),
+            (left_u, top_v),
+            (right_u, top_v),
+            (right_u, bot_v),
+            (left_u, bot_v),
         ]
 
     def resolve_choice_confirm_polygon(
         self, index: int, choice_count: int = 3
     ) -> list[tuple[float, float]]:
-        """返回卡片选中后底部白色「确认选择」横条的 4 顶点归一化矩形。"""
-        cu, confirm_v = self.resolve_choice_confirm_point(index, choice_count)
-        sw, _ = self.resolve_choice_card_size(index, choice_count)
-        hw = sw * 0.51
-        hh = 0.034
+        """返回卡片点中待二次确认态包裹放大整卡与底部「确认选择」白条再外扩 11px 的 4 顶点矩形。"""
+        cu, cv = self.resolve_choice_card_center(index, choice_count)
+        sw, sh = self.resolve_choice_card_size(index, choice_count)
+        hw = sw * 0.5 + 0.01016
+        left_u = max(0.004, min(0.996, cu - hw))
+        right_u = max(0.004, min(0.996, cu + hw))
+        top_v = max(0.004, min(0.996, cv - sh * 0.5 - 0.04583))
+        bot_v = max(0.004, min(0.996, cv + sh * 0.5 + 0.05694))
         return [
-            (cu - hw, confirm_v - hh),
-            (cu + hw, confirm_v - hh),
-            (cu + hw, confirm_v + hh),
-            (cu - hw, confirm_v + hh),
+            (left_u, top_v),
+            (right_u, top_v),
+            (right_u, bot_v),
+            (left_u, bot_v),
         ]
 
     def resolve_choice_toggle_point(

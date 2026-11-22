@@ -32,42 +32,42 @@
   "choice_zone": {
     "name": "choice",
     "count": 3,
-    "start_u": 0.2469,
-    "start_v": 0.5049,
-    "end_u": 0.7816,
-    "end_v": 0.5049,
-    "slot_w": 0.2242,
-    "slot_h": 0.3347
+    "start_u": 0.24727,
+    "start_v": 0.50347,
+    "end_u": 0.78164,
+    "end_v": 0.50347,
+    "slot_w": 0.22344,
+    "slot_h": 0.33403
   },
   "choice_2_zone": {
     "name": "choice_2",
     "count": 2,
-    "start_u": 0.3809,
-    "start_v": 0.5000,
-    "end_u": 0.6477,
-    "end_v": 0.5000,
-    "slot_w": 0.2188,
-    "slot_h": 0.3306
+    "start_u": 0.38086,
+    "start_v": 0.50347,
+    "end_u": 0.64805,
+    "end_v": 0.50347,
+    "slot_w": 0.22344,
+    "slot_h": 0.33403
   },
   "choice_6_top_zone": {
     "name": "choice_6_top",
     "count": 3,
-    "start_u": 0.2473,
-    "start_v": 0.2931,
-    "end_u": 0.7816,
-    "end_v": 0.2931,
-    "slot_w": 0.2180,
-    "slot_h": 0.3306
+    "start_u": 0.24727,
+    "start_v": 0.29722,
+    "end_u": 0.78164,
+    "end_v": 0.29722,
+    "slot_w": 0.22344,
+    "slot_h": 0.33472
   },
   "choice_6_bottom_zone": {
     "name": "choice_6_bottom",
     "count": 3,
-    "start_u": 0.2473,
-    "start_v": 0.7083,
-    "end_u": 0.7816,
-    "end_v": 0.7083,
-    "slot_w": 0.2180,
-    "slot_h": 0.3306
+    "start_u": 0.24727,
+    "start_v": 0.70972,
+    "end_u": 0.78164,
+    "end_v": 0.70972,
+    "slot_w": 0.22344,
+    "slot_h": 0.33472
   },
   "emote_top_zone": {
     "name": "emote_top",
