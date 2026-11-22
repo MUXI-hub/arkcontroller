@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import logging
+import os
 from pathlib import Path
 import signal
 import sys
@@ -17,7 +18,7 @@ import time
 from typing import Sequence
 
 from PySide6.QtCore import QObject, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
 from arkcontroller import __version__ as APP_VERSION
@@ -123,12 +124,62 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_templates_dir(config_loader: ConfigLoader) -> Path:
-    """定位场景识别模板存储目录（assets/templates）。"""
+def _ensure_stdio_streams() -> None:
+    """在 PyInstaller 无控制台 GUI（console=False）模式下挂载安全空流，防止 stdout/stderr 为 None 报错。"""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
+def _resolve_writable_templates_dir(config_loader: ConfigLoader) -> Path:
+    """定位可写的场景识别模板存储目录（供校准向导保存新模板）。"""
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        default_exe_configs = (exe_dir / "configs").resolve()
+        if config_loader.config_dir.resolve() != default_exe_configs:
+            return config_loader.config_dir.resolve().parent / "assets" / "templates"
+        return exe_dir / "assets" / "templates"
+
     candidate = config_loader.config_dir.resolve().parent / "assets" / "templates"
     if candidate.parent.exists():
         return candidate
     return Path(__file__).resolve().parents[2] / "assets" / "templates"
+
+
+def _resolve_templates_dir(config_loader: ConfigLoader) -> Path:
+    """定位场景识别模板读取目录（assets/templates）。
+
+    冻结模式下优先指向 ``exe_dir / "assets" / "templates"``；若该目录尚未创建且
+    PyInstaller 解包目录 ``_MEIPASS / "assets" / "templates"`` 存在，则兼容回退读取内置模板。
+    """
+    writable = _resolve_writable_templates_dir(config_loader)
+    if getattr(sys, "frozen", False):
+        if writable.exists():
+            return writable
+        exe_dir = Path(sys.executable).resolve().parent
+        bundle_dir = Path(getattr(sys, "_MEIPASS", exe_dir))
+        bundle_templates = bundle_dir / "assets" / "templates"
+        if bundle_templates.exists():
+            return bundle_templates
+    return writable
+
+
+def _resolve_app_icon_path() -> Path | None:
+    """定位应用图标 assets/arkcontroller.ico（兼容源码运行与 PyInstaller 冻结态）。"""
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        bundle_dir = Path(getattr(sys, "_MEIPASS", exe_dir))
+        candidates.append(exe_dir / "assets" / "arkcontroller.ico")
+        candidates.append(bundle_dir / "assets" / "arkcontroller.ico")
+    else:
+        candidates.append(Path(__file__).resolve().parents[2] / "assets" / "arkcontroller.ico")
+        candidates.append(Path.cwd() / "assets" / "arkcontroller.ico")
+    for icon_path in candidates:
+        if icon_path.is_file():
+            return icon_path
+    return None
 
 
 class ArkControllerApp(QObject):
@@ -169,9 +220,10 @@ class ArkControllerApp(QObject):
         self.hid = VirtualHID()
 
         # 3. 初始化非侵入式异步屏幕采样与场景识别
-        self.templates_dir = _resolve_templates_dir(self.config_loader)
+        self.templates_dir = _resolve_writable_templates_dir(self.config_loader)
+        read_templates_dir = _resolve_templates_dir(self.config_loader)
         self.screen_capture = ScreenCapture()
-        self.scene_detector = SceneDetector(templates_dir=self.templates_dir)
+        self.scene_detector = SceneDetector(templates_dir=read_templates_dir)
         self.calibrator = VisionCalibrator(
             templates_dir=self.templates_dir,
             loader=self.config_loader,
@@ -649,6 +701,8 @@ class ArkControllerApp(QObject):
         try:
             new_keymap, new_layout = self.config_loader.reload()
             self._apply_updated_configs(new_keymap, new_layout, refresh_tuning=True)
+            if self.templates_dir.exists() and self.scene_detector.templates_dir != self.templates_dir:
+                self.scene_detector.templates_dir = self.templates_dir
             self.scene_detector.reload_templates()
             self._refresh_dashboard_system_info()
             logger.info("配置文件与视觉识别模板热重载完成。")
@@ -717,6 +771,9 @@ class ArkControllerApp(QObject):
     def _on_calibration_saved(self, keymap: KeymapConfig, layout: LayoutProfile) -> None:
         """校准面板点击「保存并生效」后的热刷新回调。"""
         self._apply_updated_configs(keymap, layout)
+        if self.templates_dir.exists() and self.scene_detector.templates_dir != self.templates_dir:
+            self.scene_detector.templates_dir = self.templates_dir
+            self.scene_detector.reload_templates()
         self._refresh_dashboard_system_info()
         logger.info("可视化校准配置已保存并热刷新至调度器。")
         self.tray.show_notification("校准已保存生效", "棋盘透视网格与槽位坐标已立即应用。")
@@ -756,6 +813,7 @@ def _build_relaunch_args(args: argparse.Namespace) -> list[str]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """ArkController CLI 主入口函数。"""
+    _ensure_stdio_streams()
     parser = build_arg_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     _configure_logging(args.log_level)
@@ -793,6 +851,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 显式指定正数点字号，避免 Windows Qt6 下部分控件/样式表触发 QFont::setPointSize(-1) 警告
     if qt_app.font().pointSize() <= 0:
         qt_app.setFont(QFont("Microsoft YaHei UI", 9))
+    icon_path = _resolve_app_icon_path()
+    if icon_path is not None:
+        app_icon = QIcon(str(icon_path))
+        if not app_icon.isNull():
+            qt_app.setWindowIcon(app_icon)
 
     # 4. 装配全链路控制中枢
     controller = ArkControllerApp(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -117,6 +118,11 @@ def relaunch_as_admin(extra_args: list[str] | None = None) -> bool:
     args = _build_relaunch_args(extra_args)
     params = subprocess.list2cmdline(args)
     executable = sys.executable
+    work_dir = (
+        str(Path(sys.executable).resolve().parent)
+        if getattr(sys, "frozen", False)
+        else os.getcwd()
+    )
 
     try:
         shell32 = ctypes.WinDLL("shell32", use_last_error=True)
@@ -135,7 +141,7 @@ def relaunch_as_admin(extra_args: list[str] | None = None) -> bool:
             "runas",
             executable,
             params,
-            os.getcwd(),
+            work_dir,
             SW_SHOWNORMAL,
         )
         # Win32 ShellExecuteW 返回值 > 32 表示调用成功
