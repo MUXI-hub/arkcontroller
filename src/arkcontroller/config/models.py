@@ -400,14 +400,15 @@ SlotZoneConfig = LinearZone
 
 @dataclass
 class SymmetricCovenantZone:
-    """顶部栏下方居中对称分布的羁绊（盟约）图标区域配置。"""
+    """顶部栏下方居中对称分布（超过 7 个时左对齐滑动）的羁绊（盟约）图标区域配置。"""
 
     center_u: float = 0.500
-    v: float = 0.118
-    step_u: float = 0.052
+    v: float = 0.1208
+    step_u: float = 0.0625
     slot_w: float = 0.044
     slot_h: float = 0.082
     default_count: int = 5
+    overflow_start_u: float = 0.2961
 
     def __post_init__(self) -> None:
         self.center_u = _validate_unit_coord("covenant_zone.center_u", self.center_u)
@@ -415,26 +416,44 @@ class SymmetricCovenantZone:
         self.step_u = _validate_positive_unit("covenant_zone.step_u", self.step_u)
         self.slot_w = _validate_positive_unit("covenant_zone.slot_w", self.slot_w)
         self.slot_h = _validate_positive_unit("covenant_zone.slot_h", self.slot_h)
+        self.overflow_start_u = _validate_unit_coord(
+            "covenant_zone.overflow_start_u", self.overflow_start_u
+        )
         self.default_count = int(self.default_count)
         if self.default_count < 0:
             raise ValueError(
                 f"SymmetricCovenantZone.default_count 必须 >= 0，当前值: {self.default_count}"
             )
 
-    def slot_center(self, index: int, count: int | None = None) -> tuple[float, float]:
-        """按总羁绊数 count 计算居中对称的第 index 个图标归一化中心坐标 (u, v)。"""
+    def slot_center(
+        self,
+        index: int,
+        count: int | None = None,
+        overflow: bool = False,
+    ) -> tuple[float, float]:
+        """计算第 index 个盟约图标归一化中心坐标 (u, v)。
+
+        - overflow=False：按总盟约数 count 居中对称排布；
+        - overflow=True：超过 7 枚盟约溢出时按 overflow_start_u 左对齐等距排布。
+        """
         n = self.default_count if count is None else int(count)
         if n < 1 or not (0 <= index < n):
             raise IndexError(f"羁绊槽位索引越界: index={index}, count={n}")
+        if overflow:
+            u = max(0.0, min(1.0, self.overflow_start_u + index * self.step_u))
+            return (float(u), float(self.v))
         offset = (index - (n - 1) * 0.5) * self.step_u
         u = max(0.0, min(1.0, self.center_u + offset))
         return (float(u), float(self.v))
 
     def slot_polygon(
-        self, index: int, count: int | None = None
+        self,
+        index: int,
+        count: int | None = None,
+        overflow: bool = False,
     ) -> list[tuple[float, float]]:
-        """返回第 index 个居中对称羁绊图标的顺时针 4 顶点归一化矩形。"""
-        cu, cv = self.slot_center(index, count=count)
+        """返回第 index 个盟约图标的顺时针 4 顶点归一化矩形。"""
+        cu, cv = self.slot_center(index, count=count, overflow=overflow)
         hw = self.slot_w * 0.5
         hh = self.slot_h * 0.5
         return [
@@ -452,17 +471,19 @@ class SymmetricCovenantZone:
             "slot_w": self.slot_w,
             "slot_h": self.slot_h,
             "default_count": self.default_count,
+            "overflow_start_u": self.overflow_start_u,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> SymmetricCovenantZone:
         return cls(
             center_u=float(data.get("center_u", 0.500)),
-            v=float(data.get("v", 0.118)),
-            step_u=float(data.get("step_u", 0.052)),
+            v=float(data.get("v", 0.1208)),
+            step_u=float(data.get("step_u", 0.0625)),
             slot_w=float(data.get("slot_w", 0.044)),
             slot_h=float(data.get("slot_h", 0.082)),
             default_count=int(data.get("default_count", 5)),
+            overflow_start_u=float(data.get("overflow_start_u", 0.2961)),
         )
 
 
@@ -1111,6 +1132,7 @@ class KeymapConfig:
     left_stick_dpad_threshold: float = 0.50
     left_stick_dpad_release_threshold: float = 0.30
     auto_toggle_shop: bool = True
+    hide_hud_from_capture: bool = True
     keyboard_shortcuts: dict[str, str] = field(default_factory=_default_keyboard_shortcuts)
     bindings: dict[str, dict[str, str]] = field(default_factory=_default_bindings)
 
@@ -1132,6 +1154,7 @@ class KeymapConfig:
         self.left_stick_dpad_threshold = float(self.left_stick_dpad_threshold)
         self.left_stick_dpad_release_threshold = float(self.left_stick_dpad_release_threshold)
         self.auto_toggle_shop = bool(self.auto_toggle_shop)
+        self.hide_hud_from_capture = bool(self.hide_hud_from_capture)
 
         if not (0.0 <= self.left_deadzone < 0.95):
             raise ValueError(f"left_deadzone 必须位于 [0.0, 0.95) 范围内，当前值: {self.left_deadzone}")
@@ -1192,6 +1215,7 @@ class KeymapConfig:
             "left_stick_dpad_threshold": self.left_stick_dpad_threshold,
             "left_stick_dpad_release_threshold": self.left_stick_dpad_release_threshold,
             "auto_toggle_shop": self.auto_toggle_shop,
+            "hide_hud_from_capture": self.hide_hud_from_capture,
             "keyboard_shortcuts": dict(self.keyboard_shortcuts),
             "bindings": {section: dict(items) for section, items in self.bindings.items()},
         }
@@ -1231,6 +1255,7 @@ class KeymapConfig:
                 data.get("left_stick_dpad_release_threshold", 0.30)
             ),
             auto_toggle_shop=bool(data.get("auto_toggle_shop", True)),
+            hide_hud_from_capture=bool(data.get("hide_hud_from_capture", True)),
             keyboard_shortcuts=shortcuts,
             bindings=bindings,
         )

@@ -91,11 +91,12 @@
   },
   "covenant_zone": {
     "center_u": 0.500,
-    "v": 0.118,
-    "step_u": 0.052,
+    "v": 0.1208,
+    "step_u": 0.0625,
     "slot_w": 0.044,
     "slot_h": 0.082,
-    "default_count": 5
+    "default_count": 5,
+    "overflow_start_u": 0.2961
   },
   "board_quad": {
     "top_left": [0.34531, 0.2787],

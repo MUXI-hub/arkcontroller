@@ -360,6 +360,10 @@ class TestConfigSystem:
         assert keymap.vibration_enabled is True
         assert keymap.left_stick_mode == "dpad"
         assert keymap.auto_toggle_shop is True
+        assert keymap.hide_hud_from_capture is True
+        assert keymap.to_dict()["hide_hud_from_capture"] is True
+        assert KeymapConfig.from_dict({}).hide_hud_from_capture is True
+        assert KeymapConfig.from_dict({"hide_hud_from_capture": False}).hide_hud_from_capture is False
         assert keymap.keyboard_shortcuts["shop_upgrade"] == "g"
         assert keymap.keyboard_shortcuts == {
             "shop_toggle": "a",
@@ -485,13 +489,33 @@ class TestConfigSystem:
             assert len(poly) == 4
             assert poly[0] == pytest.approx((cu - 0.032, cv - 0.056), abs=1e-4)
             assert poly[2] == pytest.approx((cu + 0.032, cv + 0.056), abs=1e-4)
-        # 验证顶部下方居中对称羁绊坐标解算（奇数与偶数）
+        # 验证顶部下方居中对称羁绊坐标解算（奇数、偶数、7 枚满屏与 >7 溢出左对齐）
         assert isinstance(layout.covenant_zone, SymmetricCovenantZone)
-        assert layout.covenant_zone.slot_center(0, count=1)[0] == pytest.approx(0.50)
+        assert layout.covenant_zone.v == pytest.approx(0.1208)
+        assert layout.covenant_zone.step_u == pytest.approx(0.0625)
+        assert layout.covenant_zone.overflow_start_u == pytest.approx(0.2961)
+        assert layout.covenant_zone.to_dict()["overflow_start_u"] == pytest.approx(0.2961)
+        assert layout.covenant_zone.slot_center(0, count=1) == pytest.approx((0.50, 0.1208))
         u_even_0, _ = layout.covenant_zone.slot_center(0, count=2)
         u_even_1, _ = layout.covenant_zone.slot_center(1, count=2)
         assert (u_even_0 + u_even_1) * 0.5 == pytest.approx(0.50)
-        assert u_even_1 - u_even_0 == pytest.approx(layout.covenant_zone.step_u)
+        assert u_even_1 - u_even_0 == pytest.approx(0.0625)
+        # 7 枚居中满屏：0.50 - 3 * 0.0625 = 0.3125 .. 0.6875
+        assert layout.covenant_zone.slot_center(0, count=7) == pytest.approx((0.3125, 0.1208))
+        assert layout.covenant_zone.slot_center(3, count=7) == pytest.approx((0.5000, 0.1208))
+        assert layout.covenant_zone.slot_center(6, count=7) == pytest.approx((0.6875, 0.1208))
+        # >7 溢出左对齐 7 槽：overflow_start_u + i * step_u
+        for i in range(7):
+            exp_u = 0.2961 + i * 0.0625
+            cu, cv = layout.covenant_zone.slot_center(i, count=7, overflow=True)
+            assert (cu, cv) == pytest.approx((exp_u, 0.1208), abs=1e-6)
+            poly = layout.covenant_zone.slot_polygon(i, count=7, overflow=True)
+            assert len(poly) == 4
+            assert (poly[0][0] + poly[2][0]) * 0.5 == pytest.approx(exp_u, abs=1e-6)
+            assert (poly[0][1] + poly[2][1]) * 0.5 == pytest.approx(0.1208, abs=1e-6)
+        # 旧版缺少 overflow_start_u 的 JSON 字典向后兼容
+        legacy_cov = SymmetricCovenantZone.from_dict({"center_u": 0.5, "v": 0.12, "step_u": 0.0625})
+        assert legacy_cov.overflow_start_u == pytest.approx(0.2961)
         assert "shop_open" in layout.view_overrides
         assert "unit_selected" in layout.view_overrides
         assert layout.resolve_board_quad("shop_open") != layout.board_quad

@@ -16,6 +16,7 @@
   "left_stick_dpad_threshold": 0.5,
   "left_stick_dpad_release_threshold": 0.3,
   "auto_toggle_shop": true,
+  "hide_hud_from_capture": true,
   "keyboard_shortcuts": {
     "shop_toggle": "a",
     "shop_freeze": "s",
