@@ -66,12 +66,41 @@ def qapp() -> QApplication:
 
 
 @pytest.fixture(autouse=True)
+def _release_top_level_widgets(qapp):
+    """每个用例结束后关闭并 deleteLater 全部顶层窗口，杜绝解释器退出期与 QApplication 析构竞争崩溃。"""
+    yield
+    for w in list(qapp.topLevelWidgets()):
+        try:
+            if hasattr(w, "force_close"):
+                w.force_close()
+            else:
+                w.close()
+            w.deleteLater()
+        except RuntimeError:
+            pass
+    qapp.processEvents()
+
+
+@pytest.fixture(autouse=True)
 def _no_font_warnings():
     start = len(_QT_MESSAGES)
     yield
     new_msgs = _QT_MESSAGES[start:]
     bad = [m for m in new_msgs if "setPointSize" in m or "Point size <= 0" in m]
     assert not bad, f"检测到 Qt 字体点字号警告：{bad}"
+
+
+def _dispose(qapp, *widgets) -> None:
+    """关闭并安全释放顶层窗口，避免解释器退出时与 QApplication 析构竞争。"""
+    for w in widgets:
+        if w is None:
+            continue
+        if hasattr(w, "force_close"):
+            w.force_close()
+        else:
+            w.close()
+        w.deleteLater()
+    qapp.processEvents()
 
 
 def _snapshot(**overrides) -> HUDStateSnapshot:
@@ -128,9 +157,9 @@ def test_hud_exports_and_palette_contract(qapp) -> None:
     assert hud_window.WS_EX_NOACTIVATE == 0x08000000
     assert hud_window.WS_EX_LAYERED == 0x00080000
     assert hud_window.WS_EX_TOPMOST == 0x00000008
-    assert COLOR_CYAN.name().upper() == "#00C8FF"
-    assert COLOR_AMBER.name().upper() == "#FF9800"
-    assert COLOR_RED.name().upper() == "#EF4444"
+    assert COLOR_CYAN.name().upper() == "#0098DC"
+    assert COLOR_AMBER.name().upper() == "#F59E0B"
+    assert COLOR_RED.name().upper() == "#DC2626"
     assert isinstance(COLOR_GREEN, QColor)
     assert SCENE_DISPLAY_NAMES[GameScene.BATTLE_PREP] == "休整运营"
     assert SCENE_DISPLAY_NAMES[GameScene.UNKNOWN_FREE_CURSOR] == "自由鼠标"
@@ -218,7 +247,7 @@ def test_hud_update_state_hides_without_viewport(qapp) -> None:
 def dashboard(qapp):
     win = PRTSDashboardWindow()
     yield win
-    win.force_close()
+    _dispose(qapp, win)
 
 
 def test_dashboard_is_normal_window_not_topmost(dashboard) -> None:
@@ -369,7 +398,7 @@ def test_dashboard_tuning_apply_and_reset(dashboard) -> None:
 
 def test_dashboard_keymap_manual_covers_v022_mappings(dashboard) -> None:
     assert len(dashboard.keymap_cards) == len(KEYMAP_BRIEFS) == 9
-    all_text = " ".join(desc for _c, _t, _s, _a, rows in KEYMAP_BRIEFS for _k, desc in rows)
+    all_text = " ".join(desc for _c, _t, _s, rows in KEYMAP_BRIEFS for _k, desc in rows)
     for keyword in ("双击 A 买牌", "查看商店干员详情", "升本", "刷新商店", "冻结", "原地转向",
                     "白条", "不再提示", "表情", "撤退", "队友"):
         assert keyword in all_text, keyword
@@ -433,7 +462,7 @@ def test_calibration_dialog_renders_with_rhodes_style(qapp, tmp_path) -> None:
     dlg.resize(1280, 720)
     pix = dlg.grab()
     assert not pix.isNull()
-    assert "#00C8FF" in dlg._dock.styleSheet()
+    assert "#F59E0B" in dlg._dock.styleSheet()
     dlg.close()
 
 
@@ -504,6 +533,7 @@ def test_main_app_dashboard_wiring_and_hot_save(qapp, tmp_configs) -> None:
     finally:
         app.shutdown()
     assert not app.dashboard.isVisible()
+    _dispose(qapp, app.dashboard, app.hud)
 
 
 def test_main_app_shows_dashboard_unless_minimized(qapp, tmp_configs) -> None:
@@ -514,8 +544,119 @@ def test_main_app_shows_dashboard_unless_minimized(qapp, tmp_configs) -> None:
         assert app._show_dashboard_on_start is False
     finally:
         app.shutdown()
+        _dispose(qapp, app.dashboard, app.hud)
     app2 = ArkControllerApp(qt_app=qapp, config_dir=tmp_configs, dry_run=False, show_dashboard=True)
     try:
         assert app2._show_dashboard_on_start is True
     finally:
         app2.shutdown()
+        _dispose(qapp, app2.dashboard, app2.hud)
+
+
+# ----------------------------------------------------------------------
+# 纯白极简方案（方案 B v2 + H1/H2 混搭）专项
+# ----------------------------------------------------------------------
+DISPATCHER_BUTTON_SPECS = (
+    "A", "B", "X", "Y", "A/RT+A", "Back+Start", "LB/RB", "LS", "RS", "RS/LB/RB",
+    "LT+Back", "LT+LB", "LT+RB", "LT+Start", "LT+十字键", "RT+A", "Start/RT+A",
+    "按住 LT", "松开 LT", "下", "摇杆/十字键", "右/B", "长按Start", "左/上", "左/上/下",
+    "LS/D-Pad", "LS/十字键", "D-Pad", "双击A",
+)
+
+
+def _kinds(spec: str) -> list[tuple[str, str]]:
+    from arkcontroller.overlay.hud_window import parse_button_spec
+
+    return [(g.kind, g.value) for g in parse_button_spec(spec)]
+
+
+def test_button_spec_parser_maps_dispatcher_strings(qapp) -> None:
+    assert _kinds("长按Start") == [("prefix", "长按"), ("start", "")]
+    assert _kinds("Start/RT+A") == [("start", ""), ("sep", "/"), ("cap", "RT"), ("sep", "+"), ("face", "A")]
+    assert _kinds("LS/D-Pad") == [("stick", "LS"), ("sep", "/"), ("dpad", "")]
+    assert _kinds("LS/十字键") == [("stick", "LS"), ("sep", "/"), ("dpad", "")]
+    assert _kinds("摇杆/十字键")[0] == ("stick", "LS")
+    assert _kinds("RS") == [("stick", "RS")]
+    assert _kinds("右/B") == [("dpad", "right"), ("sep", "/"), ("face", "B")]
+    assert _kinds("左/上/下") == [("dpad", "left"), ("sep", "/"), ("dpad", "up"), ("sep", "/"), ("dpad", "down")]
+    assert _kinds("按住 LT") == [("prefix", "按住"), ("cap", "LT")]
+    assert _kinds("松开 LT") == [("prefix", "松开"), ("cap", "LT")]
+    assert _kinds("Back+Start") == [("back", ""), ("sep", "+"), ("start", "")]
+    assert _kinds("双击A") == [("prefix", "双击"), ("face", "A")]
+    assert _kinds("A>A") == [("face", "A"), ("sep", "›"), ("face", "A")]
+    # 未知 token 兜底为文字键帽，不丢失信息
+    assert _kinds("Esc") == [("text", "Esc")]
+
+
+def test_all_dispatcher_prompt_specs_render(qapp) -> None:
+    from PySide6.QtGui import QFont
+
+    from arkcontroller.overlay.hud_window import measure_button_spec, paint_button_spec
+
+    font = QFont("Segoe UI", 8, QFont.Weight.DemiBold)
+    img = QImage(400, 40, QImage.Format.Format_ARGB32)
+    for spec in DISPATCHER_BUTTON_SPECS:
+        img.fill(QColor(0, 0, 0, 0))
+        p = QPainter(img)
+        try:
+            end = paint_button_spec(p, spec, 4.0, 20.0, font)
+        finally:
+            p.end()
+        width = measure_button_spec(spec, font)
+        assert width > 0 and abs((end - 4.0) - width) < 0.01, spec
+        assert width < 260, spec
+        assert _non_transparent_pixels(img, step=2) > 10, spec
+
+
+def test_hud_bottom_bar_with_real_dispatcher_prompts(qapp) -> None:
+    hud = HUDWindow()
+    prompts = [PromptItem(s, "操作") for s in DISPATCHER_BUTTON_SPECS[:10]]
+    img = _render(hud, _snapshot(prompts=prompts))
+    assert _non_transparent_pixels(img) > 200
+
+
+def test_hud_pending_focus_detection(qapp) -> None:
+    assert HUDWindow._is_pending(_snapshot(focus_label="商店 3 · 再按A购买"))
+    assert HUDWindow._is_pending(_snapshot(focus_label="卡片 2 · 待确认"))
+    assert HUDWindow._is_pending(_snapshot(holding_source_norm=(0.3, 0.7), deploy_state=DeployState.HOLDING_UNIT))
+    assert not HUDWindow._is_pending(_snapshot())
+
+
+def test_dashboard_white_theme_controls(qapp, dashboard) -> None:
+    from arkcontroller.overlay.dashboard_window import AmberCheckBox, CheckRow, LineButton
+
+    # 右上两颗按钮统一为白底细边 LineButton
+    assert isinstance(dashboard.btn_reload, LineButton)
+    assert isinstance(dashboard.btn_calibrate, LineButton)
+    assert type(dashboard.btn_reload) is type(dashboard.btn_calibrate)
+    assert "启动校准向导" in dashboard.btn_calibrate.text()
+    # 快捷开关为空心框黄勾 CheckRow
+    for t in (dashboard.toggle_pause, dashboard.toggle_overlay, dashboard.toggle_native,
+              dashboard.toggle_dpad, dashboard.toggle_auto_shop, dashboard.toggle_vibration,
+              dashboard.toggle_retreat):
+        assert isinstance(t, CheckRow)
+    # 勾选框渲染：勾选后框内出现琥珀色像素，且框内其余为白色（无大面积填充）
+    row = CheckRow("测试", "说明")
+    row.resize(240, 44)
+    row.setChecked(True)
+    img = row.grab().toImage()
+    amber = sum(
+        1 for y in range(7, 21) for x in range(1, 15)
+        if img.pixelColor(x, y).red() > 200 and 100 < img.pixelColor(x, y).green() < 190
+        and img.pixelColor(x, y).blue() < 80
+    )
+    white = sum(1 for y in range(7, 21) for x in range(1, 15) if img.pixelColor(x, y).lightness() > 245)
+    assert amber > 3
+    assert white > amber
+    cb = AmberCheckBox("棋盘透视")
+    cb.setChecked(True)
+    assert not cb.grab().isNull()
+
+
+def test_dashboard_header_status_texts(qapp, dashboard) -> None:
+    dashboard.push_runtime_status(DashboardRuntimeStatus(gamepad_connected=True, window_found=True,
+                                                         is_foreground=True, paused=False))
+    dashboard._flush_pending()
+    texts = dashboard.header_status_texts()
+    assert "手柄在线" in texts
+    assert any("明日方舟" in t for t in texts)
