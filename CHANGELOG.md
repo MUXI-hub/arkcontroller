@@ -2,6 +2,23 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [0.3.3] - 2026-11-22
+
+### 新增、优化与修复 (Added, Changed & Fixed)
+- **零色相三联结构商店识别 + 三套卫戍主题全按钮置灰加固 (`arkcontroller.vision.scene_detector`)**：
+  - 彻底解决资源耗尽/条件受限时「刷新 + 冻结」双按钮同时变灰导致 `_detect_shop_open_heuristic` 误判商店关闭、整备/棋盘退回非缩放坐标的痛点：在保留色相快路径的基础上，新增零色相三联结构通道 `_has_real_pc_shop_open_structure`（上移黑底白字商店横幅 + 冻结/刷新双按钮底缘梯度 + 最右 4 固定槽竖边峰与 3 条暗缝联合判定）；
+  - `_detect_shop_slot_count_heuristic` 移除顶部双按钮色相硬门控并补齐低亮置灰升级卡兜底分支（搭配左邻排斥防止卡槽误判）；`_eval_real_pc_prep_banner` 新增乌萨斯主题二准备按钮置灰兜底（辉光管数字区 + 顶部暗边 + 灰帽特征），经三主题 7 图 × 三档置灰亮度（21/21）仿真 100% 稳定识别。
+- **Boss 战右侧分配 3D 棋盘与装备台水平镜像自动检测与动态切换 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 实机测绘确认多人 Boss 战分配至右侧时仅 3D 棋盘（`4x7`）与 5 槽装备台沿 `u_axis_normal ≈ 0.4709` 水平镜像，10 槽整备区与底部 2D 商店及所有按钮均保持原位不镜像；
+  - `configs/stronghold_layout_16_9.json` 与 `LayoutProfile` 新增实测 `mirrored_board_quad`（保持逻辑左→右列序）与 `mirrored_equip_zone`（`equip_mirrored`），`resolve_board_quad` / `resolve_equip_zone` / `resolve_bench_zone` 扩展关键字参数 `mirrored: bool = False`（`mirrored=True` 时基于镜像基准直接复用 `view_overrides` 镜头缩放矩阵并跳过静态非镜像覆写，`bench_zone` 保持不镜像），同时兼容旧版 JSON 缺省回退；
+  - `SceneDetector` 新增 `SceneDetectionResult.board_mirrored`、双态（`shop_open` / `normal`）非遮挡红蓝箱特征检测与防抖锁存 `_latched_board_mirrored`（在 `unit_selected`、队友抽屉、`MODAL_CHOICE`、`MODAL_CONFIRM` 期间稳定保持上一锁存状态，切至 `UNKNOWN_FREE_CURSOR` 或 `reset()` 时清零）；
+  - `ControlDispatcher` 预建 `mirrored in (False, True)` 双套三视图 `board`/`equip` 映射器实时切换，在 `HUDStateSnapshot.board_mirrored` 暴露状态，并在局内 `board_mirrored=True` 时于 HUD 顶部焦点签简洁追加 ` · 镜像战场` 标识。
+- **超过 7 枚盟约任意水平滚动相位精确吸附 + 满层高光徽章兼容 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - 针对滑动盟约栏后徽章停留在任意非对称水平位置以及满层高光金色圆环场景，`SceneDetector` 新增 `SceneDetectionResult.covenant_centers_u`、暗芯亮环 + 满层高光饱和双通道圆环评分、向量化 `2px` 局部带扫频与 `phi ∈ [0, 80)` 梳状相位匹配 + 单环微调 + 三重充要溢出判据（经 82 帧连续像素滚动仿真 100% 保持溢出且圆心最大误差 `<= 1.0px`）；
+  - `ControlDispatcher` 在 `FocusZone.TOP_INFO` 优先直接使用 `covenant_centers_u` 实测圆心生成吸附选框与点击坐标（空元组自动回退公式），且在可见盟约数因滑动边界在 `7 ↔ 6` 间波动时将焦点稳留在 `[1, new_count]` 盟约区内绝不误跳右侧出怪放大镜。
+- **共享/录屏可见模式（`WDA_NONE`）宽纯白 HUD 顶签 + Toast 抗遮挡加固 (`arkcontroller.vision.scene_detector`)**：
+  - `_has_stronghold_in_game_chrome` 在 `esc_red >= 0.22` 硬门禁后新增顶部左右两翼未被居中 HUD 覆盖黑条兜底（`wings_dk >= 0.70`），彻底避免开启 `WDA_NONE` 且同时展示宽顶签（含 ` · 镜像战场`）与第 2 行纯白 Toast 时误跌回 `UNKNOWN_FREE_CURSOR` 及清空镜像锁存。
+
 ## [0.3.2] - 2026-11-22
 
 ### 新增、变更与修复 (Added, Changed & Fixed)
