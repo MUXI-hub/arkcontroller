@@ -39,11 +39,11 @@ flowchart TD
         DISP["ControlDispatcher (局外自由鼠标 / 局内焦点路由)"]
     end
 
-    subgraph OverlayLayer["PySide6 悬浮与桌面主控层"]
-        HUD["HUDWindow (PRTS 切角透明穿透叠加层 + WDA_EXCLUDEFROMCAPTURE)"]
-        DASH["PRTSDashboardWindow (四分区主控台 / 60ms 遥测仪 / 参数热保存)"]
-        CALUI["CalibrationDialog (拖拽透视网格与模板采样器)"]
-        TRAY["ControllerTray (菱形矢量图标深色托盘菜单)"]
+    subgraph OverlayLayer["PySide6 纯白极简悬浮与桌面主控层"]
+        HUD["HUDWindow (H1/H2 极简穿透叠加层 / 矢量手柄图示 / WDA_EXCLUDEFROMCAPTURE)"]
+        DASH["PRTSDashboardWindow (方案B v2 四分区主控台 / 16Hz 遥测仪 / 参数热保存)"]
+        CALUI["CalibrationDialog (白底细边校准栏 / 透视网格与模板采样器)"]
+        TRAY["ControllerTray (白底琥珀点矢量图标 / 浅色高对比托盘菜单)"]
     end
 
     GP --> XI
@@ -226,7 +226,7 @@ arkcontroller/
 │   ├── input/                       # XInput 驱动、手势引擎与 Win32 SendInput 合成器
 │   ├── vision/                      # 异步截屏、双层场景识别与模板校准器
 │   ├── control/                     # 透视网格映射、两段式部署状态机与调度中枢
-│   ├── overlay/                     # PRTS 透明穿透 HUD、PRTS 桌面主控台、校准向导与系统托盘
+│   ├── overlay/                     # 纯白极简穿透 HUD (含通用手柄矢量图示)、方案B v2 桌面主控台、校准向导与托盘
 │   └── main.py                      # CLI 入口（含 --minimized）与多频事件循环装配
 ├── tests/                           # 7 个核心模块单元测试套件（含离屏 UI 测试）
 └── docs/                            # 架构设计与手柄操作手册
