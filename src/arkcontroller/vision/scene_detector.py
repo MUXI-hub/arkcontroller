@@ -720,6 +720,24 @@ class SceneDetector:
         return hit
 
     @staticmethod
+    def _has_real_pc_combat_cost_bar(gray: np.ndarray, hsv: np.ndarray) -> bool:
+        """检测实机作战期右下费用栏（``◆ C <费用>`` 纯白数字 + 深色背景 + 底部白色回复进度条）。"""
+        roi_hsv = hsv[592:652, 1158:1278]
+        if roi_hsv.size == 0:
+            return False
+        white_ratio = float(
+            ((roi_hsv[:, :, 1] <= 38) & (roi_hsv[:, :, 2] >= 205)).mean()
+        )
+        dark_ratio = float((roi_hsv[:, :, 2] <= 75).mean())
+        if white_ratio < 0.10 or dark_ratio < 0.15:
+            return False
+        bar_strip = gray[636:652, 1160:1278]
+        if bar_strip.size == 0:
+            return False
+        bar_row_max = float(bar_strip.mean(axis=1).max())
+        return bar_row_max >= 140.0
+
+    @staticmethod
     def _detect_emote_panel_open_heuristic(gray: np.ndarray, hsv: np.ndarray) -> bool:
         """去色相结构化检测左下角 2x3 深黑圆角「交流」表情面板是否处于展开状态。
 
@@ -1189,6 +1207,32 @@ class SceneDetector:
                 choice_count=3,
                 unit_selected=unit_selected,
                 shop_slot_count=shop_slot_count,
+                covenant_count=covenant_count,
+                covenant_overflow=covenant_overflow,
+                has_teammates=has_teammates,
+                emote_panel_open=emote_panel_open,
+            )
+
+        # 2a.5. 实机作战期右下费用栏「◆ C <费用>」直判（置于 2b 之前，根除右下地形/队友抽屉误判为休整期）
+        if in_game_chrome and self._has_real_pc_combat_cost_bar(gray, hsv):
+            unit_selected = self._detect_unit_selected(frame, unit_template)
+            covenant_count, covenant_overflow = self._detect_covenants_heuristic(
+                hsv, gray
+            )
+            has_teammates = self._detect_teammates_heuristic(
+                gray, unit_selected=unit_selected
+            )
+            emote_panel_open = (
+                self._detect_emote_panel_open_heuristic(gray, hsv)
+                if not unit_selected
+                else False
+            )
+            return SceneDetectionResult(
+                scene=GameScene.BATTLE_COMBAT,
+                confidence=0.86,
+                shop_open=False,
+                choice_count=3,
+                unit_selected=unit_selected,
                 covenant_count=covenant_count,
                 covenant_overflow=covenant_overflow,
                 has_teammates=has_teammates,

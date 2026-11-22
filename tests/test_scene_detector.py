@@ -1314,11 +1314,12 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
             bool | None,
         ]
     ] = [
-        # v0.3.2 新增 4 张多主题 / 多盟约 / >7 溢出实机截图
+        # v0.3.1 / v0.3.2 新增多主题、多盟约、>7 溢出与作战期展开队友抽屉实机截图
         (a7_up / "media_1795325671726_73b3d7cb.jpg", GameScene.BATTLE_PREP, True, 4, None, None, False, None, 3, False),
         (a7_up / "media_1795325671732_1bc865a7.jpg", GameScene.BATTLE_PREP, True, 5, None, None, False, None, 4, False),
         (a7_up / "media_1795325671739_1e44ed7e.jpg", GameScene.BATTLE_PREP, True, 5, None, None, False, None, 7, False),
         (a7_up / "media_1795325671744_308f0863.jpg", GameScene.BATTLE_PREP, True, 5, None, None, False, None, 7, True),
+        (a7_up / "media_1795328987598_9f30b6b8.jpg", GameScene.BATTLE_COMBAT, False, None, None, None, False, None, 0, False),
         # 历史核心实机截图回归
         (a7_up / "media_1795266584081_fc922d8f.jpg", GameScene.MODAL_CHOICE, False, None, 6, None, False, None, None, False),
         (a7_up / "media_1795266595030_fc375d1b.jpg", GameScene.MODAL_CONFIRM, False, None, None, None, False, False, None, False),
@@ -1386,6 +1387,8 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
             assert res.covenant_overflow is exp_covenant_overflow, (
                 f"{img_path.name}: covenant_overflow mismatch {res}"
             )
+        if img_path.name == "media_1795328987598_9f30b6b8.jpg":
+            assert res.has_teammates is True, f"{img_path.name}: expected has_teammates=True, got {res}"
 
     # 额外可选校验：桌面实机截图 media_0.png 中带蓝紫底部发光的真实紫红 [G] 升级卡
     media0_path = a7_dir / ".system_generated" / "steps" / "291" / "media_0.png"
@@ -1926,6 +1929,74 @@ def test_v032_hue_agnostic_emote_panel_sparse_pages(tmp_path: Path) -> None:
     r_no_edge = detector.detect(f_no_right_edge)
     assert r_no_edge.scene == GameScene.BATTLE_PREP
     assert r_no_edge.emote_panel_open is False
+
+
+def _draw_combat_cost_bar(frame: np.ndarray, *, with_progress_bar: bool = True) -> None:
+    """在 1280x720 帧右下角 (x=1158..1278, y=592..652) 绘制实机作战期「◆ C 23」费用栏与底部白色进度条。"""
+    # 深色费用栏底板（V=32 <= 75）
+    cv2.rectangle(frame, (1158, 592), (1278, 652), (28, 30, 32), -1)
+    # 纯白低饱和「◆ C 23」图标与数字色块（占比约 22% >= 0.10，S=0, V=242 >= 205）
+    cv2.rectangle(frame, (1168, 602), (1188, 624), (242, 242, 242), -1)
+    cv2.rectangle(frame, (1198, 598), (1266, 628), (240, 240, 240), -1)
+    # 底部贯穿白色费用回复进度条（y=642..648，行均值约 235 >= 140）
+    if with_progress_bar:
+        cv2.rectangle(frame, (1160, 642), (1276, 648), (236, 236, 236), -1)
+
+
+def test_v032_combat_cost_bar_detection_and_teammate_drawer(tmp_path: Path) -> None:
+    """验证实机作战期右下费用栏「◆ C」直判 BATTLE_COMBAT，根除右下亮地形与队友抽屉误判为休整期+商店展开。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 1. 构造作战期 + 底部 10 格条纹 + 右下高饱和土黄地面（故意使 ready_vivid_ratio≈0.55 落入旧 2b 休整误判区间）
+    #    + 左侧 4 名联机队友头像框 + 右下费用栏「◆ C 23」+ 顶部 3 枚盟约
+    frame = _make_battle_prep_frame(shop_open=True)
+    # 右下角改为高饱和土黄沙地背景（覆盖原准备按钮），再在其上绘制费用栏
+    cv2.rectangle(frame, (1035, 555), (1279, 710), (45, 165, 220), -1)
+    _draw_combat_cost_bar(frame, with_progress_bar=True)
+    # 左侧 4 名联机队友头像框（匹配 _detect_teammates_heuristic）
+    for mx, my, mw, mh in (
+        (19, 160, 67, 66),
+        (19, 235, 67, 67),
+        (19, 311, 67, 66),
+        (19, 387, 67, 66),
+    ):
+        cv2.rectangle(frame, (mx, my), (mx + mw, my + mh), (75, 78, 84), -1)
+        cv2.rectangle(frame, (mx, my), (mx + mw, my + mh), (238, 240, 242), 2)
+    # 顶部 3 枚银灰盟约
+    for i in range(3):
+        _draw_covenant_badge(frame, 640.0 + (i - 1.0) * 80.0, theme="t2")
+
+    res = detector.detect(frame)
+    assert res.scene == GameScene.BATTLE_COMBAT
+    assert res.confidence == 0.86
+    assert res.shop_open is False
+    assert res.shop_slot_count is None
+    assert res.has_teammates is True
+    assert res.covenant_count == 3
+    assert res.covenant_overflow is False
+    assert res.emote_panel_open is False
+
+    # 2. 抹除底部白色回复进度条 -> _has_real_pc_combat_cost_bar 必须返回 False
+    no_bar = frame.copy()
+    _draw_combat_cost_bar(no_bar, with_progress_bar=False)
+    assert (
+        SceneDetector._has_real_pc_combat_cost_bar(
+            cv2.cvtColor(no_bar, cv2.COLOR_BGR2GRAY),
+            cv2.cvtColor(no_bar, cv2.COLOR_BGR2HSV),
+        )
+        is False
+    )
+
+    # 3. 缺少局内双锚点（局外画面）即使右下恰好存在高对比白条，也必须严守 UNKNOWN_FREE_CURSOR
+    out_of_game = frame.copy()
+    out_of_game[0:85, 0:1280] = (195, 198, 202)
+    assert detector.detect(out_of_game).scene == GameScene.UNKNOWN_FREE_CURSOR
+
+    # 4. 休整期强特征（2a）优先级高于 2a.5：存在右上粉红准备按钮时仍稳定判为 BATTLE_PREP
+    prep_priority = frame.copy()
+    cv2.rectangle(prep_priority, (1120, 100), (1255, 140), (110, 70, 235), -1)
+    assert detector.detect(prep_priority).scene == GameScene.BATTLE_PREP
+
 
 
 
