@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 
@@ -29,6 +30,15 @@ STANDARD_WIDTH: int = 1280
 STANDARD_HEIGHT: int = 720
 DEFAULT_MATCH_THRESHOLD: float = 0.82
 DEFAULT_SEARCH_PADDING: float = 0.02
+
+# 顶部盟约 ScrollRect 实测几何常量（1280x720 基准）
+_COVENANT_CLIP_LEFT: float = 336.0
+_COVENANT_CLIP_RIGHT: float = 944.0
+_COVENANT_FULL_MIN_X: float = 358.0
+_COVENANT_FULL_MAX_X: float = 922.0
+_COVENANT_STEP_PX: float = 80.0
+_COVENANT_CY: float = 87.0
+_COVENANT_SCAN_X_GRID: np.ndarray = np.arange(354, 928, 2, dtype=np.float32)
 
 # 盟约圆形徽章 36 点圆环采样表（r=22.5px 法向梯度用，预计算避免逐帧重复三角运算）
 _COVENANT_RING_ANGLES: np.ndarray = np.linspace(0.0, 2.0 * np.pi, 36, endpoint=False)
@@ -83,6 +93,8 @@ class SceneDetectionResult:
     has_teammates: bool = False
     emote_panel_open: bool = False
     confirm_has_dont_ask: bool = True
+    board_mirrored: bool = False
+    covenant_centers_u: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -240,6 +252,7 @@ class SceneDetector:
         )
         self._pending_scene: GameScene | None = None
         self._pending_count: int = 0
+        self._latched_board_mirrored: bool = False
 
         self.reload_templates()
 
@@ -250,7 +263,7 @@ class SceneDetector:
             return len(self._scene_templates)
 
     def reset(self) -> None:
-        """重置防抖状态至初始未知自由光标状态。"""
+        """重置防抖状态与镜像锁存至初始未知自由光标状态。"""
         with self._lock:
             self._stable_result = SceneDetectionResult(
                 scene=GameScene.UNKNOWN_FREE_CURSOR,
@@ -260,6 +273,7 @@ class SceneDetector:
             )
             self._pending_scene = None
             self._pending_count = 0
+            self._latched_board_mirrored = False
 
     def reload_templates(self) -> None:
         """扫描并重新加载 ``templates_dir`` 下的所有本地模板与 ROI 元数据。"""
@@ -391,8 +405,8 @@ class SceneDetector:
                     choice_count=3,
                 )
 
-            raw_result = self._classify_single_frame(normalized)
-            return self._apply_debounce(raw_result)
+            raw_result, mirror_obs = self._classify_single_frame_with_mirror_obs(normalized)
+            return self._apply_debounce(raw_result, mirror_obs=mirror_obs)
         except Exception:
             logger.exception("场景识别发生未预期异常，安全回退为 UNKNOWN_FREE_CURSOR")
             return SceneDetectionResult(
@@ -403,7 +417,14 @@ class SceneDetector:
             )
 
     def _classify_single_frame(self, frame: np.ndarray) -> SceneDetectionResult:
-        """对单帧执行“模板优先 + 启发式回退”分类。"""
+        """对单帧执行“模板优先 + 启发式回退”分类（不更新防抖与锁存状态）。"""
+        result, _ = self._classify_single_frame_with_mirror_obs(frame)
+        return result
+
+    def _classify_single_frame_with_mirror_obs(
+        self, frame: np.ndarray
+    ) -> tuple[SceneDetectionResult, bool | None]:
+        """对单帧执行分类，同时返回 3D 战场镜像观测值（``True``/``False``/``None``）。"""
         with self._lock:
             templates = list(self._scene_templates)
             shop_template = self._shop_open_template
@@ -427,9 +448,11 @@ class SceneDetector:
             selected_choice_index: int | None = None
             covenant_count: int | None = None
             covenant_overflow = False
+            covenant_centers_u: tuple[float, ...] = ()
             has_teammates = False
             emote_panel_open = False
             confirm_has_dont_ask = True
+            mirror_obs: bool | None = None
             gray_lazy: np.ndarray | None = None
             hsv_lazy: np.ndarray | None = None
 
@@ -437,12 +460,16 @@ class SceneDetector:
                 shop_open = self._detect_shop_open(frame, shop_template)
                 unit_selected = self._detect_unit_selected(frame, unit_template)
                 if shop_open:
-                    shop_slot_count = self._detect_shop_slot_count_heuristic(frame)
+                    shop_slot_count = self._detect_shop_slot_count_heuristic(
+                        frame, shop_open=True
+                    )
                 gray_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 hsv_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                covenant_count, covenant_overflow = self._detect_covenants_heuristic(
-                    hsv_lazy, gray_lazy
-                )
+                (
+                    covenant_count,
+                    covenant_overflow,
+                    covenant_centers_u,
+                ) = self._detect_covenants_dynamic(hsv_lazy, gray_lazy)
                 has_teammates = self._detect_teammates_heuristic(
                     gray_lazy, unit_selected=unit_selected
                 )
@@ -450,6 +477,9 @@ class SceneDetector:
                     emote_panel_open = self._detect_emote_panel_open_heuristic(
                         gray_lazy, hsv_lazy
                     )
+                mirror_obs = self._observe_board_mirrored_heuristic(
+                    hsv_lazy, shop_open=shop_open, unit_selected=unit_selected
+                )
             elif best_scene == GameScene.MODAL_CHOICE:
                 shop_open = False
                 gray_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -467,9 +497,11 @@ class SceneDetector:
                 unit_selected = self._detect_unit_selected(frame, unit_template)
                 gray_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 hsv_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                covenant_count, covenant_overflow = self._detect_covenants_heuristic(
-                    hsv_lazy, gray_lazy
-                )
+                (
+                    covenant_count,
+                    covenant_overflow,
+                    covenant_centers_u,
+                ) = self._detect_covenants_dynamic(hsv_lazy, gray_lazy)
                 has_teammates = self._detect_teammates_heuristic(
                     gray_lazy, unit_selected=unit_selected
                 )
@@ -477,23 +509,31 @@ class SceneDetector:
                     emote_panel_open = self._detect_emote_panel_open_heuristic(
                         gray_lazy, hsv_lazy
                     )
-            return SceneDetectionResult(
-                scene=best_scene,
-                confidence=round(best_score, 4),
-                shop_open=shop_open,
-                choice_count=choice_count,
-                unit_selected=unit_selected,
-                shop_slot_count=shop_slot_count,
-                selected_choice_index=selected_choice_index,
-                covenant_count=covenant_count,
-                covenant_overflow=covenant_overflow,
-                has_teammates=has_teammates,
-                emote_panel_open=emote_panel_open,
-                confirm_has_dont_ask=confirm_has_dont_ask,
+                mirror_obs = self._observe_board_mirrored_heuristic(
+                    hsv_lazy, shop_open=False, unit_selected=unit_selected
+                )
+            return (
+                SceneDetectionResult(
+                    scene=best_scene,
+                    confidence=round(best_score, 4),
+                    shop_open=shop_open,
+                    choice_count=choice_count,
+                    unit_selected=unit_selected,
+                    shop_slot_count=shop_slot_count,
+                    selected_choice_index=selected_choice_index,
+                    covenant_count=covenant_count,
+                    covenant_overflow=covenant_overflow,
+                    has_teammates=has_teammates,
+                    emote_panel_open=emote_panel_open,
+                    confirm_has_dont_ask=confirm_has_dont_ask,
+                    board_mirrored=bool(mirror_obs) if mirror_obs is not None else False,
+                    covenant_centers_u=covenant_centers_u,
+                ),
+                mirror_obs,
             )
 
         # (b) 第二层：启发式视觉特征回退
-        return self._detect_heuristic(frame, shop_template, unit_template)
+        return self._detect_heuristic_with_mirror_obs(frame, shop_template, unit_template)
 
     @staticmethod
     def _match_template(frame: np.ndarray, tpl: _SceneTemplate) -> float:
@@ -542,7 +582,9 @@ class SceneDetector:
 
         局内休整/作战/出怪预览画面稳定共现两项标志性 HUD 锚点：
         1. 左上角深红色退出门按钮 ``hsv[12:76, 16:96]``（占比 >= 0.22，兼容联机弹幕局部遮挡）；
-        2. 顶部中央深黑回合/状态信息栏 ``hsv[6:66, 410:870]``（``V <= 70`` 占比 >= 0.42）。
+        2. 顶部中央深黑回合/状态信息栏 ``hsv[6:66, 410:870]``（``V <= 70`` 占比 >= 0.42），
+           或开启 ``WDA_NONE`` 纯白双行 HUD 胶囊+Toast 覆盖中段时，由未被遮挡的顶部两翼黑条
+           ``hsv[6:66, 385:475] ∪ [805:895]``（``V <= 70`` 占比 >= 0.70）兜底放行。
         """
         esc_roi = hsv[12:76, 16:96]
         esc_red = float(
@@ -557,7 +599,13 @@ class SceneDetector:
             return False
 
         top_dk = float((hsv[6:66, 410:870, 2] <= 70).mean())
-        return top_dk >= 0.42
+        if top_dk >= 0.42:
+            return True
+
+        wings_v = np.concatenate(
+            [hsv[6:66, 385:475, 2], hsv[6:66, 805:895, 2]], axis=1
+        )
+        return float((wings_v <= 70).mean()) >= 0.70
 
     @staticmethod
     def _measure_top_right_ready_pink_ratio(hsv: np.ndarray) -> float:
@@ -674,13 +722,37 @@ class SceneDetector:
             ).mean()
         )
 
+    @staticmethod
+    def _measure_t2_nixie_and_gray_ready(hsv: np.ndarray) -> tuple[float, float, float]:
+        """测量乌萨斯 Theme 2 准备就绪置灰胶囊、上方暗边及顶部辉光管暖橙色占比。"""
+        r_inner = hsv[100:136, 1128:1252]
+        gray_cap = float(
+            (
+                (r_inner[:, :, 1] <= 85)
+                & (r_inner[:, :, 2] >= 75)
+                & (r_inner[:, :, 2] <= 245)
+            ).mean()
+        )
+        r_outer_top = hsv[86:98, 1128:1252]
+        top_dark = float((r_outer_top[:, :, 2] <= 115).mean())
+        nixie = hsv[28:84, 1132:1246]
+        nixie_orange = float(
+            (
+                (nixie[:, :, 0] >= 8)
+                & (nixie[:, :, 0] <= 28)
+                & (nixie[:, :, 1] >= 120)
+                & (nixie[:, :, 2] >= 120)
+            ).mean()
+        )
+        return (gray_cap, top_dark, nixie_orange)
+
     @classmethod
     def _eval_real_pc_prep_banner(cls, hsv: np.ndarray) -> tuple[bool, float]:
         """评估当前是否处于三套官方主题之一的实机卫戍休整期并返回 ``(hit, confidence)``。
 
         在 ``_has_stronghold_in_game_chrome(hsv)`` 双锚点门禁下，统一覆盖：
         - 主题一：粉红准备按钮 / 顶紫框+放大镜 / 左右双放大镜共现（防纯白 Toast 瞬态遮挡紫框）；
-        - 主题二：乌萨斯浅灰绿内胶囊 + 上方暗边 + 右金黄放大镜；
+        - 主题二：乌萨斯浅灰绿内胶囊（含置灰态+暖橙辉光管兜底）+ 上方暗边 + 右金黄放大镜；
         - 主题三：青绿准备按钮 / 顶青绿框+右金黄放大镜。
         """
         if not cls._has_stronghold_in_game_chrome(hsv):
@@ -710,6 +782,16 @@ class SceneDetector:
         # 防关闭隐藏 HUD 后第二行 Toast 瞬态遮挡顶部紫/青框：左右双放大镜同时出现仍稳判休整期
         if lm_cyan >= 0.14 and rm_amber >= 0.10:
             return (True, 0.82)
+
+        # 乌萨斯 Theme 2 准备就绪胶囊置灰兜底（多人已准备或低亮置灰时仍保留暖橙辉光管 + 上方暗边 + 灰阶胶囊）
+        t2_gray_cap, t2_gray_top_dark, t2_nixie = cls._measure_t2_nixie_and_gray_ready(hsv)
+        if (
+            rm_amber >= 0.05
+            and t2_gray_top_dark >= 0.45
+            and t2_gray_cap >= 0.45
+            and t2_nixie >= 0.12
+        ):
+            return (True, 0.84)
 
         return (False, 0.0)
 
@@ -803,15 +885,66 @@ class SceneDetector:
         )
         return hp_blue >= 0.26 and sell_gold < 0.04
 
+    @classmethod
+    def _has_real_pc_shop_open_structure(
+        cls, gray: np.ndarray, hsv: np.ndarray
+    ) -> bool:
+        """零色相三联结构通道：在冻结/刷新双灰（0 饱和度）时精准识别实机商店展开。
+
+        同时校验：
+        1. 右侧「剩余可放置角色」上移黑底白字横幅（``gray[375:405, 1105:1270]``）；
+        2. 冻结/刷新双按钮灰阶底缘梯度（``gray[474:490, 980:1098]`` 与 ``[1135:1252]``）；
+        3. 底部最右 4 个固定卡槽竖边峰与 3 条 5px 卡间暗缝结构。
+        """
+        b_hi = gray[375:405, 1105:1270]
+        if b_hi.size == 0:
+            return False
+        b_hi_dark = float((b_hi <= 60).mean())
+        b_hi_white = float((b_hi >= 175).mean())
+        if b_hi_dark < 0.45 or b_hi_white < 0.05:
+            return False
+
+        frz_bot_e = float(
+            np.abs(np.diff(gray[474:490, 980:1098].astype(np.float32), axis=0))
+            .mean(axis=1)
+            .max()
+        )
+        ref_bot_e = float(
+            np.abs(np.diff(gray[474:490, 1135:1252].astype(np.float32), axis=0))
+            .mean(axis=1)
+            .max()
+        )
+        if frz_bot_e < 6.0 or ref_bot_e < 8.0:
+            return False
+
+        v_ch = hsv[:, :, 2]
+        seam_xs = (450, 604, 612, 766, 774, 928, 936, 1090)
+        seam_strong = sum(
+            1
+            for x in seam_xs
+            if cls._measure_vertical_edge_strength(v_ch, x, half_win=10) >= 16.0
+        )
+        if seam_strong < 4:
+            return False
+
+        gap_v = np.concatenate(
+            [v_ch[545:695, x - 2 : x + 3] for x in (608, 770, 932)], axis=1
+        )
+        gap_dark = float((gap_v <= 45).mean())
+        return gap_dark >= 0.20
+
     @staticmethod
     def _detect_shop_open_heuristic(frame: np.ndarray) -> bool:
-        """判断休整期商店是否处于展开状态（脱离资金刷新变灰依赖，兼容实机与合成测试帧）。"""
+        """判断休整期商店是否处于展开状态（兼容有色快路径、双灰零色相结构通道及合成测试帧）。"""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         refresh_yellow, freeze_blue = SceneDetector._measure_shop_action_buttons(hsv)
 
-        # 实机休整期画面（含粉红准备按钮态、0 资金灰刷新态及联机 LOADING 紫框+放大镜态）
+        # 实机休整期画面（先走双按钮色相快路径，双灰时退回零色相三联结构通道）
         if SceneDetector._has_real_pc_prep_banner(hsv):
-            return (freeze_blue >= 0.45) or (refresh_yellow >= 0.25 and freeze_blue >= 0.25)
+            if (freeze_blue >= 0.45) or (refresh_yellow >= 0.25 and freeze_blue >= 0.25):
+                return True
+            gray_real = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            return SceneDetector._has_real_pc_shop_open_structure(gray_real, hsv)
 
         # 兼容非实机布局/自定义主题及单元测试合成帧
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -880,10 +1013,11 @@ class SceneDetector:
     def _has_shop_upgrade_card(cls, hsv: np.ndarray, x1: int, x2: int) -> bool:
         """判断给定横向区间是否存在三主题通用的「升级商店 (LEVEL)」卡片。
 
-        兼容主题一灰/紫红 ``[G]``、主题二绿黑 CRT ``LEVEL I [G]`` 及主题三灰/青绿 ``LEVEL III``：
-        1. 左右 ``±12px`` 竖边局部峰值达标（``edge_l >= 12.0, edge_r >= 14.0``）；
+        兼容主题一灰/紫红 ``[G]``、主题二绿黑 CRT ``LEVEL I [G]``、主题三灰/青绿 ``LEVEL III``
+        及三主题低亮置灰压暗态：
+        1. 左右 ``±12px`` 竖边局部峰值达标（常规 ``edge_l >= 12.0``、置灰兜底 ``>= 11.0``，``edge_r >= 14.0``）；
         2. 非贴边升级卡（``x1 >= 44``）执行左邻双排斥（三主题底条 ``>= 0.25`` 或更左商品卡外框 ``edge(x1-44)>=18 & edge_l<16``）；
-        3. 内容双分支：亮框态（T1 灰/紫红、T3 青绿）或暗屏高对比态（T2 绿黑 CRT、T3 灰态）。
+        3. 内容三分支：亮框态、暗屏高对比态与低亮置灰兜底态。
         """
         v_ch = hsv[:, :, 2]
         v_level = v_ch[552:628, x1:x2]
@@ -893,7 +1027,7 @@ class SceneDetector:
 
         edge_l = cls._measure_vertical_edge_strength(v_ch, x1, half_win=12)
         edge_r = cls._measure_vertical_edge_strength(v_ch, x2, half_win=12)
-        if edge_l < 12.0 or edge_r < 14.0:
+        if edge_l < 11.0 or edge_r < 14.0:
             return False
 
         # 若 x1 >= 44 且紧邻左侧外部属于更左一槽商品卡（连续底条或更左强外框+弱内纹），排斥为非升级卡
@@ -910,25 +1044,28 @@ class SceneDetector:
                 return False
 
         # 分支 (a)：亮态升级卡（T1 灰态/紫红 [G]、T3 青绿 [G]）
-        level_bright = float((v_level > 120).mean())
-        all_bright = float((v_all > 105).mean())
-        if level_bright >= 0.25 and all_bright >= 0.20:
-            return True
+        if edge_l >= 12.0:
+            level_bright = float((v_level > 120).mean())
+            all_bright = float((v_all > 105).mean())
+            if level_bright >= 0.25 and all_bright >= 0.20:
+                return True
 
-        # 分支 (b)：暗屏态升级卡（T2 绿黑 CRT LEVEL I [G] 与 T3 灰态 LEVEL III）
+        # 分支 (b)/(c)：暗屏态升级卡（T2 绿黑 CRT / T3 灰态 LEVEL III）及低亮置灰压暗兜底（V*0.55）
         lvl_std = float(v_level.std())
         lvl_p90 = float(np.percentile(v_level, 90))
         btn_v = v_ch[640:682, x1 + 12 : x2 - 12]
         if btn_v.size == 0:
             return False
         btn_p95 = float(np.percentile(btn_v, 95))
-        return (
+        if (
             lvl_std >= 24.0
             and lvl_p90 >= 120.0
             and btn_p95 >= 140.0
             and edge_l >= 14.0
             and edge_r >= 24.0
-        )
+        ):
+            return True
+        return lvl_std >= 16.0 and lvl_p90 >= 75.0 and btn_p95 >= 82.0
 
     @classmethod
     def _has_shop_item_card(cls, hsv: np.ndarray, x1: int, x2: int) -> bool:
@@ -1047,11 +1184,13 @@ class SceneDetector:
         return False
 
     @classmethod
-    def _detect_shop_slot_count_heuristic(cls, frame: np.ndarray) -> int | None:
+    def _detect_shop_slot_count_heuristic(
+        cls, frame: np.ndarray, *, shop_open: bool | None = None
+    ) -> int | None:
         """检测展开后的卫戍协议商店栏位数（1 本 4 槽 / 2~3 本 5 槽 / 4~6 本 6 槽）。
 
         依据实机精确布局：最右卡槽固定于 x=936..1090，卡片步距 162px，升级卡宽 109px
-        紧贴最左商品卡左侧。升级时向左侧延伸：
+        紧贴最左商品卡左侧。不再依赖双按钮色相硬门控，统一信任 ``shop_open`` 判定结果：
         - 6 槽：升级卡 x=8..117，或无 5 槽升级卡时第 6 槽商品卡/已售空槽 x=126..280；
         - 5 槽：升级卡 x=170..279，或无 4 槽升级卡时第 5 槽商品卡/已售空槽 x=288..442；
         - 4 槽：升级卡 x=332..441（其余兜底默认 4 槽）。
@@ -1059,8 +1198,9 @@ class SceneDetector:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         if not cls._has_real_pc_prep_banner(hsv):
             return None
-        refresh_yellow, freeze_blue = cls._measure_shop_action_buttons(hsv)
-        if not ((freeze_blue >= 0.45) or (refresh_yellow >= 0.25 and freeze_blue >= 0.25)):
+        if shop_open is False:
+            return None
+        if shop_open is None and not cls._detect_shop_open_heuristic(frame):
             return None
 
         has_upg6 = cls._has_shop_upgrade_card(hsv, 8, 117)
@@ -1079,6 +1219,122 @@ class SceneDetector:
         if has_upg4:
             return 4
         return 4
+
+    @staticmethod
+    def _extract_mirror_features(
+        hsv: np.ndarray, *, shop_open: bool
+    ) -> dict[str, float]:
+        """提取 3D 战场左右我方防御箱/蓝紫小电视终端/敌方红门占比特征（区分正向与 Boss 战镜像）。"""
+        if shop_open:
+            y_box = slice(275, 415)
+            y_tv = slice(155, 270)
+            lx_box, rx_box = slice(270, 445), slice(695, 865)
+            lx_tv, rx_tv = slice(245, 390), slice(750, 895)
+            y_red = slice(160, 420)
+        else:
+            y_box = slice(350, 545)
+            y_tv = slice(205, 365)
+            lx_box, rx_box = slice(205, 440), slice(740, 975)
+            lx_tv, rx_tv = slice(180, 385), slice(795, 1000)
+            y_red = slice(180, 520)
+
+        def _blue_tv_ratio(roi: np.ndarray) -> float:
+            mask = (
+                (roi[:, :, 0] >= 103)
+                & (roi[:, :, 0] <= 130)
+                & (roi[:, :, 1] >= 135)
+                & (roi[:, :, 2] >= 120)
+            )
+            return float(mask.mean())
+
+        def _cyan_box_struct(roi: np.ndarray) -> float:
+            mask = (
+                (roi[:, :, 0] >= 85)
+                & (roi[:, :, 0] <= 106)
+                & (roi[:, :, 1] >= 58)
+                & (roi[:, :, 2] >= 165)
+            ).astype(np.uint8)
+            dil = cv2.dilate(mask, np.ones((7, 7), np.uint8), iterations=1)
+            num, labels, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
+            valid_px = 0
+            for lbl in range(1, num):
+                w_c = stats[lbl, cv2.CC_STAT_WIDTH]
+                h_c = stats[lbl, cv2.CC_STAT_HEIGHT]
+                area_c = stats[lbl, cv2.CC_STAT_AREA]
+                if w_c >= 50 and h_c >= 50 and area_c >= 1200:
+                    valid_px += int(mask[labels == lbl].sum())
+            return float(valid_px) / float(max(1, mask.size))
+
+        def _red_spawn_ratio(roi: np.ndarray) -> float:
+            mask = (
+                ((roi[:, :, 0] <= 10) | (roi[:, :, 0] >= 170))
+                & (roi[:, :, 1] >= 130)
+                & (roi[:, :, 2] >= 130)
+            )
+            return float(mask.mean())
+
+        return {
+            "ltv": _blue_tv_ratio(hsv[y_tv, lx_tv]),
+            "rtv": _blue_tv_ratio(hsv[y_tv, rx_tv]),
+            "lbox": _cyan_box_struct(hsv[y_box, lx_box]),
+            "rbox": _cyan_box_struct(hsv[y_box, rx_box]),
+            "lred": _red_spawn_ratio(hsv[y_red, 120:420]),
+            "rred": _red_spawn_ratio(hsv[y_red, 860:1160]),
+        }
+
+    @classmethod
+    def _observe_board_mirrored_heuristic(
+        cls,
+        hsv: np.ndarray,
+        *,
+        shop_open: bool,
+        unit_selected: bool = False,
+    ) -> bool | None:
+        """三态观测 3D 战场左右朝向：``True``=右侧镜像、``False``=左侧正向、``None``=遮挡/无地标维持锁存。"""
+        if unit_selected:
+            return None
+        f = cls._extract_mirror_features(hsv, shop_open=shop_open)
+        right_hit = (
+            f["rtv"] >= 0.020
+            and f["rtv"] >= max(0.015, f["ltv"] * 2.5)
+            and f["lbox"] <= 0.012
+        ) or (
+            f["rbox"] >= 0.020
+            and f["rbox"] >= max(0.015, f["lbox"] * 2.5)
+            and f["ltv"] <= 0.015
+            and f["rred"] <= 0.025
+        )
+        left_hit = (
+            f["ltv"] >= 0.020
+            and f["ltv"] >= max(0.015, f["rtv"] * 2.5)
+            and f["rbox"] <= 0.012
+        ) or (
+            f["lbox"] >= 0.020
+            and f["lbox"] >= max(0.015, f["rbox"] * 2.5)
+            and f["rtv"] <= 0.015
+            and f["lred"] <= 0.025
+        )
+        if right_hit and not left_hit:
+            return True
+        if left_hit and not right_hit:
+            return False
+        return None
+
+    @classmethod
+    def _detect_board_mirrored_heuristic(
+        cls,
+        hsv: np.ndarray,
+        *,
+        shop_open: bool,
+        unit_selected: bool = False,
+    ) -> bool:
+        """单帧判断当前画面是否呈现 Boss 战右侧镜像 3D 舞台地标。"""
+        return (
+            cls._observe_board_mirrored_heuristic(
+                hsv, shop_open=shop_open, unit_selected=unit_selected
+            )
+            is True
+        )
 
     @staticmethod
     def _detect_confirm_has_dont_ask_heuristic(gray: np.ndarray) -> bool:
@@ -1159,13 +1415,28 @@ class SceneDetector:
         unit_template: _SceneTemplate | None = None,
     ) -> SceneDetectionResult:
         """基于 1280x720 画面亮度/边缘/色块特征的保守启发式回退判别器。"""
+        result, _ = self._detect_heuristic_with_mirror_obs(
+            frame, shop_template, unit_template
+        )
+        return result
+
+    def _detect_heuristic_with_mirror_obs(
+        self,
+        frame: np.ndarray,
+        shop_template: _SceneTemplate | None,
+        unit_template: _SceneTemplate | None = None,
+    ) -> tuple[SceneDetectionResult, bool | None]:
+        """启发式判别器主流程，同时返回 3D 战场镜像三态观测值供锁存器使用。"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if float(gray.std()) < 8.0:
-            return SceneDetectionResult(
-                scene=GameScene.UNKNOWN_FREE_CURSOR,
-                confidence=0.0,
-                shop_open=False,
-                choice_count=3,
+            return (
+                SceneDetectionResult(
+                    scene=GameScene.UNKNOWN_FREE_CURSOR,
+                    confidence=0.0,
+                    shop_open=False,
+                    choice_count=3,
+                ),
+                None,
             )
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -1173,25 +1444,31 @@ class SceneDetector:
         # 0. 优先检测回合结束/ESC 退出确认弹窗（须位于粉红准备按钮检测之前，避免模糊背景误判）
         confirm_result = self._detect_modal_confirm_heuristic(gray, hsv)
         if confirm_result is not None:
-            return confirm_result
+            return (confirm_result, None)
 
         # 1. 检测二选一/三选一/多人六选一策略与悬赏决策弹窗（优先实机暗底亮框检测，再兼容亮底合成卡片）
         modal_result = self._detect_modal_choice_heuristic(gray, hsv)
         if modal_result is not None:
-            return modal_result
+            return (modal_result, None)
 
         # 局内身份门禁：2a 与 2b 均强制共现卫戍协议局内双锚点，局外界面严守 UNKNOWN_FREE_CURSOR
         in_game_chrome = self._has_stronghold_in_game_chrome(hsv)
 
-        # 2a. 三套官方 PC 端卫戍协议主题休整期强特征（粉红 / 乌萨斯浅灰绿 / 青绿 / 顶栏+放大镜）
+        # 2a. 三套官方 PC 端卫戍协议主题休整期强特征（粉红 / 乌萨斯浅灰绿含置灰 / 青绿 / 顶栏+放大镜）
         prep_hit, prep_conf = self._eval_real_pc_prep_banner(hsv)
         if in_game_chrome and prep_hit:
             shop_open = self._detect_shop_open(frame, shop_template)
             unit_selected = self._detect_unit_selected(frame, unit_template)
             shop_slot_count = (
-                self._detect_shop_slot_count_heuristic(frame) if shop_open else None
+                self._detect_shop_slot_count_heuristic(frame, shop_open=True)
+                if shop_open
+                else None
             )
-            covenant_count, covenant_overflow = self._detect_covenants_heuristic(hsv, gray)
+            (
+                covenant_count,
+                covenant_overflow,
+                covenant_centers_u,
+            ) = self._detect_covenants_dynamic(hsv, gray)
             has_teammates = self._detect_teammates_heuristic(
                 gray, unit_selected=unit_selected
             )
@@ -1200,25 +1477,35 @@ class SceneDetector:
                 if (not shop_open and not unit_selected)
                 else False
             )
-            return SceneDetectionResult(
-                scene=GameScene.BATTLE_PREP,
-                confidence=prep_conf,
-                shop_open=shop_open,
-                choice_count=3,
-                unit_selected=unit_selected,
-                shop_slot_count=shop_slot_count,
-                covenant_count=covenant_count,
-                covenant_overflow=covenant_overflow,
-                has_teammates=has_teammates,
-                emote_panel_open=emote_panel_open,
+            mirror_obs = self._observe_board_mirrored_heuristic(
+                hsv, shop_open=shop_open, unit_selected=unit_selected
+            )
+            return (
+                SceneDetectionResult(
+                    scene=GameScene.BATTLE_PREP,
+                    confidence=prep_conf,
+                    shop_open=shop_open,
+                    choice_count=3,
+                    unit_selected=unit_selected,
+                    shop_slot_count=shop_slot_count,
+                    covenant_count=covenant_count,
+                    covenant_overflow=covenant_overflow,
+                    has_teammates=has_teammates,
+                    emote_panel_open=emote_panel_open,
+                    board_mirrored=bool(mirror_obs) if mirror_obs is not None else False,
+                    covenant_centers_u=covenant_centers_u,
+                ),
+                mirror_obs,
             )
 
         # 2a.5. 实机作战期右下费用栏「◆ C <费用>」直判（置于 2b 之前，根除右下地形/队友抽屉误判为休整期）
         if in_game_chrome and self._has_real_pc_combat_cost_bar(gray, hsv):
             unit_selected = self._detect_unit_selected(frame, unit_template)
-            covenant_count, covenant_overflow = self._detect_covenants_heuristic(
-                hsv, gray
-            )
+            (
+                covenant_count,
+                covenant_overflow,
+                covenant_centers_u,
+            ) = self._detect_covenants_dynamic(hsv, gray)
             has_teammates = self._detect_teammates_heuristic(
                 gray, unit_selected=unit_selected
             )
@@ -1227,16 +1514,24 @@ class SceneDetector:
                 if not unit_selected
                 else False
             )
-            return SceneDetectionResult(
-                scene=GameScene.BATTLE_COMBAT,
-                confidence=0.86,
-                shop_open=False,
-                choice_count=3,
-                unit_selected=unit_selected,
-                covenant_count=covenant_count,
-                covenant_overflow=covenant_overflow,
-                has_teammates=has_teammates,
-                emote_panel_open=emote_panel_open,
+            mirror_obs = self._observe_board_mirrored_heuristic(
+                hsv, shop_open=False, unit_selected=unit_selected
+            )
+            return (
+                SceneDetectionResult(
+                    scene=GameScene.BATTLE_COMBAT,
+                    confidence=0.86,
+                    shop_open=False,
+                    choice_count=3,
+                    unit_selected=unit_selected,
+                    covenant_count=covenant_count,
+                    covenant_overflow=covenant_overflow,
+                    has_teammates=has_teammates,
+                    emote_panel_open=emote_panel_open,
+                    board_mirrored=bool(mirror_obs) if mirror_obs is not None else False,
+                    covenant_centers_u=covenant_centers_u,
+                ),
+                mirror_obs,
             )
 
         # 2b. 通用底部整备槽位条纹特征（需先通过局内身份门禁，彻底免疫战前编队/干员列表/基建误判）
@@ -1252,9 +1547,11 @@ class SceneDetector:
                     )
                     shop_open = self._detect_shop_open(frame, shop_template)
                     unit_selected = self._detect_unit_selected(frame, unit_template)
-                    covenant_count, covenant_overflow = self._detect_covenants_heuristic(
-                        hsv, gray
-                    )
+                    (
+                        covenant_count,
+                        covenant_overflow,
+                        covenant_centers_u,
+                    ) = self._detect_covenants_dynamic(hsv, gray)
                     has_teammates = self._detect_teammates_heuristic(
                         gray, unit_selected=unit_selected
                     )
@@ -1263,16 +1560,26 @@ class SceneDetector:
                         if (not shop_open and not unit_selected)
                         else False
                     )
-                    return SceneDetectionResult(
-                        scene=GameScene.BATTLE_PREP,
-                        confidence=round(confidence, 4),
-                        shop_open=shop_open,
-                        choice_count=3,
-                        unit_selected=unit_selected,
-                        covenant_count=covenant_count,
-                        covenant_overflow=covenant_overflow,
-                        has_teammates=has_teammates,
-                        emote_panel_open=emote_panel_open,
+                    mirror_obs = self._observe_board_mirrored_heuristic(
+                        hsv, shop_open=shop_open, unit_selected=unit_selected
+                    )
+                    return (
+                        SceneDetectionResult(
+                            scene=GameScene.BATTLE_PREP,
+                            confidence=round(confidence, 4),
+                            shop_open=shop_open,
+                            choice_count=3,
+                            unit_selected=unit_selected,
+                            covenant_count=covenant_count,
+                            covenant_overflow=covenant_overflow,
+                            has_teammates=has_teammates,
+                            emote_panel_open=emote_panel_open,
+                            board_mirrored=bool(mirror_obs)
+                            if mirror_obs is not None
+                            else False,
+                            covenant_centers_u=covenant_centers_u,
+                        ),
+                        mirror_obs,
                     )
 
                 # 右下角无准备按钮高亮块，且顶部中央存在作战波次 HUD 面板 -> 作战期
@@ -1280,9 +1587,11 @@ class SceneDetector:
                 if ready_vivid_ratio < 0.08 and combat_hud_score >= 0.60:
                     confidence = min(0.76, 0.62 + 0.08 * bench_score + 0.08 * combat_hud_score)
                     unit_selected = self._detect_unit_selected(frame, unit_template)
-                    covenant_count, covenant_overflow = self._detect_covenants_heuristic(
-                        hsv, gray
-                    )
+                    (
+                        covenant_count,
+                        covenant_overflow,
+                        covenant_centers_u,
+                    ) = self._detect_covenants_dynamic(hsv, gray)
                     has_teammates = self._detect_teammates_heuristic(
                         gray, unit_selected=unit_selected
                     )
@@ -1291,24 +1600,37 @@ class SceneDetector:
                         if not unit_selected
                         else False
                     )
-                    return SceneDetectionResult(
-                        scene=GameScene.BATTLE_COMBAT,
-                        confidence=round(confidence, 4),
-                        shop_open=False,
-                        choice_count=3,
-                        unit_selected=unit_selected,
-                        covenant_count=covenant_count,
-                        covenant_overflow=covenant_overflow,
-                        has_teammates=has_teammates,
-                        emote_panel_open=emote_panel_open,
+                    mirror_obs = self._observe_board_mirrored_heuristic(
+                        hsv, shop_open=False, unit_selected=unit_selected
+                    )
+                    return (
+                        SceneDetectionResult(
+                            scene=GameScene.BATTLE_COMBAT,
+                            confidence=round(confidence, 4),
+                            shop_open=False,
+                            choice_count=3,
+                            unit_selected=unit_selected,
+                            covenant_count=covenant_count,
+                            covenant_overflow=covenant_overflow,
+                            has_teammates=has_teammates,
+                            emote_panel_open=emote_panel_open,
+                            board_mirrored=bool(mirror_obs)
+                            if mirror_obs is not None
+                            else False,
+                            covenant_centers_u=covenant_centers_u,
+                        ),
+                        mirror_obs,
                     )
 
         # 置信度不足时一律安全返回未知自由光标模式
-        return SceneDetectionResult(
-            scene=GameScene.UNKNOWN_FREE_CURSOR,
-            confidence=0.0,
-            shop_open=False,
-            choice_count=3,
+        return (
+            SceneDetectionResult(
+                scene=GameScene.UNKNOWN_FREE_CURSOR,
+                confidence=0.0,
+                shop_open=False,
+                choice_count=3,
+            ),
+            None,
         )
 
     @staticmethod
@@ -1695,64 +2017,157 @@ class SceneDetector:
         return count
 
     @staticmethod
-    def _score_covenant_badge_vchannel(
+    def _score_full_covenant_badge(
         v_ch: np.ndarray,
+        s_ch: np.ndarray,
         gx: np.ndarray,
         gy: np.ndarray,
         cx: float,
-        cy: float = 87.0,
+        cy: float = _COVENANT_CY,
         *,
-        partial_side: str | None = None,
-    ) -> float:
-        """脱离单一色相依赖的 HSV-V 通道圆形盟约徽章打分（兼容 T1 蓝弧 / T2 银灰 / T3 青绿半环）。
-
-        参数:
-            partial_side: ``None`` 表示完整圆环；``"right"`` 表示右缘被裁切仅评左半圈（``cx=938``）；
-                ``"left"`` 表示左缘被裁切仅评右半圈（``cx=299``，用于溢出态滑至右端场景）。
-        """
+        dx_range: tuple[int, ...] = (-2, -1, 0, 1, 2),
+        dy_range: tuple[int, ...] = (-2, -1, 0, 1, 2),
+    ) -> tuple[float, float]:
+        """完整圆形盟约徽章打分（支持暗芯亮环 + 满层发光亮芯圆环，返回 ``(best_score, best_cx)``）。"""
         ix, iy = int(round(cx)), int(round(cy))
-        min_x = 280 if partial_side == "left" else 340
-        if ix < min_x or ix > 955 or iy < 65 or iy > 105:
-            return 0.0
+        if (
+            ix < int(_COVENANT_FULL_MIN_X) - 6
+            or ix > int(_COVENANT_FULL_MAX_X) + 6
+            or iy < 65
+            or iy > 105
+        ):
+            return (0.0, cx)
 
         # 校验圆心正下方层数与中文盟约名高对比文字带 (y=100..129)
-        if partial_side == "right":
-            x_l, x_r = max(0, ix - 18), min(STANDARD_WIDTH, ix + 8)
-        elif partial_side == "left":
-            x_l, x_r = max(0, ix - 8), min(STANDARD_WIDTH, ix + 19)
-        else:
-            x_l, x_r = max(0, ix - 18), min(STANDARD_WIDTH, ix + 19)
+        x_l = max(int(_COVENANT_CLIP_LEFT), ix - 18)
+        x_r = min(int(_COVENANT_CLIP_RIGHT), ix + 19)
         lbl = v_ch[iy + 13 : iy + 42, x_l:x_r]
         if lbl.size == 0:
-            return 0.0
+            return (0.0, cx)
         lbl_p95 = float(np.percentile(lbl, 95))
         lbl_c = lbl_p95 - float(np.percentile(lbl, 5))
         if lbl_p95 < 125.0 or lbl_c < 85.0:
-            return 0.0
+            return (0.0, cx)
 
         best_score = 0.0
-        for dy in (-2, -1, 0, 1, 2):
-            for dx in (-2, -1, 0, 1, 2):
-                tx, ty = cx + dx, cy + dy
+        best_cx = cx
+        clip_l_in = int(_COVENANT_CLIP_LEFT + 1)
+        clip_r_in = int(_COVENANT_CLIP_RIGHT - 1)
+        clip_l_i = int(_COVENANT_CLIP_LEFT)
+        clip_r_i = int(_COVENANT_CLIP_RIGHT)
+
+        for dy in dy_range:
+            ty = cy + dy
+            for dx in dx_range:
+                tx = cx + dx
                 rx = np.round(tx + 22.5 * _COVENANT_RING_COS).astype(int)
                 ry = np.round(ty + 22.5 * _COVENANT_RING_SIN).astype(int)
                 in_x = np.round(tx + 12.0 * _COVENANT_RING_COS).astype(int)
                 in_y = np.round(ty + 12.0 * _COVENANT_RING_SIN).astype(int)
                 valid = (
-                    (rx >= 0)
-                    & (rx < STANDARD_WIDTH)
+                    (rx >= clip_l_in)
+                    & (rx <= clip_r_in)
                     & (ry >= 0)
                     & (ry < STANDARD_HEIGHT)
-                    & (in_x >= 0)
-                    & (in_x < STANDARD_WIDTH)
+                    & (in_x >= clip_l_i)
+                    & (in_x <= clip_r_i)
                     & (in_y >= 0)
                     & (in_y < STANDARD_HEIGHT)
+                    & ~((rx >= 918) & (ry <= 87))
                 )
-                if partial_side == "right":
-                    valid &= _COVENANT_RING_COS <= 0.05
-                elif partial_side == "left":
-                    valid &= _COVENANT_RING_COS >= -0.05
-                if int(valid.sum()) < 12:
+                if int(valid.sum()) < 24:
+                    continue
+
+                cos_v = _COVENANT_RING_COS[valid]
+                sin_v = _COVENANT_RING_SIN[valid]
+                rad_g = np.abs(
+                    gx[ry[valid], rx[valid]] * cos_v + gy[ry[valid], rx[valid]] * sin_v
+                )
+                m_l = cos_v < -0.25
+                m_r = cos_v > 0.25
+                m_u = sin_v < -0.25
+                m_d = sin_v > 0.25
+                if not (m_l.any() and m_r.any() and m_u.any() and m_d.any()):
+                    continue
+                if (
+                    min(
+                        float(rad_g[m_l].mean()),
+                        float(rad_g[m_r].mean()),
+                        float(rad_g[m_u].mean()),
+                        float(rad_g[m_d].mean()),
+                    )
+                    < 42.0
+                ):
+                    continue
+
+                ring_v = v_ch[ry[valid], rx[valid]]
+                in_v = v_ch[in_y[valid], in_x[valid]]
+                ring_p80 = float(np.percentile(ring_v, 80))
+                in_mean = float(in_v.mean())
+                if ring_p80 < 120.0:
+                    continue
+
+                dark_core_ok = (in_mean <= 140.0 and (ring_p80 - in_mean) >= 30.0) or (
+                    in_mean > 140.0 and (ring_p80 - in_mean) >= 25.0
+                )
+                ring_s_p75 = float(np.percentile(s_ch[ry[valid], rx[valid]], 75))
+                in_s_mean = float(s_ch[in_y[valid], in_x[valid]].mean())
+                glow_ok = ring_p80 >= 180.0 and ring_s_p75 >= 95.0 and in_s_mean >= 75.0
+                if not (dark_core_ok or glow_ok):
+                    continue
+
+                bonus = (
+                    max(0.0, ring_p80 - in_mean)
+                    if dark_core_ok
+                    else max(20.0, 0.35 * ring_s_p75)
+                )
+                score = float(rad_g.mean()) * (1.0 + 0.004 * bonus)
+                if score > best_score:
+                    best_score = score
+                    best_cx = tx
+        return (best_score, best_cx)
+
+    @staticmethod
+    def _score_covenant_edge_arc(
+        v_ch: np.ndarray,
+        gx: np.ndarray,
+        gy: np.ndarray,
+        cx: float,
+        cy: float = _COVENANT_CY,
+    ) -> float:
+        """左右裁剪窗边缘半露/微弧圆环打分（支持 5px 弧牙到完整半圆，避开 ``[W]`` 键帽）。"""
+        if not (
+            (314.0 <= cx < _COVENANT_FULL_MIN_X)
+            or (_COVENANT_FULL_MAX_X < cx <= 966.0)
+        ):
+            return 0.0
+
+        best = 0.0
+        is_left = cx < _COVENANT_FULL_MIN_X
+        clip_l_2 = int(_COVENANT_CLIP_LEFT + 2)
+        clip_r_2 = int(_COVENANT_CLIP_RIGHT - 2)
+        clip_l_1 = int(_COVENANT_CLIP_LEFT + 1)
+        clip_r_1 = int(_COVENANT_CLIP_RIGHT - 1)
+
+        for dy in (-1, 0, 1):
+            ty = cy + dy
+            for dx in (-2, 0, 2):
+                tx = cx + dx
+                rx = np.round(tx + 22.5 * _COVENANT_RING_COS).astype(int)
+                ry = np.round(ty + 22.5 * _COVENANT_RING_SIN).astype(int)
+                valid = (
+                    (rx >= clip_l_2)
+                    & (rx <= clip_r_2)
+                    & (ry >= 60)
+                    & (ry <= 114)
+                    & ~((rx >= 916) & (ry <= 88))
+                )
+                if is_left:
+                    valid &= _COVENANT_RING_COS >= 0.20
+                else:
+                    valid &= _COVENANT_RING_COS <= -0.20
+
+                if int(valid.sum()) < 4:
                     continue
 
                 cos_v = _COVENANT_RING_COS[valid]
@@ -1761,83 +2176,270 @@ class SceneDetector:
                     gx[ry[valid], rx[valid]] * cos_v + gy[ry[valid], rx[valid]] * sin_v
                 )
                 rad_mean = float(rad_g.mean())
-
-                if partial_side is None:
-                    q_l = float(rad_g[cos_v < -0.25].mean())
-                    q_r = float(rad_g[cos_v > 0.25].mean())
-                    q_u = float(rad_g[sin_v < -0.25].mean())
-                    q_d = float(rad_g[sin_v > 0.25].mean())
-                    if min(q_l, q_r, q_u, q_d) < 45.0:
-                        continue
-                elif partial_side == "right":
-                    q_l = float(rad_g[cos_v < -0.25].mean())
-                    q_u = float(rad_g[sin_v < -0.25].mean())
-                    q_d = float(rad_g[sin_v > 0.25].mean())
-                    if q_l < 110.0 or min(q_u, q_d) < 70.0:
-                        continue
-                else:  # partial_side == "left"
-                    q_r = float(rad_g[cos_v > 0.25].mean())
-                    q_u = float(rad_g[sin_v < -0.25].mean())
-                    q_d = float(rad_g[sin_v > 0.25].mean())
-                    if q_r < 110.0 or min(q_u, q_d) < 70.0:
-                        continue
-
                 ring_v = v_ch[ry[valid], rx[valid]]
-                in_v = v_ch[in_y[valid], in_x[valid]]
                 ring_p80 = float(np.percentile(ring_v, 80))
-                in_mean = float(in_v.mean())
-                if ring_p80 < 120.0:
+                out_x = np.clip(
+                    np.round(tx + 28.0 * cos_v).astype(int), clip_l_1, clip_r_1
+                )
+                out_y = np.clip(
+                    np.round(ty + 28.0 * sin_v).astype(int), 0, STANDARD_HEIGHT - 1
+                )
+                out_med = float(np.median(v_ch[out_y, out_x]))
+                if ring_p80 < 105.0 or (ring_p80 - out_med) < 18.0:
                     continue
-                if in_mean > 140.0 and (ring_p80 - in_mean) < 25.0:
-                    continue
-                if in_mean <= 140.0 and (ring_p80 - in_mean) < 30.0:
-                    continue
+                if rad_mean > best:
+                    best = rad_mean
+        return best
 
-                score = rad_mean * (1.0 + 0.004 * max(0.0, ring_p80 - in_mean))
-                if score > best_score:
-                    best_score = score
-        return best_score
+    @staticmethod
+    def _compute_covenant_scan_curve(
+        v_ch: np.ndarray,
+        s_ch: np.ndarray,
+        gx: np.ndarray,
+        gy: np.ndarray,
+        x_grid: np.ndarray,
+        cy: float = _COVENANT_CY,
+    ) -> np.ndarray:
+        """纯 NumPy/OpenCV 向量化 2px 扫描完整圆环一维响应曲线（覆盖 ``dy∈{-2..2}``）。"""
+        n_x = x_grid.size
+        best = np.zeros(n_x, dtype=np.float32)
+        iy = int(round(cy))
+
+        # 滑窗极值极速初筛下方文字带高对比（必要条件：max>=125 且 max-min>=85）
+        lbl_band = v_ch[iy + 13 : iy + 42, :]
+        col_max = lbl_band.max(axis=0)[None, :]
+        col_min = lbl_band.min(axis=0)[None, :]
+        win_max = cv2.dilate(col_max, np.ones((1, 37), np.uint8))[0]
+        win_min = cv2.erode(col_min, np.ones((1, 37), np.uint8))[0]
+        ix_arr = np.round(x_grid).astype(np.int32)
+        lbl_ok = (win_max[ix_arr] >= 125.0) & ((win_max[ix_arr] - win_min[ix_arr]) >= 85.0)
+        if not lbl_ok.any():
+            return best
+
+        active_idx = np.where(lbl_ok)[0]
+        ax = x_grid[active_idx][:, None]
+        cos_row = _COVENANT_RING_COS[None, :]
+        sin_row = _COVENANT_RING_SIN[None, :]
+
+        m_l = _COVENANT_RING_COS < -0.25
+        m_r = _COVENANT_RING_COS > 0.25
+        m_u = _COVENANT_RING_SIN < -0.25
+        m_d = _COVENANT_RING_SIN > 0.25
+
+        rx = np.clip(
+            np.round(ax + 22.5 * cos_row).astype(np.int32), 0, STANDARD_WIDTH - 1
+        )
+        in_x = np.clip(
+            np.round(ax + 12.0 * cos_row).astype(np.int32), 0, STANDARD_WIDTH - 1
+        )
+        x_in_clip = (rx >= int(_COVENANT_CLIP_LEFT + 1)) & (
+            rx <= int(_COVENANT_CLIP_RIGHT - 1)
+        )
+
+        active_best = np.zeros(active_idx.size, dtype=np.float32)
+        for dy in (-2, -1, 0, 1, 2):
+            ty = cy + dy
+            ry = np.clip(
+                np.round(ty + 22.5 * sin_row).astype(np.int32), 0, STANDARD_HEIGHT - 1
+            )
+            in_y = np.clip(
+                np.round(ty + 12.0 * sin_row).astype(np.int32), 0, STANDARD_HEIGHT - 1
+            )
+            valid = x_in_clip & ~((rx >= 918) & (ry <= 87))
+
+            rad_g = np.abs(gx[ry, rx] * cos_row + gy[ry, rx] * sin_row)
+            v_f = valid.astype(np.float32)
+            v_cnt = v_f.sum(axis=1)
+            rad_mean = (rad_g * v_f).sum(axis=1) / np.maximum(1.0, v_cnt)
+
+            def _q_mean(q_mask: np.ndarray) -> np.ndarray:
+                qm = (valid & q_mask[None, :]).astype(np.float32)
+                return (rad_g * qm).sum(axis=1) / np.maximum(1.0, qm.sum(axis=1))
+
+            ql = _q_mean(m_l)
+            qr = _q_mean(m_r)
+            qu = _q_mean(m_u)
+            qd = _q_mean(m_d)
+            quad_ok = (v_cnt >= 24) & (
+                np.minimum(np.minimum(ql, qr), np.minimum(qu, qd)) >= 42.0
+            )
+
+            ring_v = v_ch[ry, rx]
+            in_v = v_ch[in_y, in_x]
+            ring_p80 = np.partition(ring_v, 28, axis=1)[:, 28]
+            in_mean = (in_v * v_f).sum(axis=1) / np.maximum(1.0, v_cnt)
+
+            dark_core_ok = (ring_p80 >= 120.0) & (
+                ((in_mean <= 140.0) & ((ring_p80 - in_mean) >= 30.0))
+                | ((in_mean > 140.0) & ((ring_p80 - in_mean) >= 25.0))
+            )
+            ring_s_p75 = np.partition(s_ch[ry, rx], 27, axis=1)[:, 27]
+            in_s_mean = (s_ch[in_y, in_x] * v_f).sum(axis=1) / np.maximum(1.0, v_cnt)
+            glow_ok = (ring_p80 >= 180.0) & (ring_s_p75 >= 95.0) & (in_s_mean >= 75.0)
+
+            ok = quad_ok & (dark_core_ok | glow_ok)
+            bonus = np.where(
+                dark_core_ok,
+                np.maximum(0.0, ring_p80 - in_mean),
+                np.maximum(20.0, 0.35 * ring_s_p75),
+            )
+            sc = np.where(ok, rad_mean * (1.0 + 0.004 * bonus), 0.0).astype(np.float32)
+            active_best = np.maximum(active_best, sc)
+
+        best[active_idx] = active_best
+        return best
 
     @classmethod
-    def _detect_covenants_heuristic(
+    def _detect_covenants_dynamic(
         cls, hsv: np.ndarray, gray: np.ndarray | None = None
-    ) -> tuple[int, bool]:
-        """基于 HSV-V 通道检测顶部栏下方多盟约数量（0~7）及 ``>7`` 溢出滚动态。
+    ) -> tuple[int, bool, tuple[float, ...]]:
+        """任意水平滚动相位动态盟约识别（兼容暗芯/满层高光圆环、0~7 居中与 >7 任意相位溢出）。
 
-        返回 ``(visible_count, is_overflow)``：
-        1. 步距固定为实测精确值 ``80.0px``（``cy = 87.0px``）；
-        2. 优先检测溢出态（左对齐 7 枚 ``379 + 80*i`` + 右缘 ``cx=938`` 左半圈或滑至右端后
-           左缘 ``cx=299`` 右半圈半露徽章），命中返回 ``(7, True)``；
-        3. 否则降序评估 ``n = 7..1`` 居中对称态，采用两端必达 + 鲁棒多数门限 + 间隙非圆排斥。
+        返回 ``(visible_count, is_overflow, covenant_centers_u)``。
         """
         _ = gray  # 保留参数签名兼容
         vf = hsv[:, :, 2].astype(np.float32)
-        gx = cv2.Sobel(vf, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(vf, cv2.CV_32F, 0, 1, ksize=3)
+        sf = hsv[:, :, 1].astype(np.float32)
+        # 仅对顶部盟约带 y∈[52..136] 计算 Sobel 梯度，降低单帧耗时
+        gx = np.zeros_like(vf)
+        gy = np.zeros_like(vf)
+        gx[52:136, :] = cv2.Sobel(vf[52:136, :], cv2.CV_32F, 1, 0, ksize=3)
+        gy[52:136, :] = cv2.Sobel(vf[52:136, :], cv2.CV_32F, 0, 1, ksize=3)
 
-        # 1. 检测 >7 溢出态（左对齐 7 枚 + 右缘 938 或左缘 299 半露徽章）
-        ov_centers = [379.0 + i * 80.0 for i in range(7)]
-        ov_scores = [cls._score_covenant_badge_vchannel(vf, gx, gy, cx, 87.0) for cx in ov_centers]
-        ov_right_half = cls._score_covenant_badge_vchannel(
-            vf, gx, gy, 938.0, 87.0, partial_side="right"
+        # 1. 向量化 2px 扫描完整可点区 [354..926]
+        curve = cls._compute_covenant_scan_curve(
+            vf, sf, gx, gy, _COVENANT_SCAN_X_GRID, _COVENANT_CY
         )
-        ov_left_half = cls._score_covenant_badge_vchannel(
-            vf, gx, gy, 299.0, 87.0, partial_side="left"
-        )
-        c7_centers = [640.0 + (i - 3.0) * 80.0 for i in range(7)]
-        c7_scores = [cls._score_covenant_badge_vchannel(vf, gx, gy, cx, 87.0) for cx in c7_centers]
-        if (
-            sum(1 for s in ov_scores if s >= 150.0) >= 6
-            and float(np.mean(ov_scores)) >= 190.0
-            and (ov_right_half >= 150.0 or ov_left_half >= 150.0)
-            and sum(ov_scores) >= sum(c7_scores) * 0.92
-        ):
-            return (7, True)
 
-        # 2. 降序检测 7..1 居中对称态（精确步距 80.0px，鲁棒多数门限）
+        def _lookup(x: float, win: int = 0) -> float:
+            idx = int(round((x - 354.0) * 0.5))
+            if 0 <= idx < curve.size:
+                if win <= 0:
+                    return float(curve[idx])
+                lo = max(0, idx - win)
+                hi = min(curve.size, idx + win + 1)
+                return float(curve[lo:hi].max())
+            return 0.0
+
+        # 2. 任意相位 phi∈[0, 80) 80px 梳状搜索（严格按均值 mean(sc) 评选，避免 8 槽错相总分反超）
+        best_cand_mean = 0.0
+        best_cand_pts: list[float] = []
+
+        for phi in range(0, 80, 2):
+            k_start = math.ceil((_COVENANT_FULL_MIN_X - phi) / _COVENANT_STEP_PX)
+            full_pts: list[float] = []
+            k = k_start
+            while True:
+                cx = phi + k * _COVENANT_STEP_PX
+                if cx > _COVENANT_FULL_MAX_X:
+                    break
+                full_pts.append(cx)
+                k += 1
+            if len(full_pts) < 6:
+                continue
+
+            sc = [_lookup(x, win=0) for x in full_pts]
+            hits = sum(1 for s in sc if s >= 135.0)
+            mean_sc = float(np.mean(sc))
+            if hits < max(6, len(full_pts) - 1) or min(sc) < 75.0 or mean_sc < 155.0:
+                continue
+
+            gap_centers = [
+                0.5 * (full_pts[i] + full_pts[i + 1]) for i in range(len(full_pts) - 1)
+            ]
+            gap_sc = [_lookup(gx_mid, win=0) for gx_mid in gap_centers]
+            if max(gap_sc) >= 155.0:
+                # 曲线初筛使用滑窗 max-min，仅对超阈值间隙用精确文字带 p95/p5 复核防邻字边角误杀
+                exact_gap_hit = any(
+                    cls._score_full_covenant_badge(
+                        vf, sf, gx, gy, gx_mid, _COVENANT_CY
+                    )[0]
+                    >= 155.0
+                    for gx_mid, gs in zip(gap_centers, gap_sc)
+                    if gs >= 155.0
+                )
+                if exact_gap_hit:
+                    continue
+
+            if mean_sc > best_cand_mean:
+                best_cand_mean = mean_sc
+                best_cand_pts = full_pts
+
+        # 3. 命中 >=6 完整圆环阵列后，中位数相位精调 + 单环微调 + 三重充要溢出判据
+        if best_cand_pts:
+            raw_dxs: list[float] = []
+            for x in best_cand_pts:
+                s0, rx0 = cls._score_full_covenant_badge(
+                    vf,
+                    sf,
+                    gx,
+                    gy,
+                    x,
+                    _COVENANT_CY,
+                    dx_range=(-3, -2, -1, 0, 1, 2, 3),
+                    dy_range=(-1, 0, 1),
+                )
+                if s0 >= 110.0:
+                    raw_dxs.append(rx0 - x)
+            med_dx = float(np.median(raw_dxs)) if raw_dxs else 0.0
+
+            base_first = best_cand_pts[0] + med_dx
+            while base_first - _COVENANT_STEP_PX >= _COVENANT_FULL_MIN_X:
+                base_first -= _COVENANT_STEP_PX
+            while base_first < _COVENANT_FULL_MIN_X:
+                base_first += _COVENANT_STEP_PX
+
+            grid_full: list[float] = []
+            cx = base_first
+            while cx <= _COVENANT_FULL_MAX_X:
+                grid_full.append(cx)
+                cx += _COVENANT_STEP_PX
+
+            refined_full: list[float] = []
+            refined_scores: list[float] = []
+            for gx0 in grid_full:
+                s1, rx1 = cls._score_full_covenant_badge(
+                    vf,
+                    sf,
+                    gx,
+                    gy,
+                    gx0,
+                    _COVENANT_CY,
+                    dx_range=(-2, -1, 0, 1, 2),
+                    dy_range=(-2, -1, 0, 1, 2),
+                )
+                refined_scores.append(s1)
+                refined_full.append(rx1 if s1 >= 120.0 else gx0)
+
+            valid_full_hits = sum(1 for s in refined_scores if s >= 140.0)
+            if (
+                valid_full_hits >= max(6, len(refined_full) - 1)
+                and float(np.mean(refined_scores)) >= 155.0
+            ):
+                left_nb_x = grid_full[0] - _COVENANT_STEP_PX
+                right_nb_x = grid_full[-1] + _COVENANT_STEP_PX
+                left_arc = cls._score_covenant_edge_arc(
+                    vf, gx, gy, left_nb_x, _COVENANT_CY
+                )
+                right_arc = cls._score_covenant_edge_arc(
+                    vf, gx, gy, right_nb_x, _COVENANT_CY
+                )
+                centroid_offset = abs(float(np.mean(refined_full)) - 640.0)
+                is_overflow = (
+                    len(refined_full) >= 8
+                    or (len(refined_full) >= 7 and centroid_offset >= 6.0)
+                    or (left_arc >= 105.0 or right_arc >= 115.0)
+                )
+                if is_overflow:
+                    centers_u = tuple(
+                        round(x / float(STANDARD_WIDTH), 5) for x in refined_full
+                    )
+                    return (len(centers_u), True, centers_u)
+
+        # 4. 非溢出态：复用 2px 向量化曲线降序判定 7..1 居中对称态并复核精确文字带
         for n in range(7, 0, -1):
-            centers = [640.0 + (i - (n - 1) * 0.5) * 80.0 for i in range(n)]
-            scores = [cls._score_covenant_badge_vchannel(vf, gx, gy, cx, 87.0) for cx in centers]
+            centers = [640.0 + (i - (n - 1) * 0.5) * _COVENANT_STEP_PX for i in range(n)]
+            scores = [_lookup(cx, win=1) for cx in centers]
             if scores[0] < 130.0 or scores[-1] < 130.0:
                 continue
             strong = sum(1 for s in scores if s >= 145.0)
@@ -1845,24 +2447,63 @@ class SceneDetector:
             if strong < min_req or min(scores) < 90.0 or float(np.mean(scores)) < 155.0:
                 continue
             if n >= 2:
-                gap_scores = [
-                    cls._score_covenant_badge_vchannel(
-                        vf, gx, gy, (centers[i] + centers[i + 1]) * 0.5, 87.0
-                    )
-                    for i in range(n - 1)
+                gap_centers = [
+                    0.5 * (centers[i] + centers[i + 1]) for i in range(n - 1)
                 ]
+                gap_scores = [_lookup(gx_mid, win=1) for gx_mid in gap_centers]
                 if max(gap_scores) >= 145.0:
-                    continue
-            return (n, False)
+                    # 仅对初筛超阈值间隙做精确文字带 p95/p5 复核，避免相邻两枚盟约文字边角触发假间隙圆
+                    exact_gap_hit = any(
+                        cls._score_full_covenant_badge(
+                            vf, sf, gx, gy, gx_mid, _COVENANT_CY
+                        )[0]
+                        >= 145.0
+                        for gx_mid, gs in zip(gap_centers, gap_scores)
+                        if gs >= 145.0
+                    )
+                    if exact_gap_hit:
+                        continue
 
-        return (0, False)
+            verified_scores = [
+                cls._score_full_covenant_badge(
+                    vf,
+                    sf,
+                    gx,
+                    gy,
+                    cx,
+                    _COVENANT_CY,
+                    dx_range=(-2, -1, 0, 1, 2),
+                    dy_range=(-2, -1, 0, 1, 2),
+                )[0]
+                for cx in centers
+            ]
+            if verified_scores[0] < 130.0 or verified_scores[-1] < 130.0:
+                continue
+            if (
+                sum(1 for s in verified_scores if s >= 145.0) < min_req
+                or min(verified_scores) < 90.0
+                or float(np.mean(verified_scores)) < 155.0
+            ):
+                continue
+            centers_u = tuple(round(cx / float(STANDARD_WIDTH), 5) for cx in centers)
+            return (n, False, centers_u)
+
+        return (0, False, ())
+
+    @classmethod
+    def _detect_covenants_heuristic(
+        cls, hsv: np.ndarray, gray: np.ndarray | None = None
+    ) -> tuple[int, bool]:
+        """向后兼容封装：返回顶部可见盟约数量与溢出标志 ``(count, is_overflow)``。"""
+        count, overflow, _ = cls._detect_covenants_dynamic(hsv, gray)
+        return (count, overflow)
 
     @classmethod
     def _detect_covenant_count_heuristic(
         cls, hsv: np.ndarray, gray: np.ndarray
     ) -> int:
-        """向后兼容封装：返回检测到的顶部可见羁绊徽章数量（0~7）。"""
-        count, _ = cls._detect_covenants_heuristic(hsv, gray)
+        """向后兼容封装：返回检测到的顶部可见羁绊徽章数量（0~8）。"""
+        count, _, _ = cls._detect_covenants_dynamic(hsv, gray)
         return count
 
     @staticmethod
@@ -1991,11 +2632,40 @@ class SceneDetector:
 
         return float(np.clip(0.5 + min(std_val / 80.0, 0.3) + min(vivid_ratio, 0.2), 0.0, 1.0))
 
-    def _apply_debounce(self, raw_result: SceneDetectionResult) -> SceneDetectionResult:
-        """应用连续帧防抖滤波，抑制瞬态过场画面闪烁。"""
+    def _apply_board_mirrored_latch(
+        self, result: SceneDetectionResult, mirror_obs: bool | None
+    ) -> SceneDetectionResult:
+        """结合当前帧镜像三态观测值更新并返回锁存后的 ``board_mirrored`` 结果。"""
+        if result.scene == GameScene.UNKNOWN_FREE_CURSOR:
+            self._latched_board_mirrored = False
+            if result.board_mirrored:
+                return replace(result, board_mirrored=False)
+            return result
+
+        if result.scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT):
+            if mirror_obs is not None:
+                self._latched_board_mirrored = mirror_obs
+            if result.board_mirrored != self._latched_board_mirrored:
+                return replace(result, board_mirrored=self._latched_board_mirrored)
+            return result
+
+        # 局内遮挡弹窗（MODAL_CHOICE / MODAL_CONFIRM）透出并保持当前锁存值
+        if result.board_mirrored != self._latched_board_mirrored:
+            return replace(result, board_mirrored=self._latched_board_mirrored)
+        return result
+
+    def _apply_debounce(
+        self,
+        raw_result: SceneDetectionResult,
+        *,
+        mirror_obs: bool | None = None,
+    ) -> SceneDetectionResult:
+        """应用连续帧防抖滤波并维护 3D 战场镜像锁存状态。"""
         with self._lock:
             if raw_result.scene == self._stable_result.scene:
-                self._stable_result = raw_result
+                self._stable_result = self._apply_board_mirrored_latch(
+                    raw_result, mirror_obs
+                )
                 self._pending_scene = None
                 self._pending_count = 0
                 return self._stable_result
@@ -2007,7 +2677,9 @@ class SceneDetector:
                 self._pending_count = 1
 
             if self._pending_count >= self.debounce_frames:
-                self._stable_result = raw_result
+                self._stable_result = self._apply_board_mirrored_latch(
+                    raw_result, mirror_obs
+                )
                 self._pending_scene = None
                 self._pending_count = 0
                 return self._stable_result

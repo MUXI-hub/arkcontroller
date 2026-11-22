@@ -196,6 +196,8 @@ def test_enum_and_result_contract() -> None:
     assert res.covenant_overflow is False
     assert res.emote_panel_open is False
     assert res.confirm_has_dont_ask is True
+    assert res.board_mirrored is False
+    assert res.covenant_centers_u == ()
     with pytest.raises(FrozenInstanceError):
         res.confidence = 0.5  # type: ignore[misc]
 
@@ -1314,12 +1316,14 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
             bool | None,
         ]
     ] = [
-        # v0.3.1 / v0.3.2 新增多主题、多盟约、>7 溢出与作战期展开队友抽屉实机截图
+        # v0.3.1 / v0.3.2 / v0.3.3 新增多主题、双灰商店、Boss 战镜像、多盟约与作战期实机截图
         (a7_up / "media_1795325671726_73b3d7cb.jpg", GameScene.BATTLE_PREP, True, 4, None, None, False, None, 3, False),
         (a7_up / "media_1795325671732_1bc865a7.jpg", GameScene.BATTLE_PREP, True, 5, None, None, False, None, 4, False),
         (a7_up / "media_1795325671739_1e44ed7e.jpg", GameScene.BATTLE_PREP, True, 5, None, None, False, None, 7, False),
         (a7_up / "media_1795325671744_308f0863.jpg", GameScene.BATTLE_PREP, True, 5, None, None, False, None, 7, True),
         (a7_up / "media_1795328987598_9f30b6b8.jpg", GameScene.BATTLE_COMBAT, False, None, None, None, False, None, 0, False),
+        (a7_up / "media_1795332461252_fe50bbf2.jpg", GameScene.BATTLE_PREP, True, 5, None, None, False, None, 6, False),
+        (a7_up / "media_1795334505233_979719ff.jpg", GameScene.BATTLE_PREP, True, 6, None, None, False, None, 7, True),
         # 历史核心实机截图回归
         (a7_up / "media_1795266584081_fc922d8f.jpg", GameScene.MODAL_CHOICE, False, None, 6, None, False, None, None, False),
         (a7_up / "media_1795266595030_fc375d1b.jpg", GameScene.MODAL_CONFIRM, False, None, None, None, False, False, None, False),
@@ -1356,6 +1360,7 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
         exp_covenants,
         exp_covenant_overflow,
     ) in available:
+        detector.reset()
         raw = np.fromfile(str(img_path), dtype=np.uint8)
         frame = cv2.imdecode(raw, cv2.IMREAD_COLOR)
         assert frame is not None, f"无法读取实机截图: {img_path}"
@@ -1383,10 +1388,17 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
             assert res.covenant_count == exp_covenants, (
                 f"{img_path.name}: covenant_count mismatch {res}"
             )
+            assert len(res.covenant_centers_u) == exp_covenants, (
+                f"{img_path.name}: covenant_centers_u len mismatch {res}"
+            )
         if exp_covenant_overflow is not None:
             assert res.covenant_overflow is exp_covenant_overflow, (
                 f"{img_path.name}: covenant_overflow mismatch {res}"
             )
+        exp_mirrored = img_path.name == "media_1795334505233_979719ff.jpg"
+        assert res.board_mirrored is exp_mirrored, (
+            f"{img_path.name}: board_mirrored mismatch {res}"
+        )
         if img_path.name == "media_1795328987598_9f30b6b8.jpg":
             assert res.has_teammates is True, f"{img_path.name}: expected has_teammates=True, got {res}"
 
@@ -1996,6 +2008,439 @@ def test_v032_combat_cost_bar_detection_and_teammate_drawer(tmp_path: Path) -> N
     prep_priority = frame.copy()
     cv2.rectangle(prep_priority, (1120, 100), (1255, 140), (110, 70, 235), -1)
     assert detector.detect(prep_priority).scene == GameScene.BATTLE_PREP
+
+
+# =====================================================================
+# 10. v0.3.3 专项：双灰按钮商店结构识别、三主题置灰、Boss 镜像锁存与任意相位盟约
+# =====================================================================
+
+
+def _desat_regions_for_test(
+    img: np.ndarray, boxes: list[tuple[int, int, int, int]], v_scale: float
+) -> np.ndarray:
+    """将指定矩形区域去饱和（S=0）并按 v_scale 压缩亮度，仿真按钮置灰状态。"""
+    out = img.copy()
+    for x1, y1, x2, y2 in boxes:
+        patch = out[y1:y2, x1:x2]
+        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+        hsv[:, :, 1] = 0
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2].astype(np.float32) * v_scale, 0, 255).astype(
+            np.uint8
+        )
+        out[y1:y2, x1:x2] = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    return out
+
+
+def _make_dual_gray_shop_frame(*, slot_count: int = 5, dim_upgrade: bool = False) -> np.ndarray:
+    """构造冻结 [S] 与刷新 [D] 同时 0 饱和度置灰的实机结构商店展开合成帧。"""
+    frame = np.full((STANDARD_HEIGHT, STANDARD_WIDTH, 3), 52, dtype=np.uint8)
+    _draw_stronghold_in_game_chrome(frame)
+    cv2.rectangle(frame, (190, 140), (1050, 415), (92, 96, 102), -1)
+    # 右上粉红准备就绪按钮
+    cv2.rectangle(frame, (1120, 100), (1255, 140), (110, 70, 235), -1)
+    # 右侧「剩余可放置角色：X」上移黑底白字横幅 y=375..405, x=1105..1270
+    cv2.rectangle(frame, (1105, 375), (1270, 405), (22, 24, 26), -1)
+    cv2.rectangle(frame, (1125, 384), (1248, 396), (228, 228, 228), -1)
+    # 冻结 [S] 与刷新 [D] 同时 0 饱和度置灰（下方衬托暗底形成清晰底缘梯度）
+    cv2.rectangle(frame, (960, 424), (1270, 496), (30, 30, 30), -1)
+    cv2.rectangle(frame, (970, 428), (1105, 480), (108, 108, 108), -1)
+    cv2.rectangle(frame, (1125, 428), (1260, 480), (116, 116, 116), -1)
+    # 底部商店暗底托盘（提供 3 条 5px 卡间暗缝 x∈{608,770,932}）
+    cv2.rectangle(frame, (0, 528), (1100, 718), (22, 24, 26), -1)
+
+    if slot_count == 6:
+        item_xs = (126, 288, 450, 612, 774, 936)
+        upg_span = (8, 117)
+    elif slot_count == 5:
+        item_xs = (288, 450, 612, 774, 936)
+        upg_span = (170, 279)
+    else:
+        item_xs = (450, 612, 774, 936)
+        upg_span = (332, 441)
+
+    for sx in item_xs:
+        _draw_shop_item_card(frame, sx, sx + 154, sold_out=False)
+
+    ux1, ux2 = upg_span
+    if dim_upgrade:
+        # 仿真 V*0.55 大幅压暗置灰的升级卡（触发低亮置灰兜底分支）
+        _draw_dark_screen_upgrade_card(frame, ux1, ux2, style="t3_grey")
+        frame = _desat_regions_for_test(frame, [(ux1, 530, ux2, 714)], 0.55)
+    else:
+        _draw_gray_upgrade_card(frame, ux1, ux2)
+    return frame
+
+
+def test_v033_dual_gray_shop_and_three_theme_desat_robustness(tmp_path: Path) -> None:
+    """验证双灰按钮零色相结构通道、低亮置灰升级卡、Theme 2 准备置灰及三主题全量置灰仿真。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 1. 双灰按钮商店展开（4/5/6 槽 + 低亮 V*0.55 置灰升级卡）
+    for slots in (4, 5, 6):
+        detector.reset()
+        frame = _make_dual_gray_shop_frame(slot_count=slots, dim_upgrade=True)
+        res = detector.detect(frame)
+        assert res.scene == GameScene.BATTLE_PREP
+        assert res.shop_open is True
+        assert res.shop_slot_count == slots
+
+    # 1b. 破坏上移黑底白字横幅或卡间暗缝 -> 零色相结构通道必须严守 shop_open=False
+    f_no_banner = _make_dual_gray_shop_frame(slot_count=5)
+    cv2.rectangle(f_no_banner, (1105, 375), (1270, 405), (120, 122, 124), -1)
+    assert detector.detect(f_no_banner).shop_open is False
+
+    f_no_gaps = _make_dual_gray_shop_frame(slot_count=5)
+    for gx in (608, 770, 932):
+        cv2.rectangle(f_no_gaps, (gx - 4, 540), (gx + 4, 700), (150, 150, 150), -1)
+    assert detector.detect(f_no_gaps).shop_open is False
+
+    # 2. 乌萨斯 Theme 2 准备按钮置灰兜底（暖橙辉光管 + 上方暗边 + 灰阶胶囊 + 右金黄放大镜）
+    f_t2_gray = _make_theme2_ursus_shop_frame(shop_open=False)
+    # 顶部暖橙辉光管区域 y=28..84, x=1132..1246（BGR (28, 120, 225) -> H≈14, S≈223, V=225）
+    cv2.rectangle(f_t2_gray, (1142, 34), (1236, 78), (28, 120, 225), -1)
+    # 将右上准备胶囊去饱和并压暗至 V*0.60（原 t2_sage 必然失效）
+    f_t2_gray = _desat_regions_for_test(f_t2_gray, [(1110, 99, 1265, 148)], 0.60)
+    detector.reset()
+    r_t2_gray = detector.detect(f_t2_gray)
+    assert r_t2_gray.scene == GameScene.BATTLE_PREP
+    assert r_t2_gray.confidence == 0.84
+
+    # 去掉辉光管暖橙色 -> 不应误触发 Theme 2 置灰兜底
+    f_t2_no_nixie = f_t2_gray.copy()
+    cv2.rectangle(f_t2_no_nixie, (1130, 26), (1250, 84), (52, 54, 56), -1)
+    detector.reset()
+    assert detector.detect(f_t2_no_nixie).scene == GameScene.UNKNOWN_FREE_CURSOR
+
+    # 3. 可选实机三主题全按钮置灰仿真（V*0.55 / 0.75 / 0.95，覆盖 T1/T2/T3 共 21 组）
+    a7_up = Path(
+        r"C:\Users\MUXI\.gemini\antigravity\brain\a7e72e90-d260-48de-94e8-debc493ed124\.user_uploaded"
+    )
+    real_theme_samples = [
+        (a7_up / "media_1795332461252_fe50bbf2.jpg", 5),
+        (a7_up / "media_1795334505233_979719ff.jpg", 6),
+        (a7_up / "media_1795267505954_2ea0d702.jpg", 4),
+        (a7_up / "media_1795325671726_73b3d7cb.jpg", 4),
+        (a7_up / "media_1795325671732_1bc865a7.jpg", 5),
+        (a7_up / "media_1795325671739_1e44ed7e.jpg", 5),
+        (a7_up / "media_1795325671744_308f0863.jpg", 5),
+    ]
+    desat_boxes = [(955, 418, 1275, 492), (1110, 82, 1272, 152), (5, 515, 445, 718)]
+    for path, exp_slots in real_theme_samples:
+        if not path.exists():
+            continue
+        raw = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert raw is not None
+        img_std = (
+            cv2.resize(raw, (STANDARD_WIDTH, STANDARD_HEIGHT), interpolation=cv2.INTER_AREA)
+            if raw.shape[:2] != (STANDARD_HEIGHT, STANDARD_WIDTH)
+            else raw
+        )
+        for v_scale in (0.55, 0.75, 0.95):
+            detector.reset()
+            sim = _desat_regions_for_test(img_std, desat_boxes, v_scale)
+            r_sim = detector.detect(sim)
+            assert r_sim.scene == GameScene.BATTLE_PREP, f"{path.name} V*{v_scale}: {r_sim}"
+            assert r_sim.shop_open is True, f"{path.name} V*{v_scale}: {r_sim}"
+            assert r_sim.shop_slot_count == exp_slots, f"{path.name} V*{v_scale}: {r_sim}"
+
+
+def _draw_stage_landmarks(
+    frame: np.ndarray, *, mirrored: bool, shop_open: bool, mode: str = "both"
+) -> None:
+    """在 3D 舞台左右 ROI 绘制我方发光青蓝 3D 防御箱（>=50x50 大连通框）与蓝紫小电视终端。"""
+    # 蓝紫小电视（BGR (215, 85, 40) -> H≈112, S≈207, V=215）
+    tv_bgr = (215, 85, 40)
+    # 发光青蓝 3D 防御箱（BGR (225, 200, 70) -> H≈95, S≈175, V=225）
+    box_bgr = (225, 200, 70)
+    if shop_open:
+        tv_rect = (775, 180, 855, 245) if mirrored else (275, 180, 355, 245)
+        box_rect = (735, 300, 825, 385) if mirrored else (310, 300, 400, 385)
+    else:
+        tv_rect = (830, 235, 930, 325) if mirrored else (220, 235, 320, 325)
+        box_rect = (790, 385, 905, 495) if mirrored else (255, 385, 370, 495)
+
+    if mode in ("tv", "both"):
+        cv2.rectangle(frame, tv_rect[:2], tv_rect[2:], tv_bgr, -1)
+    if mode in ("box", "both"):
+        cv2.rectangle(frame, box_rect[:2], box_rect[2:], box_bgr, 8)
+
+
+def test_v033_boss_mirrored_detection_and_latch_lifecycle(tmp_path: Path) -> None:
+    """验证 Boss 战右侧镜像双通道检测、小碎点滤噪、防抖与遮挡帧锁存及出局复位完整生命周期。"""
+    # 1. 双通道单帧检测（tv 通道 & 纯 box 通道，覆盖 shop_open=True/False；小碎点不误判）
+    for shop_open in (True, False):
+        for mode in ("tv", "box"):
+            f_mirr = _make_base_shop_frame() if shop_open else _make_theme3_rhodes_shop_frame(shop_open=False)
+            _draw_stage_landmarks(f_mirr, mirrored=True, shop_open=shop_open, mode=mode)
+            hsv_m = cv2.cvtColor(f_mirr, cv2.COLOR_BGR2HSV)
+            assert SceneDetector._detect_board_mirrored_heuristic(
+                hsv_m, shop_open=shop_open, unit_selected=False
+            ) is True
+            assert SceneDetector._observe_board_mirrored_heuristic(
+                hsv_m, shop_open=shop_open, unit_selected=True
+            ) is None
+
+            f_norm = _make_base_shop_frame() if shop_open else _make_theme3_rhodes_shop_frame(shop_open=False)
+            _draw_stage_landmarks(f_norm, mirrored=False, shop_open=shop_open, mode=mode)
+            hsv_n = cv2.cvtColor(f_norm, cv2.COLOR_BGR2HSV)
+            assert SceneDetector._observe_board_mirrored_heuristic(
+                hsv_n, shop_open=shop_open, unit_selected=False
+            ) is False
+
+    # 1b. 右侧仅存在 <50x50 的小青蓝碎点图标 -> 7x7 膨胀大连通域过滤必须拦掉
+    f_small = _make_base_shop_frame()
+    cv2.rectangle(f_small, (760, 320), (788, 348), (225, 200, 70), -1)
+    assert SceneDetector._detect_board_mirrored_heuristic(
+        cv2.cvtColor(f_small, cv2.COLOR_BGR2HSV), shop_open=True, unit_selected=False
+    ) is False
+
+    # 2. 完整锁存状态机生命周期（debounce_frames=2）
+    det = SceneDetector(templates_dir=tmp_path, debounce_frames=2)
+    f_boss_prep = _make_base_shop_frame()
+    _draw_stage_landmarks(f_boss_prep, mirrored=True, shop_open=True, mode="both")
+
+    # 连续 2 帧进入 Boss 战镜像休整期 -> 锁存 True
+    det.detect(f_boss_prep)
+    r_enter = det.detect(f_boss_prep)
+    assert r_enter.scene == GameScene.BATTLE_PREP
+    assert r_enter.board_mirrored is True
+
+    # 瞬态 1 帧纯黑过场 -> 防抖抑制，且不得清零镜像锁存
+    black = np.zeros((STANDARD_HEIGHT, STANDARD_WIDTH, 3), dtype=np.uint8)
+    r_blink = det.detect(black)
+    assert r_blink.scene == GameScene.BATTLE_PREP
+    assert r_blink.board_mirrored is True
+
+    # 打开角色特写详情（unit_selected=True，无地标可测）-> 保持镜像锁存 True
+    f_unit_sel = _make_theme3_rhodes_shop_frame(shop_open=False)
+    cv2.rectangle(f_unit_sel, (10, 327), (420, 343), (235, 195, 35), -1)
+    r_usel = det.detect(f_unit_sel)
+    assert r_usel.scene == GameScene.BATTLE_PREP
+    assert r_usel.unit_selected is True
+    assert r_usel.board_mirrored is True
+
+    # 局内弹出三选一决策窗（连续 2 帧切至 MODAL_CHOICE）-> 维持并透出锁存 True
+    f_modal = _make_real_style_modal_frame(choice_count=3)
+    det.detect(f_modal)
+    r_modal = det.detect(f_modal)
+    assert r_modal.scene == GameScene.MODAL_CHOICE
+    assert r_modal.board_mirrored is True
+
+    # 切入无地标作战期（如展开 4 人队友抽屉）-> 维持锁存 True
+    f_combat_occ = _make_battle_prep_frame(shop_open=False)
+    cv2.rectangle(f_combat_occ, (1035, 555), (1279, 710), (45, 165, 220), -1)
+    _draw_combat_cost_bar(f_combat_occ, with_progress_bar=True)
+    det.detect(f_combat_occ)
+    r_combat = det.detect(f_combat_occ)
+    assert r_combat.scene == GameScene.BATTLE_COMBAT
+    assert r_combat.board_mirrored is True
+
+    # 切回左侧正向地标帧 -> 立即翻回 board_mirrored=False
+    f_normal_prep = _make_base_shop_frame()
+    _draw_stage_landmarks(f_normal_prep, mirrored=False, shop_open=True, mode="both")
+    det.detect(f_normal_prep)
+    r_back_normal = det.detect(f_normal_prep)
+    assert r_back_normal.scene == GameScene.BATTLE_PREP
+    assert r_back_normal.board_mirrored is False
+
+    # 再次锁存 True 后连续 2 帧出局（UNKNOWN_FREE_CURSOR）-> 锁存彻底清零
+    det.detect(f_boss_prep)
+    assert det.detect(f_boss_prep).board_mirrored is True
+    det.detect(black)
+    r_exit = det.detect(black)
+    assert r_exit.scene == GameScene.UNKNOWN_FREE_CURSOR
+    assert r_exit.board_mirrored is False
+    # 退出后重新进入无地标作战期 -> 仍保持 False（证明锁存已清零）
+    det.detect(f_combat_occ)
+    assert det.detect(f_combat_occ).board_mirrored is False
+
+    # 3. 可选实机串行锁存验证：9797(镜像) -> 9f30(队友抽屉遮挡作战期保持 True) -> fe50(正向复位 False)
+    a7_up = Path(
+        r"C:\Users\MUXI\.gemini\antigravity\brain\a7e72e90-d260-48de-94e8-debc493ed124\.user_uploaded"
+    )
+    p9797 = a7_up / "media_1795334505233_979719ff.jpg"
+    p9f30 = a7_up / "media_1795328987598_9f30b6b8.jpg"
+    pfe50 = a7_up / "media_1795332461252_fe50bbf2.jpg"
+    if p9797.exists() and p9f30.exists() and pfe50.exists():
+        det_real = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+        im_9797 = cv2.imdecode(np.fromfile(str(p9797), dtype=np.uint8), cv2.IMREAD_COLOR)
+        im_9f30 = cv2.imdecode(np.fromfile(str(p9f30), dtype=np.uint8), cv2.IMREAD_COLOR)
+        im_fe50 = cv2.imdecode(np.fromfile(str(pfe50), dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert im_9797 is not None and im_9f30 is not None and im_fe50 is not None
+        assert det_real.detect(im_9797).board_mirrored is True
+        r_occ_real = det_real.detect(im_9f30)
+        assert r_occ_real.scene == GameScene.BATTLE_COMBAT
+        assert r_occ_real.board_mirrored is True
+        assert det_real.detect(im_fe50).board_mirrored is False
+
+
+def _draw_glowing_covenant_badge(
+    frame: np.ndarray,
+    cx: float,
+    *,
+    clip_left: int = 336,
+    clip_right: int = 944,
+    dark_core: bool = False,
+) -> None:
+    """绘制外缘精确位于 r=22.5px 的盟约圆环（支持满层高光亮芯与暗芯两种实机形态）。"""
+    layer = frame.copy()
+    ix, iy = int(round(cx)), 87
+    # 深暗外背景晕，令外缘 r=22.5px 处形成清晰单峰径向梯度
+    cv2.circle(layer, (ix, iy), 27, (18, 22, 30), -1, cv2.LINE_AA)
+    if dark_core:
+        # 暗芯青绿亮环（外缘 r=22.5px，内芯 r=18px 深暗）
+        cv2.circle(layer, (ix, iy), 22, (175, 232, 130), -1, cv2.LINE_AA)
+        cv2.circle(layer, (ix, iy), 18, (34, 42, 38), -1, cv2.LINE_AA)
+        cv2.circle(layer, (ix, iy), 10, (72, 96, 80), -1, cv2.LINE_AA)
+    else:
+        # 满层高饱和高亮蓝青圆盘（圆心 V≈215, S≈190，外缘精确位于 r=22.5px）
+        cv2.circle(layer, (ix, iy), 22, (248, 236, 98), -1, cv2.LINE_AA)
+        cv2.circle(layer, (ix, iy), 17, (215, 188, 52), -1, cv2.LINE_AA)
+    # 底部层数与盟约名高对比暗影白字
+    cv2.rectangle(layer, (ix - 18, 102), (ix + 18, 126), (14, 16, 20), -1)
+    cv2.line(layer, (ix - 12, 109), (ix + 12, 109), (235, 238, 240), 2)
+    cv2.line(layer, (ix - 14, 119), (ix + 14, 119), (218, 222, 225), 2)
+
+    x_min = max(clip_left, ix - 30)
+    x_max = min(clip_right, ix + 31)
+    if x_min < x_max:
+        frame[55:132, x_min:x_max] = layer[55:132, x_min:x_max]
+
+
+def test_v033_covenant_arbitrary_scroll_phase_and_glow_badges(tmp_path: Path) -> None:
+    """验证满层发光圆环识别与 >7 盟约任意水平滚动相位动态坐标输出（误差 < 3px）。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 1. 满层高光亮芯 6 枚居中对称 -> count=6, overflow=False, centers_u 精确对齐
+    f_glow6 = _make_theme3_rhodes_shop_frame(shop_open=False)
+    gt6 = [640.0 + (i - 2.5) * 80.0 for i in range(6)]
+    for cx in gt6:
+        _draw_glowing_covenant_badge(f_glow6, cx)
+    r_glow6 = detector.detect(f_glow6)
+    assert r_glow6.scene == GameScene.BATTLE_PREP
+    assert r_glow6.covenant_count == 6
+    assert r_glow6.covenant_overflow is False
+    assert len(r_glow6.covenant_centers_u) == 6
+    for u_pred, x_gt in zip(r_glow6.covenant_centers_u, gt6):
+        assert abs(u_pred * STANDARD_WIDTH - x_gt) < 3.0
+
+    # 2. 合成 9 枚混合高光/暗芯盟约在 ScrollRect [336..944] 内连续平移滚动（覆盖非对称/居中微弧/右对齐）
+    base = _make_theme3_rhodes_shop_frame(shop_open=False)
+    for shift in (0, 20, 38, 44, 60, 100, 160):
+        detector.reset()
+        sim = base.copy()
+        gt_all = [379.0 + k * 80.0 - shift for k in range(9)]
+        for idx, cx in enumerate(gt_all):
+            _draw_glowing_covenant_badge(
+                sim, cx, clip_left=336, clip_right=944, dark_core=(idx % 2 == 1)
+            )
+        res = detector.detect(sim)
+        assert res.scene == GameScene.BATTLE_PREP
+        assert res.covenant_overflow is True, f"shift={shift} lost overflow: {res}"
+        pred_xs = [u * STANDARD_WIDTH for u in res.covenant_centers_u]
+        assert len(pred_xs) == res.covenant_count and len(pred_xs) >= 7
+        core_gt = [x for x in gt_all if 362.0 <= x <= 918.0]
+        for gx in core_gt:
+            err = abs(min(pred_xs, key=lambda px: abs(px - gx)) - gx)
+            assert err < 3.0, f"shift={shift} gt={gx} pred={pred_xs} err={err}"
+
+    # 3. 可选实机连续滚动仿真：在 308f0863.jpg 与 979719ff.jpg 上验证多相位 100% 溢出保持与 <3px 精度
+    a7_up = Path(
+        r"C:\Users\MUXI\.gemini\antigravity\brain\a7e72e90-d260-48de-94e8-debc493ed124\.user_uploaded"
+    )
+    for fname, base_x0 in (
+        ("media_1795325671744_308f0863.jpg", 380.0),
+        ("media_1795334505233_979719ff.jpg", 375.5),
+    ):
+        p = a7_up / fname
+        if not p.exists():
+            continue
+        raw = cv2.imdecode(np.fromfile(str(p), dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert raw is not None
+        im_std = (
+            cv2.resize(raw, (STANDARD_WIDTH, STANDARD_HEIGHT), interpolation=cv2.INTER_AREA)
+            if raw.shape[:2] != (STANDARD_HEIGHT, STANDARD_WIDTH)
+            else raw
+        )
+        x_tile0 = int(round(base_x0 - 40.0))
+        tiles = [im_std[58:132, x_tile0 + i * 80 : x_tile0 + (i + 1) * 80].copy() for i in range(7)]
+        strip = np.hstack(tiles + [tiles[1].copy(), tiles[3].copy()])
+        for shift in (0, 20, 44, 60, 100, 160):
+            detector.reset()
+            sim = im_std.copy()
+            x_strip_start = x_tile0 - shift
+            for dst_x in range(336, 944):
+                src_x = dst_x - x_strip_start
+                if 0 <= src_x < strip.shape[1]:
+                    sim[58:132, dst_x] = strip[:, src_x]
+            sim[58:87, 922:956] = im_std[58:87, 922:956]
+            r_sc = detector.detect(sim)
+            assert r_sc.covenant_overflow is True, f"{fname} shift={shift}: {r_sc}"
+            pred_xs = [u * STANDARD_WIDTH for u in r_sc.covenant_centers_u]
+            gt_all = [base_x0 + k * 80.0 - shift for k in range(9)]
+            for gx in [x for x in gt_all if 362.0 <= x <= 918.0]:
+                err = abs(min(pred_xs, key=lambda px: abs(px - gx)) - gx)
+                assert err < 3.0, f"{fname} shift={shift} gt={gx} pred={pred_xs} err={err}"
+
+
+def test_v033_in_game_chrome_resists_wda_none_white_hud_and_toast_occlusion(
+    tmp_path: Path,
+) -> None:
+    """验证 WDA_NONE 顶部宽纯白 HUD 胶囊（含镜像战场文案）+ 第 2 行纯白 Toast 同时遮挡时仍稳判局内并保持镜像锁存。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 1. 合成 Boss 战镜像休整帧，并在顶部中央叠画两行宽纯白 HUD 胶囊+Toast，使原 top_dk 跌穿 0.42（仅保留两翼黑条）
+    f_synth = _make_base_shop_frame()
+    _draw_stage_landmarks(f_synth, mirrored=True, shop_open=True, mode="both")
+    # 扩展顶部暗条两翼覆盖 [385..895]（与实机顶部黑色状态栏同宽）
+    cv2.rectangle(f_synth, (385, 6), (895, 66), (22, 24, 28), -1)
+    # 叠画第 1 行超宽纯白 HUD 顶签 (x=475..805, y=8..36) + 第 2 行纯白 Toast (x=495..785, y=38..64)
+    cv2.rectangle(f_synth, (475, 8), (805, 36), (248, 248, 248), -1)
+    cv2.rectangle(f_synth, (495, 38), (785, 64), (246, 246, 246), -1)
+
+    hsv_s = cv2.cvtColor(f_synth, cv2.COLOR_BGR2HSV)
+    assert float((hsv_s[6:66, 410:870, 2] <= 70).mean()) < 0.42
+    assert SceneDetector._has_stronghold_in_game_chrome(hsv_s) is True
+    r_synth = detector.detect(f_synth)
+    assert r_synth.scene == GameScene.BATTLE_PREP
+    assert r_synth.shop_open is True
+    assert r_synth.board_mirrored is True
+
+    # 1b. 若左上深红退出门缺失（局外画面），即便两翼全黑也必须严守 UNKNOWN_FREE_CURSOR
+    f_no_esc = f_synth.copy()
+    cv2.rectangle(f_no_esc, (12, 10), (100, 80), (180, 180, 180), -1)
+    detector.reset()
+    assert SceneDetector._has_stronghold_in_game_chrome(cv2.cvtColor(f_no_esc, cv2.COLOR_BGR2HSV)) is False
+    assert detector.detect(f_no_esc).scene == GameScene.UNKNOWN_FREE_CURSOR
+
+    # 2. 可选实机回归：在 979719ff.jpg 上直接叠加两行纯白宽 HUD 胶囊+Toast，确认不跌落 UNKNOWN 且稳保 6 槽与镜像
+    p9797 = Path(
+        r"C:\Users\MUXI\.gemini\antigravity\brain\a7e72e90-d260-48de-94e8-debc493ed124\.user_uploaded\media_1795334505233_979719ff.jpg"
+    )
+    if p9797.exists():
+        raw = cv2.imdecode(np.fromfile(str(p9797), dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert raw is not None
+        im_9797 = (
+            cv2.resize(raw, (STANDARD_WIDTH, STANDARD_HEIGHT), interpolation=cv2.INTER_AREA)
+            if raw.shape[:2] != (STANDARD_HEIGHT, STANDARD_WIDTH)
+            else raw
+        )
+        # 复现 WDA_NONE 顶部「PRTS // 休整运营 · 商店 [3/6] · 镜像战场 · 商店展开」宽白胶囊 + 第 2 行白 Toast
+        occluded = im_9797.copy()
+        cv2.rectangle(occluded, (462, 6), (818, 36), (248, 248, 248), -1)
+        cv2.rectangle(occluded, (505, 38), (775, 65), (245, 245, 245), -1)
+        hsv_occ = cv2.cvtColor(occluded, cv2.COLOR_BGR2HSV)
+        assert float((hsv_occ[6:66, 410:870, 2] <= 70).mean()) < 0.42
+        detector.reset()
+        r_occ = detector.detect(occluded)
+        assert r_occ.scene == GameScene.BATTLE_PREP
+        assert r_occ.shop_open is True
+        assert r_occ.shop_slot_count == 6
+        assert r_occ.board_mirrored is True
+        assert r_occ.covenant_count == 7
+        assert r_occ.covenant_overflow is True
+
+
 
 
 
