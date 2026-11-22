@@ -32,42 +32,42 @@
   "choice_zone": {
     "name": "choice",
     "count": 3,
-    "start_u": 0.2469,
-    "start_v": 0.5049,
-    "end_u": 0.7816,
-    "end_v": 0.5049,
-    "slot_w": 0.2242,
-    "slot_h": 0.3347
+    "start_u": 0.24727,
+    "start_v": 0.50347,
+    "end_u": 0.78164,
+    "end_v": 0.50347,
+    "slot_w": 0.22344,
+    "slot_h": 0.33403
   },
   "choice_2_zone": {
     "name": "choice_2",
     "count": 2,
-    "start_u": 0.3809,
-    "start_v": 0.5000,
-    "end_u": 0.6477,
-    "end_v": 0.5000,
-    "slot_w": 0.2188,
-    "slot_h": 0.3306
+    "start_u": 0.38086,
+    "start_v": 0.50347,
+    "end_u": 0.64805,
+    "end_v": 0.50347,
+    "slot_w": 0.22344,
+    "slot_h": 0.33403
   },
   "choice_6_top_zone": {
     "name": "choice_6_top",
     "count": 3,
-    "start_u": 0.2473,
-    "start_v": 0.2931,
-    "end_u": 0.7816,
-    "end_v": 0.2931,
-    "slot_w": 0.2180,
-    "slot_h": 0.3306
+    "start_u": 0.24727,
+    "start_v": 0.29722,
+    "end_u": 0.78164,
+    "end_v": 0.29722,
+    "slot_w": 0.22344,
+    "slot_h": 0.33472
   },
   "choice_6_bottom_zone": {
     "name": "choice_6_bottom",
     "count": 3,
-    "start_u": 0.2473,
-    "start_v": 0.7083,
-    "end_u": 0.7816,
-    "end_v": 0.7083,
-    "slot_w": 0.2180,
-    "slot_h": 0.3306
+    "start_u": 0.24727,
+    "start_v": 0.70972,
+    "end_u": 0.78164,
+    "end_v": 0.70972,
+    "slot_w": 0.22344,
+    "slot_h": 0.33472
   },
   "emote_top_zone": {
     "name": "emote_top",
@@ -91,11 +91,12 @@
   },
   "covenant_zone": {
     "center_u": 0.500,
-    "v": 0.118,
-    "step_u": 0.052,
+    "v": 0.1208,
+    "step_u": 0.0625,
     "slot_w": 0.044,
     "slot_h": 0.082,
-    "default_count": 5
+    "default_count": 5,
+    "overflow_start_u": 0.2961
   },
   "board_quad": {
     "top_left": [0.34531, 0.2787],
@@ -104,6 +105,24 @@
     "bottom_left": [0.32604, 0.66019],
     "rows": 4,
     "cols": 7
+  },
+  "mirrored_board_quad": {
+    "top_left": [0.17357, 0.28519],
+    "top_right": [0.59649, 0.27870],
+    "bottom_right": [0.61576, 0.66019],
+    "bottom_left": [0.12774, 0.66759],
+    "rows": 4,
+    "cols": 7
+  },
+  "mirrored_equip_zone": {
+    "name": "equip_mirrored",
+    "count": 5,
+    "start_u": 0.22475,
+    "start_v": 0.71705,
+    "end_u": 0.50715,
+    "end_v": 0.71705,
+    "slot_w": 0.068,
+    "slot_h": 0.088
   },
   "buttons": {
     "back": { "u": 0.046, "v": 0.062, "anchor": "left_edge" },
@@ -121,9 +140,11 @@
     "choice_toggle_eye": { "u": 0.968, "v": 0.500, "anchor": "right_edge" },
     "choice_toggle_eye_6": { "u": 0.968, "v": 0.500, "anchor": "right_edge" },
     "sell_dropzone": { "u": 0.925, "v": 0.850, "anchor": "right_edge" },
-    "safe_blank": { "u": 0.955, "v": 0.445, "anchor": "right_edge" },
+    "safe_blank": { "u": 0.1172, "v": 0.0903, "anchor": "left_edge" },
     "strategy_avatar": { "u": 0.9605, "v": 0.3243, "anchor": "right_edge" },
     "strategy_inspect": { "u": 0.9047, "v": 0.3236, "anchor": "right_edge" },
+    "strategy_avatar_combat": { "u": 0.9602, "v": 0.7486, "anchor": "right_edge" },
+    "strategy_inspect_combat": { "u": 0.9051, "v": 0.7493, "anchor": "right_edge" },
     "confirm_no": { "u": 0.2496, "v": 0.6729, "anchor": "center_16_9" },
     "confirm_yes": { "u": 0.7496, "v": 0.6729, "anchor": "center_16_9" },
     "confirm_dont_ask": { "u": 0.4992, "v": 0.5597, "anchor": "center_16_9" },

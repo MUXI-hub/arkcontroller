@@ -109,7 +109,6 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "place_or_confirm": "A",
             "cancel": "B",
             "quick_sell": "X",
-            "gift_teammate": "Y",
             "toggle_bench_board": "LB/RB",
         },
         "modal_choice": {
@@ -130,6 +129,7 @@ def _default_bindings() -> dict[str, dict[str, str]]:
             "cycle_teammate": "LT+DPAD_RIGHT",
             "toggle_shop": "LT+LB",
             "retreat_unit": "LT+RB",
+            "use_strategy": "LT+RT",
             "pause_menu": "LT+START",
         },
     }
@@ -400,14 +400,15 @@ SlotZoneConfig = LinearZone
 
 @dataclass
 class SymmetricCovenantZone:
-    """顶部栏下方居中对称分布的羁绊（盟约）图标区域配置。"""
+    """顶部栏下方居中对称分布（超过 7 个时左对齐滑动）的羁绊（盟约）图标区域配置。"""
 
     center_u: float = 0.500
-    v: float = 0.118
-    step_u: float = 0.052
+    v: float = 0.1208
+    step_u: float = 0.0625
     slot_w: float = 0.044
     slot_h: float = 0.082
     default_count: int = 5
+    overflow_start_u: float = 0.2961
 
     def __post_init__(self) -> None:
         self.center_u = _validate_unit_coord("covenant_zone.center_u", self.center_u)
@@ -415,26 +416,44 @@ class SymmetricCovenantZone:
         self.step_u = _validate_positive_unit("covenant_zone.step_u", self.step_u)
         self.slot_w = _validate_positive_unit("covenant_zone.slot_w", self.slot_w)
         self.slot_h = _validate_positive_unit("covenant_zone.slot_h", self.slot_h)
+        self.overflow_start_u = _validate_unit_coord(
+            "covenant_zone.overflow_start_u", self.overflow_start_u
+        )
         self.default_count = int(self.default_count)
         if self.default_count < 0:
             raise ValueError(
                 f"SymmetricCovenantZone.default_count 必须 >= 0，当前值: {self.default_count}"
             )
 
-    def slot_center(self, index: int, count: int | None = None) -> tuple[float, float]:
-        """按总羁绊数 count 计算居中对称的第 index 个图标归一化中心坐标 (u, v)。"""
+    def slot_center(
+        self,
+        index: int,
+        count: int | None = None,
+        overflow: bool = False,
+    ) -> tuple[float, float]:
+        """计算第 index 个盟约图标归一化中心坐标 (u, v)。
+
+        - overflow=False：按总盟约数 count 居中对称排布；
+        - overflow=True：超过 7 枚盟约溢出时按 overflow_start_u 左对齐等距排布。
+        """
         n = self.default_count if count is None else int(count)
         if n < 1 or not (0 <= index < n):
             raise IndexError(f"羁绊槽位索引越界: index={index}, count={n}")
+        if overflow:
+            u = max(0.0, min(1.0, self.overflow_start_u + index * self.step_u))
+            return (float(u), float(self.v))
         offset = (index - (n - 1) * 0.5) * self.step_u
         u = max(0.0, min(1.0, self.center_u + offset))
         return (float(u), float(self.v))
 
     def slot_polygon(
-        self, index: int, count: int | None = None
+        self,
+        index: int,
+        count: int | None = None,
+        overflow: bool = False,
     ) -> list[tuple[float, float]]:
-        """返回第 index 个居中对称羁绊图标的顺时针 4 顶点归一化矩形。"""
-        cu, cv = self.slot_center(index, count=count)
+        """返回第 index 个盟约图标的顺时针 4 顶点归一化矩形。"""
+        cu, cv = self.slot_center(index, count=count, overflow=overflow)
         hw = self.slot_w * 0.5
         hh = self.slot_h * 0.5
         return [
@@ -452,17 +471,19 @@ class SymmetricCovenantZone:
             "slot_w": self.slot_w,
             "slot_h": self.slot_h,
             "default_count": self.default_count,
+            "overflow_start_u": self.overflow_start_u,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> SymmetricCovenantZone:
         return cls(
             center_u=float(data.get("center_u", 0.500)),
-            v=float(data.get("v", 0.118)),
-            step_u=float(data.get("step_u", 0.052)),
+            v=float(data.get("v", 0.1208)),
+            step_u=float(data.get("step_u", 0.0625)),
             slot_w=float(data.get("slot_w", 0.044)),
             slot_h=float(data.get("slot_h", 0.082)),
             default_count=int(data.get("default_count", 5)),
+            overflow_start_u=float(data.get("overflow_start_u", 0.2961)),
         )
 
 
@@ -470,12 +491,12 @@ def _default_choice_2_zone() -> LinearZone:
     return LinearZone(
         name="choice_2",
         count=2,
-        start_u=0.3809,
-        start_v=0.5000,
-        end_u=0.6477,
-        end_v=0.5000,
-        slot_w=0.2188,
-        slot_h=0.3306,
+        start_u=0.38086,
+        start_v=0.50347,
+        end_u=0.64805,
+        end_v=0.50347,
+        slot_w=0.22344,
+        slot_h=0.33403,
     )
 
 
@@ -483,12 +504,12 @@ def _default_choice_6_top_zone() -> LinearZone:
     return LinearZone(
         name="choice_6_top",
         count=3,
-        start_u=0.2473,
-        start_v=0.2931,
-        end_u=0.7816,
-        end_v=0.2931,
-        slot_w=0.2180,
-        slot_h=0.3306,
+        start_u=0.24727,
+        start_v=0.29722,
+        end_u=0.78164,
+        end_v=0.29722,
+        slot_w=0.22344,
+        slot_h=0.33472,
     )
 
 
@@ -496,12 +517,12 @@ def _default_choice_6_bottom_zone() -> LinearZone:
     return LinearZone(
         name="choice_6_bottom",
         count=3,
-        start_u=0.2473,
-        start_v=0.7083,
-        end_u=0.7816,
-        end_v=0.7083,
-        slot_w=0.2180,
-        slot_h=0.3306,
+        start_u=0.24727,
+        start_v=0.70972,
+        end_u=0.78164,
+        end_v=0.70972,
+        slot_w=0.22344,
+        slot_h=0.33472,
     )
 
 
@@ -531,11 +552,40 @@ def _default_emote_bottom_zone() -> LinearZone:
     )
 
 
+def _default_mirrored_board_quad() -> PerspectiveQuad:
+    """返回 Boss 战右侧分配时水平镜像的 4x7 棋盘透视四角（保持逻辑左→右列序）。"""
+    return PerspectiveQuad(
+        top_left=(0.17357, 0.28519),
+        top_right=(0.59649, 0.27870),
+        bottom_right=(0.61576, 0.66019),
+        bottom_left=(0.12774, 0.66759),
+        rows=4,
+        cols=7,
+    )
+
+
+def _default_mirrored_equip_zone() -> LinearZone:
+    """返回 Boss 战右侧分配时水平镜像的 5 槽装备台线性区域。"""
+    return LinearZone(
+        name="equip_mirrored",
+        count=5,
+        start_u=0.22475,
+        start_v=0.71705,
+        end_u=0.50715,
+        end_v=0.71705,
+        slot_w=0.068,
+        slot_h=0.088,
+    )
+
+
 def _default_fallback_buttons() -> dict[str, NormalizedPoint]:
-    """返回回合确认弹窗、策略头像与交流面板的默认实测按钮锚点（兼容精简配置字典）。"""
+    """返回回合确认弹窗、安全空白区、策略头像与交流面板的默认实测按钮锚点（兼容精简配置字典）。"""
     return {
+        "safe_blank": NormalizedPoint(u=0.1172, v=0.0903, anchor="left_edge"),
         "strategy_avatar": NormalizedPoint(u=0.9605, v=0.3243, anchor="right_edge"),
         "strategy_inspect": NormalizedPoint(u=0.9047, v=0.3236, anchor="right_edge"),
+        "strategy_avatar_combat": NormalizedPoint(u=0.9602, v=0.7486, anchor="right_edge"),
+        "strategy_inspect_combat": NormalizedPoint(u=0.9051, v=0.7493, anchor="right_edge"),
         "confirm_no": NormalizedPoint(u=0.2496, v=0.6729, anchor="center_16_9"),
         "confirm_yes": NormalizedPoint(u=0.7496, v=0.6729, anchor="center_16_9"),
         "confirm_dont_ask": NormalizedPoint(u=0.4992, v=0.5597, anchor="center_16_9"),
@@ -723,6 +773,8 @@ class LayoutProfile:
     emote_top_zone: LinearZone = field(default_factory=_default_emote_top_zone)
     emote_bottom_zone: LinearZone = field(default_factory=_default_emote_bottom_zone)
     covenant_zone: SymmetricCovenantZone = field(default_factory=SymmetricCovenantZone)
+    mirrored_board_quad: PerspectiveQuad = field(default_factory=_default_mirrored_board_quad)
+    mirrored_equip_zone: LinearZone = field(default_factory=_default_mirrored_equip_zone)
 
     def __post_init__(self) -> None:
         missing = [key for key in REQUIRED_BUTTON_KEYS if key not in self.buttons]
@@ -738,22 +790,39 @@ class LayoutProfile:
         return self.view_overrides.get(key)
 
     def resolve_board_quad(
-        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+        self,
+        view_state: LayoutViewState | str = LayoutViewState.NORMAL,
+        *,
+        mirrored: bool = False,
     ) -> PerspectiveQuad:
-        """按当前镜头缩放态解析生效的棋盘透视四角。"""
+        """按当前镜头缩放态与 Boss 战镜像标志解析生效的棋盘透视四角。
+
+        当 ``mirrored=True``（如 Boss 战被分配至右侧）时，始终以
+        ``self.mirrored_board_quad`` 为基准，跳过仅针对非镜像布局的静态
+        ``override.board_quad`` 覆盖，直接套用 ``override.board_transform``。
+        """
+        base_quad = self.mirrored_board_quad if mirrored else self.board_quad
         override = self._get_view_override(view_state)
         if override is None:
-            return self.board_quad
-        if override.board_quad is not None:
+            return base_quad
+        if not mirrored and override.board_quad is not None:
             return override.board_quad
         if override.board_transform is not None:
-            return override.board_transform.apply_quad(self.board_quad)
-        return self.board_quad
+            return override.board_transform.apply_quad(base_quad)
+        return base_quad
 
     def resolve_bench_zone(
-        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+        self,
+        view_state: LayoutViewState | str = LayoutViewState.NORMAL,
+        *,
+        mirrored: bool = False,
     ) -> LinearZone:
-        """按当前镜头缩放态解析生效的整备区线性槽位。"""
+        """按当前镜头缩放态解析生效的整备区线性槽位。
+
+        实机测绘确认 Boss 战左右切换时 10 槽整备区与 2D UI 均不镜像，
+        保留 ``mirrored`` 关键字参数以保持调用方接口一致。
+        """
+        _ = mirrored
         override = self._get_view_override(view_state)
         if override is None:
             return self.bench_zone
@@ -764,17 +833,26 @@ class LayoutProfile:
         return self.bench_zone
 
     def resolve_equip_zone(
-        self, view_state: LayoutViewState | str = LayoutViewState.NORMAL
+        self,
+        view_state: LayoutViewState | str = LayoutViewState.NORMAL,
+        *,
+        mirrored: bool = False,
     ) -> LinearZone:
-        """按当前镜头缩放态解析生效的装备栏线性槽位。"""
+        """按当前镜头缩放态与 Boss 战镜像标志解析生效的装备栏线性槽位。
+
+        当 ``mirrored=True`` 时以 ``self.mirrored_equip_zone`` 为基准，
+        忽略仅针对非镜像布局的静态 ``override.equip_zone``，直接套用
+        ``override.equip_transform``。
+        """
+        base_zone = self.mirrored_equip_zone if mirrored else self.equip_zone
         override = self._get_view_override(view_state)
         if override is None:
-            return self.equip_zone
-        if override.equip_zone is not None:
+            return base_zone
+        if not mirrored and override.equip_zone is not None:
             return override.equip_zone
         if override.equip_transform is not None:
-            return override.equip_transform.apply_zone(self.equip_zone)
-        return self.equip_zone
+            return override.equip_transform.apply_zone(base_zone)
+        return base_zone
 
     def resolve_shop_zone(
         self,
@@ -905,36 +983,44 @@ class LayoutProfile:
         """解析卡片被选中后底部弹出的白色「确认选择」条归一化中心点击坐标。"""
         cu, cv = self.resolve_choice_card_center(index, choice_count)
         _, sh = self.resolve_choice_card_size(index, choice_count)
-        confirm_v = max(0.0, min(0.98, cv + sh * 0.505))
+        confirm_v = max(0.0, min(0.98, cv + sh * 0.513))
         return (float(cu), float(confirm_v))
 
     def resolve_choice_card_polygon(
         self, index: int, choice_count: int = 3
     ) -> list[tuple[float, float]]:
-        """返回未确认阶段第 index 张决策卡片的 4 顶点归一化矩形。"""
+        """返回未确认阶段第 index 张决策卡片外扩 11px（错开卡片白边）的 4 顶点归一化矩形。"""
         cu, cv = self.resolve_choice_card_center(index, choice_count)
         sw, sh = self.resolve_choice_card_size(index, choice_count)
-        hw, hh = sw * 0.5, sh * 0.5
+        hw = sw * 0.5 + 11.0 / 1280.0
+        hh = sh * 0.5 + 11.0 / 720.0
+        left_u = max(0.004, min(0.996, cu - hw))
+        right_u = max(0.004, min(0.996, cu + hw))
+        top_v = max(0.004, min(0.996, cv - hh))
+        bot_v = max(0.004, min(0.996, cv + hh))
         return [
-            (cu - hw, cv - hh),
-            (cu + hw, cv - hh),
-            (cu + hw, cv + hh),
-            (cu - hw, cv + hh),
+            (left_u, top_v),
+            (right_u, top_v),
+            (right_u, bot_v),
+            (left_u, bot_v),
         ]
 
     def resolve_choice_confirm_polygon(
         self, index: int, choice_count: int = 3
     ) -> list[tuple[float, float]]:
-        """返回卡片选中后底部白色「确认选择」横条的 4 顶点归一化矩形。"""
-        cu, confirm_v = self.resolve_choice_confirm_point(index, choice_count)
-        sw, _ = self.resolve_choice_card_size(index, choice_count)
-        hw = sw * 0.51
-        hh = 0.034
+        """返回卡片点中待二次确认态包裹放大整卡与底部「确认选择」白条再外扩 11px 的 4 顶点矩形。"""
+        cu, cv = self.resolve_choice_card_center(index, choice_count)
+        sw, sh = self.resolve_choice_card_size(index, choice_count)
+        hw = sw * 0.5 + 0.01016
+        left_u = max(0.004, min(0.996, cu - hw))
+        right_u = max(0.004, min(0.996, cu + hw))
+        top_v = max(0.004, min(0.996, cv - sh * 0.5 - 0.04583))
+        bot_v = max(0.004, min(0.996, cv + sh * 0.5 + 0.05694))
         return [
-            (cu - hw, confirm_v - hh),
-            (cu + hw, confirm_v - hh),
-            (cu + hw, confirm_v + hh),
-            (cu - hw, confirm_v + hh),
+            (left_u, top_v),
+            (right_u, top_v),
+            (right_u, bot_v),
+            (left_u, bot_v),
         ]
 
     def resolve_choice_toggle_point(
@@ -980,6 +1066,8 @@ class LayoutProfile:
             "emote_bottom_zone": self.emote_bottom_zone.to_dict(),
             "covenant_zone": self.covenant_zone.to_dict(),
             "board_quad": self.board_quad.to_dict(),
+            "mirrored_board_quad": self.mirrored_board_quad.to_dict(),
+            "mirrored_equip_zone": self.mirrored_equip_zone.to_dict(),
             "buttons": {k: v.to_dict() for k, v in self.buttons.items()},
         }
         if self.view_overrides:
@@ -990,7 +1078,7 @@ class LayoutProfile:
     def from_dict(cls, data: Mapping[str, Any]) -> LayoutProfile:
         """从合并后的字典反序列化 LayoutProfile 并校验完整性。
 
-        自动静默忽略旧版残留的局外节点字段，并为新增的策略头像与回合确认按钮提供默认坐标兜底。
+        自动静默忽略旧版残留的局外节点字段，并为新增的策略头像、镜像棋盘/装备区与回合确认按钮提供默认坐标兜底。
         """
         buttons_raw = data.get("buttons", {})
         buttons: dict[str, NormalizedPoint] = {
@@ -1005,6 +1093,8 @@ class LayoutProfile:
         raw_em_top = data.get("emote_top_zone")
         raw_em_bot = data.get("emote_bottom_zone")
         raw_cov = data.get("covenant_zone")
+        raw_m_board = data.get("mirrored_board_quad")
+        raw_m_equip = data.get("mirrored_equip_zone")
         return cls(
             shop_zone=(
                 data["shop_zone"]
@@ -1087,6 +1177,24 @@ class LayoutProfile:
                     else SymmetricCovenantZone()
                 )
             ),
+            mirrored_board_quad=(
+                raw_m_board
+                if isinstance(raw_m_board, PerspectiveQuad)
+                else (
+                    PerspectiveQuad.from_dict(raw_m_board)
+                    if isinstance(raw_m_board, Mapping)
+                    else _default_mirrored_board_quad()
+                )
+            ),
+            mirrored_equip_zone=(
+                raw_m_equip
+                if isinstance(raw_m_equip, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_m_equip)
+                    if isinstance(raw_m_equip, Mapping)
+                    else _default_mirrored_equip_zone()
+                )
+            ),
         )
 
 
@@ -1111,6 +1219,7 @@ class KeymapConfig:
     left_stick_dpad_threshold: float = 0.50
     left_stick_dpad_release_threshold: float = 0.30
     auto_toggle_shop: bool = True
+    hide_hud_from_capture: bool = True
     keyboard_shortcuts: dict[str, str] = field(default_factory=_default_keyboard_shortcuts)
     bindings: dict[str, dict[str, str]] = field(default_factory=_default_bindings)
 
@@ -1132,6 +1241,7 @@ class KeymapConfig:
         self.left_stick_dpad_threshold = float(self.left_stick_dpad_threshold)
         self.left_stick_dpad_release_threshold = float(self.left_stick_dpad_release_threshold)
         self.auto_toggle_shop = bool(self.auto_toggle_shop)
+        self.hide_hud_from_capture = bool(self.hide_hud_from_capture)
 
         if not (0.0 <= self.left_deadzone < 0.95):
             raise ValueError(f"left_deadzone 必须位于 [0.0, 0.95) 范围内，当前值: {self.left_deadzone}")
@@ -1192,6 +1302,7 @@ class KeymapConfig:
             "left_stick_dpad_threshold": self.left_stick_dpad_threshold,
             "left_stick_dpad_release_threshold": self.left_stick_dpad_release_threshold,
             "auto_toggle_shop": self.auto_toggle_shop,
+            "hide_hud_from_capture": self.hide_hud_from_capture,
             "keyboard_shortcuts": dict(self.keyboard_shortcuts),
             "bindings": {section: dict(items) for section, items in self.bindings.items()},
         }
@@ -1231,6 +1342,7 @@ class KeymapConfig:
                 data.get("left_stick_dpad_release_threshold", 0.30)
             ),
             auto_toggle_shop=bool(data.get("auto_toggle_shop", True)),
+            hide_hud_from_capture=bool(data.get("hide_hud_from_capture", True)),
             keyboard_shortcuts=shortcuts,
             bindings=bindings,
         )

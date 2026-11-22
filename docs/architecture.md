@@ -39,10 +39,11 @@ flowchart TD
         DISP["ControlDispatcher (局外自由鼠标 / 局内焦点路由)"]
     end
 
-    subgraph OverlayLayer["PySide6 悬浮与托盘层"]
-        HUD["HUDWindow (WS_EX_TRANSPARENT 科技风透明叠加层)"]
-        CALUI["CalibrationDialog (拖拽透视网格与模板采样器)"]
-        TRAY["ControllerTray (内置矢量图标托盘控制菜单)"]
+    subgraph OverlayLayer["PySide6 纯白极简悬浮与桌面主控层"]
+        HUD["HUDWindow (H1/H2 极简穿透叠加层 / 矢量手柄图示 / WDA_EXCLUDEFROMCAPTURE)"]
+        DASH["PRTSDashboardWindow (方案B v2 四分区主控台 / 16Hz 遥测仪 / 参数热保存)"]
+        CALUI["CalibrationDialog (白底细边校准栏 / 透视网格与模板采样器)"]
+        TRAY["ControllerTray (白底琥珀点矢量图标 / 浅色高对比托盘菜单)"]
     end
 
     GP --> XI
@@ -69,18 +70,23 @@ flowchart TD
     CALUI --> CFG
     TRAY --> DISP
     TRAY --> HUD
+    TRAY --> DASH
+    DASH --> CFG
+    DASH --> DISP
+    DASH --> CALUI
 ```
 
 ### 多频时钟协同调度（`main.py`）
 
-为避免截屏与 OpenCV 模板匹配阻塞手柄操作手感，主进程通过三个解耦时钟协同运行：
+为避免截屏、OpenCV 识别与桌面遥测刷新阻塞手柄操作手感，主进程通过解耦时钟协同运行：
 
 | 调度单元 | 运行载体 | 周期 / 频率 | 核心职责 |
 | :--- | :--- | :--- | :--- |
 | `ScreenCapture` 采图线程 | 独立后台守护线程 | `~200ms` (5Hz) | 线程独占 `mss` 截取 16:9 视口下采样至 `1280x720` BGR，支持 UAC 切换后惰性重建自愈并拦截全黑伪帧 |
 | `_vision_timer` | Qt 主线程 `QTimer` | `200ms` (5Hz) | 读取最新帧并执行 `SceneDetector.detect()` 更新稳定场景 |
-| `_window_timer` | Qt 主线程 `QTimer` | `250ms` (4Hz) | 追踪游戏窗口句柄、位置尺寸及前后台切换，刷新托盘状态 |
+| `_window_timer` | Qt 主线程 `QTimer` | `250ms` (4Hz) | 追踪游戏窗口句柄、位置尺寸及前后台切换，刷新托盘与主控台状态 |
 | `_input_timer` | Qt 主线程 `QTimer` | `8ms` (~125Hz) | 轮询 XInput、驱动 `GestureEngine` 与 `ControlDispatcher`、刷新 HUD |
+| `PRTSDashboardWindow` 遥测定时器 | Qt 主线程 `QTimer` | `60ms` (~16Hz) | 仅在主控台窗口可见时运行，刷新双摇杆靶盘、扳机条与按键阵列；关闭最小化至托盘后自动停止，后台零开销 |
 
 ---
 
@@ -126,9 +132,11 @@ flowchart TD
      $$\begin{bmatrix} x' \\ y' \\ w' \end{bmatrix} = H \begin{bmatrix} s \\ t \\ 1 \end{bmatrix}, \quad (u, v) = \left(\frac{x'}{w'},\; \frac{y'}{w'}\right)$$
    - 同理对四个角 $\left(\frac{c}{C}, \frac{r}{R}\right)$ 等投影即可获得与 3D 透视完全贴合的四边形多边形 `cell_polygon(r, c)`，直接供 HUD 渲染透视高亮框。
 3. **逆向光标拾取**：给定任意屏幕归一化坐标 $(u, v)$，经 $H^{-1}$ 反投影回单位正方形 $(s, t)$，即可 $O(1)$ 定位所在格 `(row, col)` 或在自由光标切回吸附模式时无缝定位最近地块。
-4. **多视图态镜头缩放补偿与动态商店左延**：
+4. **多视图态镜头缩放补偿、Boss 战镜像棋盘与动态商店左延**：
    - `LayoutProfile` 支持 `LayoutViewState`（`normal` / `shop_open` / `unit_selected`）视图覆写与 `ViewportTransform` 仿射缩放平移补偿（经 OpenCV SIFT 实机配准，`shop_open` 下同步缩放棋盘、整备区与装备栏，中位误差 `1.1px`）；
-   - `resolve_shop_zone` 与 `resolve_shop_upgrade_point` 支持商店升至二本（5 槽）与四本（6 槽）时以最右卡槽为锚点按固定步距向左动态延伸，并同步左移升级灰卡点击坐标。
+   - 针对多人 Boss 战分配至右侧时 3D 棋盘与 5 槽装备台沿 `u_axis_normal ≈ 0.4709` 水平镜像（而 10 槽整备区与底部 2D 商店保持原位不变）的几何规律，`LayoutProfile` 内置实测 `mirrored_board_quad`（保持逻辑左→右列序）与 `mirrored_equip_zone`，`resolve_board_quad` / `resolve_equip_zone` 支持 `mirrored: bool = False` 关键字参数并在镜像态直接复用 `view_overrides` 缩放矩阵（跳过静态非镜像覆写），`ControlDispatcher` 预建 `mirrored in (False, True)` 双套三视图映射器按 `board_mirrored` 实时无损切换；
+   - `resolve_shop_zone` 与 `resolve_shop_upgrade_point` 支持商店升至二本（5 槽）与四本（6 槽）时以最右卡槽为锚点按固定步距向左动态延伸，并同步左移升级灰卡点击坐标；
+   - **多选一卡片点击中心与 `+11px` 外扩选取框解耦**：`choice_zone` / `choice_2_zone` / `choice_6_top_zone` / `choice_6_bottom_zone` 严格存储官方 PC 16:9 卡片白边本体尺寸，保障 `resolve_choice_card_center` 与 `resolve_choice_confirm_point`（`cv + sh * 0.513`）零误差命中点击中心；`resolve_choice_card_polygon` 与 `resolve_choice_confirm_polygon` 则在渲染多边形层面向外扩展 `11px`（待确认态包裹放大整卡 + 底部确认白条，安全夹紧 `[0.004, 0.996]`），彻底避开卡片亮白实线边框并保障 `2×3` 上下排留足暗区净空。
 
 ---
 
@@ -139,7 +147,7 @@ flowchart TD
 | **零内存/零注入** | 严禁调用 `OpenProcess` 读写内存、DLL 注入或 Hook 游戏进程；仅使用公开 Win32 输入与窗口查询 API |
 | **UIPI 权限合规** | 通过标准 UAC 提权与官方 PC 客户端（`Arknights.exe`）对齐完整性级别，避免任何绕过安全检查的行为 |
 | **64 位 SendInput 对齐** | `VirtualHID` 在 `ctypes.Union` 中完整定义 `MOUSEINPUT`、`KEYBDINPUT`、`HARDWAREINPUT`，确保 64 位 Windows 下 `ctypes.sizeof(INPUT) == 40`，并使用 `MapVirtualKeyW` 发送硬件扫描码（`KEYEVENTF_SCANCODE`） |
-| **HUD 绝对不抢焦点 & 防截屏污染** | `HUDWindow` 同时启用 Qt `WindowTransparentForInput` + `WA_ShowWithoutActivating`、Win32 `SetWindowLongW(GWL_EXSTYLE, WS_EX_LAYERED \| WS_EX_TRANSPARENT \| WS_EX_NOACTIVATE \| WS_EX_TOPMOST)` 以及 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`，确保所有点击 100% 穿透至游戏窗口，且后台 `mss` / DWM 截屏自动忽略透明 HUD 图层，杜绝青色选框干扰视觉识别 |
+| **HUD 绝对不抢焦点 & S3 选框截屏隔离可切换** | `HUDWindow` 同时启用 Qt `WindowTransparentForInput` + `WA_ShowWithoutActivating`、Win32 `SetWindowLongW(GWL_EXSTYLE, WS_EX_LAYERED \| WS_EX_TRANSPARENT \| WS_EX_NOACTIVATE \| WS_EX_TOPMOST)` 以及 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE / WDA_NONE)` 热切换；选取框采用 **S3 加粗取景折角 + 四边半透细线 + 外角琥珀微刻线**（`FocusZone.BOARD` 与紧凑槽位自动切换短折角，`MODAL_CONFIRM` 选框微收防极边裁切），配合 `_has_stronghold_in_game_chrome` 顶部两翼黑条兜底，开启 `WDA_NONE` 后经全场景 26/26 压测对视觉识别零干扰 |
 | **失焦自动挂起** | `ControlDispatcher` 在每帧核对 `viewport is not None and viewport.is_foreground`，游戏切出前台或暂停时立刻隐藏 HUD 并停止所有键鼠模拟 |
 
 ---
@@ -160,11 +168,14 @@ Windows UAC 提权切回安全桌面瞬间可能导致后台线程首次初始�
 
 1. **局部 ROI 模板匹配层**：扫描 `assets/templates/` 中的 `<scene>.png` 与配套 `.json`（含 `roi_norm`、`threshold`、`search_padding`），在限定局部窗口内运行 `cv2.matchTemplate(..., cv2.TM_CCOEFF_NORMED)`（默认阈值 `0.82`），并过滤零方差纯色图像避免伪高分。
 2. **零模板 HSV 强特征与几何启发式层**：
-   - **局外 100% 防误判双锚点门禁**：`BATTLE_PREP` / `BATTLE_COMBAT` 启发式分支强制校验 `_has_stronghold_in_game_chrome()`（左上深红退出门 + 顶部中央深黑状态栏双锚点同时命中），并将右上准备按钮色相收窄至真实粉红区间 `(H >= 158) | (H <= 4)`，同时要求所有弹窗分支满足 `modal_chrome`（顶部青色标题带或右侧方形收起按钮），确保主界面、活动横幅、战前编队、干员列表与基建画面 100% 保持在 `UNKNOWN_FREE_CURSOR`；
+   - **局外 100% 防误判双锚点门禁（含宽白 HUD 两翼抗遮挡）**：`BATTLE_PREP` / `BATTLE_COMBAT` 启发式分支强制校验 `_has_stronghold_in_game_chrome()`（左上深红退出门硬门禁 `esc_red >= 0.22` + 顶部中央深黑状态栏或左右两翼未被居中 HUD 覆盖黑条兜底 `wings_dk >= 0.70`），并将右上准备按钮色相收窄至真实粉红区间 `(H >= 158) | (H <= 4)`，同时要求所有弹窗分支满足 `modal_chrome`（顶部青色标题带或右侧方形收起按钮），确保局外画面 100% 保持在 `UNKNOWN_FREE_CURSOR` 且开启 `WDA_NONE` 叠加宽纯白顶签与 Toast 时绝不误跌出局内；
    - **回合结束 & `ESC` 退出确认弹窗（`MODAL_CONFIRM`）**：优先于右上角准备按钮检测，采用黑底分位数约束（`dark_ratio >= 0.82 & p80 < 30`）、左下纯灰取消带与避开右下机械剪影的暗红确认带联合判定，并通过中央上方亮像素占比输出 `confirm_has_dont_ask` 自动区分三项回合确认窗与双项 `ESC` 暂时离开窗；
    - **自适应决策弹窗（`MODAL_CHOICE`：`1x2` / `1x3` / `2x3`）**：基于 Sobel 垂直卡片边框梯度与白色「确认选择」底条检测，按 `6 选一（支持官方 PC 16:9 与旧宽屏双布局，单槽兼容未选暗卡与 1~5 张已被队友选走的均匀浅灰卡） -> 3 选一 -> 2 选一` 顺序零模板区分并实时追踪 `selected_choice_index`；二选一两翼外围检测采用按列垂直均值再取列峰（`mean(axis=0).max()`）免疫压暗雪山纹理背景；
-   - **休整运营、0 资金商店与左下 `2x3` 表情面板（`BATTLE_PREP`）**：支持右上角粉红准备按钮或联机 `LOADING...` 顶部「休息一下」紫框 + 放大镜双路径判定；商店展开与槽数检测彻底脱离 `refresh_yellow` 资金颜色依赖，升级为 `(freeze_blue >= 0.45) or (refresh_yellow >= 0.25 and freeze_blue >= 0.25)`，在 0 资金刷新变灰后仍稳判 `shop_open=True` 与 `4/5/6` 槽；`±12px` 峰值搜索兼容紫红 `[G]` 升级卡与已售空 `NO INFO` 空槽；非商店/非详情态下同步检测左下 `2x3` 表情面板（`emote_panel_open`）、顶部居中对称羁绊数量（`0~9`）及多人左侧队友头像。
-3. **连续帧防抖与不打断保护**：连续 `debounce_frames = 2` 帧一致后切换稳定场景；干员/装备/策略抓取与定朝向期间不强行切层。即便用户通过 `Back` 键处于**手动锁层**，只要同为 `BATTLE_PREP`、`MODAL_CHOICE` 或 `MODAL_CONFIRM`，`ControlDispatcher` 依然实时同步 `shop_open`、`shop_slot_count`、`unit_selected`、`emote_panel_open`、`covenant_count`、`has_teammates`、`choice_count`、`selected_choice_index` 与 `confirm_has_dont_ask`；当商店收起时自动将空闲 `FocusZone.SHOP` 退回 `FocusZone.BENCH` 防止残留选框。
+   - **三套卫戍协议主题全适配 & 双灰商店零色相三联结构（`BATTLE_PREP` / `BATTLE_COMBAT`）**：在 `_has_stronghold_in_game_chrome()` 门禁下，`_has_real_pc_prep_banner` 同时支持主题一（紫粉准备 / 顶紫框 + 放大镜 / 左右双放大镜共现防 Toast 瞬态遮挡）、主题二（乌萨斯浅灰绿椭圆与置灰态辉光管兜底）与主题三（罗德岛青绿准备按钮 / 顶青绿八角框）；非休整横幅且右下费用栏 `◆ C` 与白色回复进度条命中（`_has_real_pc_combat_cost_bar`）时直判 `BATTLE_COMBAT (shop_open=False)`；商店展开判定在保留色相快路径外新增零色相三联结构通道（上移黑底白字横幅 + 冻结/刷新双按钮底缘梯度 + 最右 4 固定槽竖边暗缝），即使刷新与冻结双按钮同时变灰及三主题全按钮置灰仍 100% 准确识别 `shop_open=True`；动态 4/5/6 槽识别脱离顶部按钮色相门控，采用三主题商品卡底条并集、亮态/暗屏 CRT/低亮置灰升级卡分支（含左邻排斥）及抗鼠标压边 `[ NO INFO ]` 空槽判定；
+   - **Boss 战右侧镜像自动检测与锁存（`board_mirrored`）**：针对多人 Boss 战分配至右侧时 3D 舞台水平镜像场景，`_extract_mirror_features` 与 `_observe_board_mirrored_heuristic` 在 `shop_open` / `normal` 双态提取蓝箱/电视/红门连通域特征输出三态观测（右侧镜像 `True` / 左侧正向 `False` / 遮挡 `None`）；`SceneDetector` 维护 `_latched_board_mirrored` 防抖锁存，在 `unit_selected`、队友抽屉、`MODAL_CHOICE` 与 `MODAL_CONFIRM` 遮挡期稳定维持上一状态，切至 `UNKNOWN_FREE_CURSOR` 或 `reset()` 时清零；
+   - **任意水平滚动相位多盟约（`0~7` / `>7`）动态检测与满层高光兼容**：采用暗芯亮环 + 满层高光饱和双通道圆环评分与向量化 `2px` 局部带扫频，在 `phi ∈ [0, 80)` 内按梳状相位匹配并做单环微调 + 三重充要溢出判据，实时输出 `covenant_count`、`covenant_overflow` 与精确圆心序列 `covenant_centers_u`；`ControlDispatcher` 在 `FocusZone.TOP_INFO` 优先直接使用 `covenant_centers_u` 吸附（空元组回退公式），且可见数在 `7 ↔ 6` 波动时稳留盟约焦点不误跳右放大镜；
+   - **去色相结构化表情面板检测与防逃逸锁焦**：`_detect_emote_panel_open_heuristic` 联合判定暗底 + 上/右/下三边外框 + 泛亮前景与底部居中分页点对比，兼容任意色相及稀疏末页表情；`ControlDispatcher` 配合入口/全交互 `1.8s` 续期保护锁与视觉关闭 4 帧连续防抖、屏蔽 `L3` 误按及 `cursor` 模式逃逸，确保表情翻页全程稳锁在 `FocusZone.EMOTE_PANEL`。
+3. **连续帧防抖与不打断保护**：连续 `debounce_frames = 2` 帧一致后切换稳定场景；干员/装备/策略抓取与定朝向期间不强行切层。即便用户通过 `Back` 键处于**手动锁层**，只要同为 `BATTLE_PREP`、`BATTLE_COMBAT`、`MODAL_CHOICE` 或 `MODAL_CONFIRM`，`ControlDispatcher` 依然实时同步 `shop_open`、`shop_slot_count`、`board_mirrored`、`unit_selected`、`emote_panel_open`、`covenant_count`、`covenant_overflow`、`covenant_centers_u`、`has_teammates`、`choice_count`、`selected_choice_index` 与 `confirm_has_dont_ask`；当商店收起时自动将空闲 `FocusZone.SHOP` 退回 `FocusZone.BENCH` 防止残留选框。
 
 ---
 
@@ -183,7 +194,6 @@ stateDiagram-v2
     HOLDING_UNIT --> IDLE: 按 B 取消抓取
     HOLDING_UNIT --> IDLE: 移至另一整备格按 A (平滑拖拽互换)
     HOLDING_UNIT --> IDLE: 按 X 快速出售 (原生快捷键 X 或拖至右下售出区)
-    HOLDING_UNIT --> IDLE: 按 Y 拖拽赠予联机队友头像
     HOLDING_UNIT --> AIMING_DIRECTION: 移至棋盘新格按 A (平滑拖拽落位) 或棋盘同格再按 A (smooth_drag_loopback 原地回环拖拽)
 
     AIMING_DIRECTION --> IDLE: 推摇杆或十字键四向滑动定朝向并微震动
@@ -205,23 +215,38 @@ stateDiagram-v2
 
 ---
 
-## 7. 目录结构速览
+## 7. PyInstaller 独立单文件打包与冻结环境适配
+
+为支持零 Python 环境的绿色独立分发，系统通过 `scripts/build_exe.py` 构建无控制台单文件 `dist/ArkController.exe`（`--onefile --windowed`，嵌入多尺寸 `assets/arkcontroller.ico` 与 Windows `VSVersionInfo`，并剔除 `QtWebEngine`/`QtQml`/`QtQuick`/`Qt3D`/`QtMultimedia`/`QtPdf`/`QtSql`/`QtNetwork` 等未使用模块），在 `getattr(sys, "frozen", False)` 冻结态下执行四项运行期加固：
+
+1. **双层配置解析（`ConfigLoader`）**：默认优先读取 `<exe_dir>/configs/`；若用户仅拷走单个 `.exe` 至空目录运行，则 `keymap_path` / `layout_path` 无缝回退读取 PyInstaller 解包目录 `_MEIPASS/configs/` 的内置默认 JSON；而 `override_path` 始终指向可写的 `<exe_dir>/configs/user_override.json`（保存时自动创建父目录并合并重载）。
+2. **模板目录读写分离（`main.py`）**：`SceneDetector` 优先读取 `<exe_dir>/assets/templates`（不存在时兼容回退 `_MEIPASS/assets/templates`），`VisionCalibrator` 校准采样始终写入可写的 `<exe_dir>/assets/templates`，并在保存或重载后自动将识别器切换至外置目录。
+3. **无控制台流安全护栏（`main.py`）**：GUI `console=False` 启动时 `sys.stdout` / `sys.stderr` 可能为 `None`，`main()` 最开头立即调用 `_ensure_stdio_streams()` 挂载 `os.devnull` 文本流，防止 `argparse`、`logging` 或输出语句抛出异常。
+4. **UAC 提权工作目录锁定（`platform/uac.py`）**：冻结态调用 `ShellExecuteW("runas", ...)` 时显式传入 `<exe_dir>` 作为工作目录，避免从快捷方式或系统上下文提权后工作目录飘移至 `System32`。
+
+---
+
+## 8. 目录结构速览
 
 ```text
 arkcontroller/
 ├── configs/
 │   ├── default_bindings.json        # 手柄手感、防误触阈值、原生快捷键与按键映射预设
-│   ├── stronghold_layout_16_9.json  # 卫戍协议局内 16:9 归一化锚点、策略/确认窗与 4x7 透视棋盘
+│   ├── stronghold_layout_16_9.json  # 卫戍协议局内 16:9 归一化锚点、镜像棋盘/装备与多选一配置
 │   └── user_override.json           # (运行校准后自动生成) 用户个性化覆盖配置
-├── assets/templates/                # 用户采集的局部 ROI 场景识别模板 (.png + .json)
+├── assets/
+│   ├── arkcontroller.ico            # 多尺寸 (16..256) PRTS 纯白极简 + 源石琥珀应用图标
+│   └── templates/                   # 用户采集的局部 ROI 场景识别模板 (.png + .json)
+├── scripts/
+│   └── build_exe.py                 # PyInstaller 独立单文件 GUI 构建与图标生成脚本
 ├── src/arkcontroller/
-│   ├── config/                      # 强类型模型 (models.py) 与配置加载器 (loader.py)
+│   ├── config/                      # 强类型模型 (models.py) 与冻结兼容配置加载器 (loader.py)
 │   ├── platform/                    # UAC / DPI V2 (uac.py) 与窗口视口追踪 (window_tracker.py)
 │   ├── input/                       # XInput 驱动、手势引擎与 Win32 SendInput 合成器
 │   ├── vision/                      # 异步截屏、双层场景识别与模板校准器
 │   ├── control/                     # 透视网格映射、两段式部署状态机与调度中枢
-│   ├── overlay/                     # PRTS 透明穿透 HUD、可视化校准向导与系统托盘
-│   └── main.py                      # CLI 入口与多频事件循环装配
-├── tests/                           # 6 个核心模块单元测试套件
+│   ├── overlay/                     # 纯白极简穿透 HUD (S3 选框与矢量图示)、方案B v2 主控台、校准向导与托盘
+│   └── main.py                      # CLI/GUI 主入口（含冻结适配与 --minimized）及多频事件循环装配
+├── tests/                           # 8 个核心模块单元测试套件（含离屏 UI 与冻结打包测试）
 └── docs/                            # 架构设计与手柄操作手册
 ```

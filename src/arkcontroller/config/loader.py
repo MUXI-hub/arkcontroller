@@ -6,6 +6,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 from arkcontroller.config.models import KeymapConfig, LayoutProfile
@@ -21,10 +22,15 @@ _LAYOUT_TOP_LEVEL_KEYS = frozenset(
         "bench_zone",
         "equip_zone",
         "choice_zone",
+        "choice_2_zone",
         "choice_6_top_zone",
         "choice_6_bottom_zone",
+        "emote_top_zone",
+        "emote_bottom_zone",
         "covenant_zone",
         "board_quad",
+        "mirrored_board_quad",
+        "mirrored_equip_zone",
         "buttons",
         "view_overrides",
     }
@@ -49,6 +55,7 @@ _KEYMAP_TOP_LEVEL_KEYS = frozenset(
         "left_stick_dpad_threshold",
         "left_stick_dpad_release_threshold",
         "auto_toggle_shop",
+        "hide_hud_from_capture",
         "keyboard_shortcuts",
         "bindings",
     }
@@ -94,10 +101,17 @@ class ConfigLoader:
         *,
         use_user_override: bool = True,
     ) -> None:
+        self._fallback_config_dir: Path | None = None
         if config_dir is None:
-            repo_configs = Path(__file__).resolve().parents[3] / "configs"
-            cwd_configs = Path.cwd() / "configs"
-            self.config_dir = repo_configs if repo_configs.exists() else cwd_configs
+            if getattr(sys, "frozen", False):
+                exe_dir = Path(sys.executable).resolve().parent
+                bundle_dir = Path(getattr(sys, "_MEIPASS", exe_dir))
+                self.config_dir = exe_dir / "configs"
+                self._fallback_config_dir = bundle_dir / "configs"
+            else:
+                repo_configs = Path(__file__).resolve().parents[3] / "configs"
+                cwd_configs = Path.cwd() / "configs"
+                self.config_dir = repo_configs if repo_configs.exists() else cwd_configs
         else:
             self.config_dir = Path(config_dir)
 
@@ -107,23 +121,33 @@ class ConfigLoader:
 
     @property
     def keymap_path(self) -> Path:
-        """默认按键映射配置文件路径（优先 default_bindings.json，兼容旧名）。"""
-        primary = self.config_dir / DEFAULT_KEYMAP_FILENAME
-        if primary.exists():
-            return primary
-        legacy = self.config_dir / LEGACY_KEYMAP_FILENAME
-        if legacy.exists():
-            return legacy
-        return primary
+        """默认按键映射配置文件路径（优先外置 configs/，冻结态缺省时回退内置 _MEIPASS/configs/）。"""
+        for base_dir in (self.config_dir, self._fallback_config_dir):
+            if base_dir is None:
+                continue
+            primary = base_dir / DEFAULT_KEYMAP_FILENAME
+            if primary.exists():
+                return primary
+            legacy = base_dir / LEGACY_KEYMAP_FILENAME
+            if legacy.exists():
+                return legacy
+        return self.config_dir / DEFAULT_KEYMAP_FILENAME
 
     @property
     def layout_path(self) -> Path:
-        """默认 16:9 卫戍协议布局配置文件路径。"""
-        return self.config_dir / DEFAULT_LAYOUT_FILENAME
+        """默认 16:9 卫戍协议布局配置文件路径（冻结态缺省时回退内置 _MEIPASS/configs/）。"""
+        primary = self.config_dir / DEFAULT_LAYOUT_FILENAME
+        if primary.exists():
+            return primary
+        if self._fallback_config_dir is not None:
+            fallback = self._fallback_config_dir / DEFAULT_LAYOUT_FILENAME
+            if fallback.exists():
+                return fallback
+        return primary
 
     @property
     def override_path(self) -> Path:
-        """用户本地校准与自定义覆盖文件路径。"""
+        """用户本地校准与自定义覆盖文件路径（冻结态始终指向可写的 exe_dir/configs/user_override.json）。"""
         return self.config_dir / USER_OVERRIDE_FILENAME
 
     @staticmethod

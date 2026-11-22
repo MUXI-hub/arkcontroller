@@ -14,12 +14,15 @@ from arkcontroller.config.models import (
     REQUIRED_BUTTON_KEYS,
     KeymapConfig,
     LayoutProfile,
+    LayoutViewState,
     LinearZone,
     NavNode,
     NormalizedPoint,
     NormalizedRect,
     PerspectiveQuad,
     SymmetricCovenantZone,
+    ViewLayoutOverride,
+    ViewportTransform,
 )
 from arkcontroller.platform import uac
 from arkcontroller.platform.window_tracker import ViewportRect, WindowTracker
@@ -360,6 +363,10 @@ class TestConfigSystem:
         assert keymap.vibration_enabled is True
         assert keymap.left_stick_mode == "dpad"
         assert keymap.auto_toggle_shop is True
+        assert keymap.hide_hud_from_capture is True
+        assert keymap.to_dict()["hide_hud_from_capture"] is True
+        assert KeymapConfig.from_dict({}).hide_hud_from_capture is True
+        assert KeymapConfig.from_dict({"hide_hud_from_capture": False}).hide_hud_from_capture is False
         assert keymap.keyboard_shortcuts["shop_upgrade"] == "g"
         assert keymap.keyboard_shortcuts == {
             "shop_toggle": "a",
@@ -377,6 +384,8 @@ class TestConfigSystem:
             "pause_menu": "esc",
         }
         assert "menu" not in keymap.bindings
+        assert "gift_teammate" not in keymap.bindings["holding"]
+        assert keymap.bindings["lt_chords"]["use_strategy"] == "LT+RT"
         assert keymap.bindings["modal_confirm"] == {
             "confirm": "A",
             "cancel": "B",
@@ -408,9 +417,15 @@ class TestConfigSystem:
             assert not hasattr(layout, removed_attr)
             assert removed_attr not in layout.to_dict()
 
-        # 验证新增策略头像、交流面板与回合确认弹窗实测按钮锚点
+        # 验证新增策略头像（休整/作战双态）、交流面板与回合确认弹窗实测按钮锚点
         assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
         assert layout.buttons["strategy_inspect"] == NormalizedPoint(0.9047, 0.3236, "right_edge")
+        assert layout.buttons["strategy_avatar_combat"] == NormalizedPoint(
+            0.9602, 0.7486, "right_edge"
+        )
+        assert layout.buttons["strategy_inspect_combat"] == NormalizedPoint(
+            0.9051, 0.7493, "right_edge"
+        )
         assert layout.buttons["confirm_no"] == NormalizedPoint(0.2496, 0.6729, "center_16_9")
         assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
         assert layout.buttons["confirm_dont_ask"] == NormalizedPoint(0.4992, 0.5597, "center_16_9")
@@ -421,47 +436,53 @@ class TestConfigSystem:
         assert "shop_toggle" in layout.buttons
         assert "safe_blank" in layout.buttons
         assert "choice_toggle_eye_6" in layout.buttons
-        # 验证安全空白区已移至右侧策略头像正下方安全带，绝不落入底部商店卡牌区
-        assert layout.buttons["safe_blank"].u >= 0.90
-        assert 0.39 <= layout.buttons["safe_blank"].v <= 0.50
-        # 验证二选一、三选一与多人六选一卡片及底部白色确认条几何关系
+        # 验证安全空白区已迁至左上退出按钮右侧延迟区，绝不误触右侧队友策略或底部商店
+        assert layout.buttons["safe_blank"] == NormalizedPoint(0.1172, 0.0903, "left_edge")
+        # 验证二选一、三选一与多人六选一官方 PC 16:9 卡片本体及 +11px 外扩选取框、底部确认条几何关系
         assert layout.choice_2_zone.count == 2
         assert "choice_2_zone" in layout.to_dict()
         c2_left = layout.resolve_choice_card_center(0, 2)
         c2_right = layout.resolve_choice_card_center(1, 2)
-        assert c2_left == pytest.approx((0.3809, 0.5000))
-        assert c2_right == pytest.approx((0.6477, 0.5000))
-        assert layout.resolve_choice_card_size(0, 2) == pytest.approx((0.2188, 0.3306))
+        assert c2_left == pytest.approx((0.38086, 0.50347))
+        assert c2_right == pytest.approx((0.64805, 0.50347))
+        assert layout.resolve_choice_card_size(0, 2) == pytest.approx((0.22344, 0.33403))
         c2_confirm_right = layout.resolve_choice_confirm_point(1, 2)
-        assert c2_confirm_right[0] == pytest.approx(0.6477)
-        assert c2_confirm_right[1] == pytest.approx(0.666953, abs=1e-4)
+        assert c2_confirm_right[0] == pytest.approx(0.64805)
+        assert c2_confirm_right[1] == pytest.approx(0.50347 + 0.33403 * 0.513, abs=1e-5)
+        pad_u = 11.0 / 1280.0
+        pad_v = 11.0 / 720.0
         c2_poly = layout.resolve_choice_card_polygon(0, 2)
         assert len(c2_poly) == 4
-        assert c2_poly[0] == pytest.approx((0.3809 - 0.1094, 0.5000 - 0.1653))
-        assert c2_poly[2] == pytest.approx((0.3809 + 0.1094, 0.5000 + 0.1653))
+        assert c2_poly[0] == pytest.approx(
+            (0.38086 - 0.22344 * 0.5 - pad_u, 0.50347 - 0.33403 * 0.5 - pad_v)
+        )
+        assert c2_poly[2] == pytest.approx(
+            (0.38086 + 0.22344 * 0.5 + pad_u, 0.50347 + 0.33403 * 0.5 + pad_v)
+        )
         c2_confirm_poly = layout.resolve_choice_confirm_polygon(1, 2)
         assert len(c2_confirm_poly) == 4
-        assert (c2_confirm_poly[0][0] + c2_confirm_poly[2][0]) * 0.5 == pytest.approx(0.6477)
-        assert (c2_confirm_poly[0][1] + c2_confirm_poly[2][1]) * 0.5 == pytest.approx(
-            c2_confirm_right[1]
-        )
+        assert (c2_confirm_poly[0][0] + c2_confirm_poly[2][0]) * 0.5 == pytest.approx(0.64805)
+        assert c2_confirm_poly[0][1] == pytest.approx(0.50347 - 0.33403 * 0.5 - 0.04583)
+        assert c2_confirm_poly[2][1] == pytest.approx(0.50347 + 0.33403 * 0.5 + 0.05694)
+        assert c2_confirm_poly[0][1] < c2_confirm_right[1] < c2_confirm_poly[2][1]
         assert layout.resolve_choice_toggle_point(2) == layout.buttons["choice_toggle_eye"]
 
         c3_center = layout.resolve_choice_card_center(0, 3)
         c3_confirm = layout.resolve_choice_confirm_point(0, 3)
+        assert c3_center == pytest.approx((0.24727, 0.50347))
         assert c3_confirm[0] == pytest.approx(c3_center[0])
-        assert c3_confirm[1] == pytest.approx(0.674, abs=0.006)
+        assert c3_confirm[1] == pytest.approx(0.50347 + 0.33403 * 0.513, abs=1e-5)
         # 官方 PC 16:9 六选一三列对齐与上下排白条确认点
-        assert layout.resolve_choice_card_center(0, 6) == pytest.approx((0.2473, 0.2931))
-        assert layout.resolve_choice_card_center(2, 6) == pytest.approx((0.7816, 0.2931))
-        assert layout.resolve_choice_card_center(3, 6) == pytest.approx((0.2473, 0.7083))
-        assert layout.resolve_choice_card_center(5, 6) == pytest.approx((0.7816, 0.7083))
-        assert layout.resolve_choice_card_size(0, 6) == pytest.approx((0.2180, 0.3306))
+        assert layout.resolve_choice_card_center(0, 6) == pytest.approx((0.24727, 0.29722))
+        assert layout.resolve_choice_card_center(2, 6) == pytest.approx((0.78164, 0.29722))
+        assert layout.resolve_choice_card_center(3, 6) == pytest.approx((0.24727, 0.70972))
+        assert layout.resolve_choice_card_center(5, 6) == pytest.approx((0.78164, 0.70972))
+        assert layout.resolve_choice_card_size(0, 6) == pytest.approx((0.22344, 0.33472))
         c6_top_confirm = layout.resolve_choice_confirm_point(1, 6)
         c6_bot_confirm = layout.resolve_choice_confirm_point(4, 6)
         assert c6_top_confirm[0] == pytest.approx(c6_bot_confirm[0])
-        assert c6_top_confirm[1] == pytest.approx(0.4601, abs=0.003)
-        assert c6_bot_confirm[1] == pytest.approx(0.8753, abs=0.003)
+        assert c6_top_confirm[1] == pytest.approx(0.29722 + 0.33472 * 0.513, abs=1e-5)
+        assert c6_bot_confirm[1] == pytest.approx(0.70972 + 0.33472 * 0.513, abs=1e-5)
         assert layout.resolve_choice_toggle_point(3) == layout.buttons["choice_toggle_eye"]
         assert layout.resolve_choice_toggle_point(6) == layout.buttons["choice_toggle_eye_6"]
 
@@ -485,13 +506,33 @@ class TestConfigSystem:
             assert len(poly) == 4
             assert poly[0] == pytest.approx((cu - 0.032, cv - 0.056), abs=1e-4)
             assert poly[2] == pytest.approx((cu + 0.032, cv + 0.056), abs=1e-4)
-        # 验证顶部下方居中对称羁绊坐标解算（奇数与偶数）
+        # 验证顶部下方居中对称羁绊坐标解算（奇数、偶数、7 枚满屏与 >7 溢出左对齐）
         assert isinstance(layout.covenant_zone, SymmetricCovenantZone)
-        assert layout.covenant_zone.slot_center(0, count=1)[0] == pytest.approx(0.50)
+        assert layout.covenant_zone.v == pytest.approx(0.1208)
+        assert layout.covenant_zone.step_u == pytest.approx(0.0625)
+        assert layout.covenant_zone.overflow_start_u == pytest.approx(0.2961)
+        assert layout.covenant_zone.to_dict()["overflow_start_u"] == pytest.approx(0.2961)
+        assert layout.covenant_zone.slot_center(0, count=1) == pytest.approx((0.50, 0.1208))
         u_even_0, _ = layout.covenant_zone.slot_center(0, count=2)
         u_even_1, _ = layout.covenant_zone.slot_center(1, count=2)
         assert (u_even_0 + u_even_1) * 0.5 == pytest.approx(0.50)
-        assert u_even_1 - u_even_0 == pytest.approx(layout.covenant_zone.step_u)
+        assert u_even_1 - u_even_0 == pytest.approx(0.0625)
+        # 7 枚居中满屏：0.50 - 3 * 0.0625 = 0.3125 .. 0.6875
+        assert layout.covenant_zone.slot_center(0, count=7) == pytest.approx((0.3125, 0.1208))
+        assert layout.covenant_zone.slot_center(3, count=7) == pytest.approx((0.5000, 0.1208))
+        assert layout.covenant_zone.slot_center(6, count=7) == pytest.approx((0.6875, 0.1208))
+        # >7 溢出左对齐 7 槽：overflow_start_u + i * step_u
+        for i in range(7):
+            exp_u = 0.2961 + i * 0.0625
+            cu, cv = layout.covenant_zone.slot_center(i, count=7, overflow=True)
+            assert (cu, cv) == pytest.approx((exp_u, 0.1208), abs=1e-6)
+            poly = layout.covenant_zone.slot_polygon(i, count=7, overflow=True)
+            assert len(poly) == 4
+            assert (poly[0][0] + poly[2][0]) * 0.5 == pytest.approx(exp_u, abs=1e-6)
+            assert (poly[0][1] + poly[2][1]) * 0.5 == pytest.approx(0.1208, abs=1e-6)
+        # 旧版缺少 overflow_start_u 的 JSON 字典向后兼容
+        legacy_cov = SymmetricCovenantZone.from_dict({"center_u": 0.5, "v": 0.12, "step_u": 0.0625})
+        assert legacy_cov.overflow_start_u == pytest.approx(0.2961)
         assert "shop_open" in layout.view_overrides
         assert "unit_selected" in layout.view_overrides
         assert layout.resolve_board_quad("shop_open") != layout.board_quad
@@ -544,11 +585,18 @@ class TestConfigSystem:
         raw_layout["squad_edit_nodes"] = {}
         raw_layout["settlement_nodes"] = {}
         raw_layout.pop("choice_2_zone", None)
+        raw_layout.pop("choice_6_top_zone", None)
+        raw_layout.pop("choice_6_bottom_zone", None)
         raw_layout.pop("emote_top_zone", None)
         raw_layout.pop("emote_bottom_zone", None)
+        raw_layout.pop("mirrored_board_quad", None)
+        raw_layout.pop("mirrored_equip_zone", None)
         for new_key in (
+            "safe_blank",
             "strategy_avatar",
             "strategy_inspect",
+            "strategy_avatar_combat",
+            "strategy_inspect_combat",
             "confirm_no",
             "confirm_yes",
             "confirm_dont_ask",
@@ -557,14 +605,28 @@ class TestConfigSystem:
             raw_layout["buttons"].pop(new_key, None)
 
         layout = LayoutProfile.from_dict(raw_layout)
-        assert layout.choice_2_zone.start_u == pytest.approx(0.3809)
-        assert layout.choice_2_zone.end_u == pytest.approx(0.6477)
-        assert layout.resolve_choice_card_center(0, 2) == pytest.approx((0.3809, 0.5000))
-        assert layout.resolve_choice_card_center(1, 2) == pytest.approx((0.6477, 0.5000))
+        assert layout.choice_2_zone.start_u == pytest.approx(0.38086)
+        assert layout.choice_2_zone.end_u == pytest.approx(0.64805)
+        assert layout.resolve_choice_card_center(0, 2) == pytest.approx((0.38086, 0.50347))
+        assert layout.resolve_choice_card_center(1, 2) == pytest.approx((0.64805, 0.50347))
+        assert layout.resolve_choice_card_center(0, 6) == pytest.approx((0.24727, 0.29722))
+        assert layout.resolve_choice_card_center(3, 6) == pytest.approx((0.24727, 0.70972))
         assert layout.resolve_emote_slot_center(0) == pytest.approx((0.0582, 0.6771))
         assert layout.resolve_emote_slot_center(5) == pytest.approx((0.1996, 0.8016))
+        assert layout.mirrored_board_quad.top_left == pytest.approx((0.17357, 0.28519))
+        assert layout.mirrored_board_quad.bottom_right == pytest.approx((0.61576, 0.66019))
+        assert layout.mirrored_equip_zone.name == "equip_mirrored"
+        assert layout.mirrored_equip_zone.start_u == pytest.approx(0.22475)
+        assert layout.mirrored_equip_zone.end_u == pytest.approx(0.50715)
+        assert layout.buttons["safe_blank"] == NormalizedPoint(0.1172, 0.0903, "left_edge")
         assert layout.buttons["emote_panel_center"] == NormalizedPoint(0.1290, 0.7400, "left_edge")
         assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
+        assert layout.buttons["strategy_avatar_combat"] == NormalizedPoint(
+            0.9602, 0.7486, "right_edge"
+        )
+        assert layout.buttons["strategy_inspect_combat"] == NormalizedPoint(
+            0.9051, 0.7493, "right_edge"
+        )
         assert layout.buttons["confirm_yes"] == NormalizedPoint(0.7496, 0.6729, "center_16_9")
 
         # 模拟旧 user_override.json 残留局外节点键时 ConfigLoader 正常加载不报错
@@ -592,6 +654,188 @@ class TestConfigSystem:
         assert loaded_layout.buttons["confirm_dont_ask"] == NormalizedPoint(
             0.4992, 0.5597, "center_16_9"
         )
+
+    def test_mirrored_board_and_equip_resolution_and_serialization(self) -> None:
+        """验证 Boss 战右侧镜像棋盘/装备台配置加载、序列化往返、1280x720 实测投影与防覆写回归。"""
+        loader = ConfigLoader(use_user_override=False)
+        _, layout = loader.load()
+
+        # 1. 默认 JSON 精确读取与逻辑左→右列序检查
+        m_quad = layout.mirrored_board_quad
+        m_equip = layout.mirrored_equip_zone
+        assert m_quad.rows == 4
+        assert m_quad.cols == 7
+        assert m_quad.top_left == pytest.approx((0.17357, 0.28519))
+        assert m_quad.top_right == pytest.approx((0.59649, 0.27870))
+        assert m_quad.bottom_right == pytest.approx((0.61576, 0.66019))
+        assert m_quad.bottom_left == pytest.approx((0.12774, 0.66759))
+        assert m_quad.top_left[0] < m_quad.top_right[0]
+        assert m_quad.bottom_left[0] < m_quad.bottom_right[0]
+
+        assert m_equip.name == "equip_mirrored"
+        assert m_equip.count == 5
+        assert m_equip.start_u == pytest.approx(0.22475)
+        assert m_equip.start_v == pytest.approx(0.71705)
+        assert m_equip.end_u == pytest.approx(0.50715)
+        assert m_equip.end_v == pytest.approx(0.71705)
+        assert m_equip.slot_w == pytest.approx(0.068)
+        assert m_equip.slot_h == pytest.approx(0.088)
+
+        # 2. 序列化往返保持完整一致
+        dumped = layout.to_dict()
+        assert "mirrored_board_quad" in dumped
+        assert "mirrored_equip_zone" in dumped
+        restored = LayoutProfile.from_dict(dumped)
+        assert restored.mirrored_board_quad == layout.mirrored_board_quad
+        assert restored.mirrored_equip_zone == layout.mirrored_equip_zone
+
+        # 3. 10 槽整备区不随 Boss 镜像发生翻转
+        assert layout.resolve_bench_zone(
+            LayoutViewState.NORMAL, mirrored=True
+        ) == layout.resolve_bench_zone(LayoutViewState.NORMAL, mirrored=False)
+        assert layout.resolve_bench_zone(
+            LayoutViewState.SHOP_OPEN, mirrored=True
+        ) == layout.resolve_bench_zone(LayoutViewState.SHOP_OPEN, mirrored=False)
+
+        # 4. NORMAL 态解析
+        assert layout.resolve_board_quad(LayoutViewState.NORMAL, mirrored=True) == m_quad
+        assert layout.resolve_equip_zone(LayoutViewState.NORMAL, mirrored=True) == m_equip
+        assert layout.resolve_board_quad(LayoutViewState.NORMAL, mirrored=False) == layout.board_quad
+        assert layout.resolve_equip_zone(LayoutViewState.NORMAL, mirrored=False) == layout.equip_zone
+
+        # 5. 1280x720 下 SHOP_OPEN 态镜像投影与实机测绘像素对齐（误差 < 1.5px）
+        w, h = 1280, 720
+        shop_m_quad = layout.resolve_board_quad(LayoutViewState.SHOP_OPEN, mirrored=True)
+        expected_corners_px = {
+            "top_left": (257.2, 166.1),
+            "top_right": (705.3, 162.4),
+            "bottom_right": (725.7, 379.6),
+            "bottom_left": (208.6, 383.8),
+        }
+        for attr, (exp_x, exp_y) in expected_corners_px.items():
+            u, v = getattr(shop_m_quad, attr)
+            assert u * w == pytest.approx(exp_x, abs=1.5)
+            assert v * h == pytest.approx(exp_y, abs=1.5)
+
+        shop_m_equip = layout.resolve_equip_zone(LayoutViewState.SHOP_OPEN, mirrored=True)
+        expected_equip_xs = [311.4, 386.2, 461.0, 535.8, 610.6]
+        for idx, exp_x in enumerate(expected_equip_xs):
+            u, v = shop_m_equip.slot_center(idx)
+            assert u * w == pytest.approx(exp_x, abs=1.5)
+            assert v * h == pytest.approx(412.0, abs=1.5)
+
+        # 6. 防回归：当 view_overrides 同时含静态非镜像覆写与 transform 时，
+        # mirrored=True 不得误用静态非镜像覆写，必须对镜像基准施加 transform
+        static_board = PerspectiveQuad(
+            top_left=(0.40, 0.30),
+            top_right=(0.80, 0.30),
+            bottom_right=(0.82, 0.60),
+            bottom_left=(0.38, 0.60),
+            rows=4,
+            cols=7,
+        )
+        static_equip = LinearZone("static_eq", 5, 0.45, 0.65, 0.75, 0.65, 0.06, 0.08)
+        tf = ViewportTransform(
+            scale_x=0.82772,
+            scale_y=0.79099,
+            offset_u=-0.02889,
+            offset_v=-0.09946,
+            pivot_u=0.5,
+            pivot_v=0.5,
+        )
+        layout_with_static = LayoutProfile.from_dict(dumped)
+        layout_with_static.view_overrides["shop_open"] = ViewLayoutOverride(
+            board_quad=static_board,
+            equip_zone=static_equip,
+            board_transform=tf,
+            equip_transform=tf,
+        )
+        # 非镜像仍遵循静态覆写
+        assert layout_with_static.resolve_board_quad("shop_open", mirrored=False) == static_board
+        assert layout_with_static.resolve_equip_zone("shop_open", mirrored=False) == static_equip
+        # 镜像跳过静态非镜像覆写，直接基于镜像基准应用 transform
+        resolved_m_board = layout_with_static.resolve_board_quad("shop_open", mirrored=True)
+        resolved_m_equip = layout_with_static.resolve_equip_zone("shop_open", mirrored=True)
+        assert resolved_m_board == tf.apply_quad(layout_with_static.mirrored_board_quad)
+        assert resolved_m_equip == tf.apply_zone(layout_with_static.mirrored_equip_zone)
+        assert resolved_m_board != static_board
+        assert resolved_m_equip != static_equip
+
+    def test_v034_choice_expanded_polygons_clear_white_border_and_no_overlap(self) -> None:
+        """v0.3.4：验证 2/3/6 选 1 外扩 +11px 选框严格错开卡片白边、2x3 上下排互不重叠且确认点精准命中白条正中。"""
+        loader = ConfigLoader(use_user_override=False)
+        _, layout = loader.load()
+        w, h = 1280.0, 720.0
+
+        # 1. 未选中态 1x2 / 1x3 / 2x3：四边均严格外扩 +11px 落在白边外侧暗区，且保持安全边距 [0.004, 0.996]
+        for choice_count in (2, 3, 6):
+            for idx in range(choice_count):
+                cu, cv = layout.resolve_choice_card_center(idx, choice_count)
+                sw, sh = layout.resolve_choice_card_size(idx, choice_count)
+                card_x0 = (cu - sw * 0.5) * w
+                card_x1 = (cu + sw * 0.5) * w
+                card_y0 = (cv - sh * 0.5) * h
+                card_y1 = (cv + sh * 0.5) * h
+
+                poly = layout.resolve_choice_card_polygon(idx, choice_count)
+                for pu, pv in poly:
+                    assert 0.004 <= pu <= 0.996
+                    assert 0.004 <= pv <= 0.996
+                px0, py0 = poly[0][0] * w, poly[0][1] * h
+                px1, py1 = poly[2][0] * w, poly[2][1] * h
+                assert card_x0 - px0 == pytest.approx(11.0, abs=0.2)
+                assert px1 - card_x1 == pytest.approx(11.0, abs=0.2)
+                assert card_y0 - py0 == pytest.approx(11.0, abs=0.2)
+                assert py1 - card_y1 == pytest.approx(11.0, abs=0.2)
+
+                # 点中待确认态：包裹放大后整卡 + 确认白条再外扩 11px（宽约 312px、上 -153.5px、下 +161.5px）
+                cpoly = layout.resolve_choice_confirm_polygon(idx, choice_count)
+                for pu, pv in cpoly:
+                    assert 0.004 <= pu <= 0.996
+                    assert 0.004 <= pv <= 0.996
+                cx0, cy0 = cpoly[0][0] * w, cpoly[0][1] * h
+                cx1, cy1 = cpoly[2][0] * w, cpoly[2][1] * h
+                assert (cx1 - cx0) == pytest.approx(312.0, abs=0.5)
+                assert cx0 < px0 and cx1 > px1
+                assert cy0 < py0 and cy1 > py1
+                # 确认点击中心必须精准落在待确认选框内部且水平居中
+                conf_u, conf_v = layout.resolve_choice_confirm_point(idx, choice_count)
+                assert conf_u == pytest.approx(cu)
+                assert cy0 < conf_v * h < cy1
+
+        # 2. 横向邻列外扩框净空（1x2 / 1x3 / 2x3 均为 ~34px 绝不重叠）
+        for choice_count, pairs in ((2, [(0, 1)]), (3, [(0, 1), (1, 2)]), (6, [(0, 1), (1, 2), (3, 4), (4, 5)])):
+            for left_idx, right_idx in pairs:
+                left_poly = layout.resolve_choice_card_polygon(left_idx, choice_count)
+                right_poly = layout.resolve_choice_card_polygon(right_idx, choice_count)
+                gap_px = (right_poly[0][0] - left_poly[2][0]) * w
+                assert gap_px >= 30.0
+
+        # 3. 2x3 六选一上下排净空（未选中态 >= 30px；点中放大态与对排卡片白边仍留足安全净空）
+        for col in range(3):
+            top_poly = layout.resolve_choice_card_polygon(col, 6)
+            bot_poly = layout.resolve_choice_card_polygon(col + 3, 6)
+            row_gap_px = (bot_poly[0][1] - top_poly[2][1]) * h
+            assert row_gap_px >= 30.0
+
+            top_conf_poly = layout.resolve_choice_confirm_polygon(col, 6)
+            bot_conf_poly = layout.resolve_choice_confirm_polygon(col + 3, 6)
+            _, bot_cv = layout.resolve_choice_card_center(col + 3, 6)
+            _, bot_sh = layout.resolve_choice_card_size(col + 3, 6)
+            bot_card_white_top_px = (bot_cv - bot_sh * 0.5) * h
+            assert bot_card_white_top_px - top_conf_poly[2][1] * h >= 14.0
+
+            _, top_cv = layout.resolve_choice_card_center(col, 6)
+            _, top_sh = layout.resolve_choice_card_size(col, 6)
+            top_card_white_bot_px = (top_cv + top_sh * 0.5) * h
+            assert bot_conf_poly[0][1] * h - top_card_white_bot_px >= 20.0
+            assert bot_conf_poly[2][1] * h <= 676.0
+
+        # 4. 确认白条点击中心实测像素精度（1280x720 实测：2/3 选 1 = 486.0px，6 选 1 上 338.0 / 下 635.0px）
+        assert layout.resolve_choice_confirm_point(0, 2)[1] * h == pytest.approx(486.0, abs=1.0)
+        assert layout.resolve_choice_confirm_point(0, 3)[1] * h == pytest.approx(486.0, abs=1.0)
+        assert layout.resolve_choice_confirm_point(1, 6)[1] * h == pytest.approx(338.0, abs=1.0)
+        assert layout.resolve_choice_confirm_point(4, 6)[1] * h == pytest.approx(635.0, abs=1.0)
 
     def test_save_user_override_merge_and_reload(self, tmp_path: Path) -> None:
         repo_configs = Path(__file__).resolve().parents[1] / "configs"

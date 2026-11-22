@@ -1,14 +1,18 @@
-"""PRTS 工业科技风透明鼠标穿透 HUD 悬浮层。
+"""罗德岛 PRTS 纯白极简风透明鼠标穿透 HUD 悬浮层。
 
-基于 PySide6 构建无边框、置顶、完全不抢夺游戏焦点、不拦截鼠标输入的 OSD 叠加层，
-实时渲染焦点高亮框、透视棋盘格选区、抓取源连线、四向定朝向轮盘、准备防误触进度环及底部 Xbox 键位提示栏。
+基于 PySide6 构建无边框、置顶、完全不抢夺游戏焦点、不拦截鼠标输入的 OSD 叠加层。
+视觉采用「以白为主、克制细线、琥珀微点缀」的 H1 极简细线基底：
+白底细边顶部状态签、四角细折标选择框、白色细虚线抓取源与连线、分离式细线准星、
+半透白细带底部提示条；定朝向组件与左右摇杆图标采用 H2 风格（十字细轴 + 折线箭头 / 双层细圆环）。
 """
 
 from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from dataclasses import dataclass
 import math
+import re
 import sys
 import time
 from typing import Sequence
@@ -29,7 +33,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from arkcontroller.control.deploy_fsm import DeployState
-from arkcontroller.control.dispatcher import HUDStateSnapshot, PromptItem
+from arkcontroller.control.dispatcher import FocusZone, HUDStateSnapshot, PromptItem
 from arkcontroller.platform.window_tracker import ViewportRect
 from arkcontroller.vision.scene_detector import GameScene
 
@@ -46,19 +50,23 @@ SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 SWP_NOOWNERZORDER = 0x0200
+WDA_NONE = 0x00000000
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
-# PRTS 工业科技风调色板
-COLOR_CYAN = QColor("#00E5FF")
-COLOR_AMBER = QColor("#FFB300")
-COLOR_GREEN = QColor("#4CAF50")
-COLOR_RED = QColor("#F44336")
-COLOR_BLUE = QColor("#2196F3")
-COLOR_YELLOW = QColor("#FFC107")
-COLOR_TEXT_PRIMARY = QColor("#F1F5F9")
-COLOR_TEXT_MUTED = QColor("#94A3B8")
-COLOR_CAPSULE_BG = QColor(12, 16, 22, 212)
-COLOR_CAPSULE_BORDER = QColor(0, 229, 255, 110)
+# 纯白极简调色板（以白为主，琥珀微点缀）
+COLOR_WHITE = QColor("#FFFFFF")
+COLOR_AMBER = QColor("#F59E0B")         # 源石琥珀（唯一强调色）
+COLOR_CYAN = QColor("#0098DC")          # 罗德岛天青（校准网格等辅助色）
+COLOR_GREEN = QColor("#16A34A")
+COLOR_RED = QColor("#DC2626")
+COLOR_INK = QColor("#1A1A1A")           # 主文字深炭黑
+COLOR_CHARCOAL = QColor("#2B2B2B")      # 键帽线框
+COLOR_EDGE = QColor("#BDBDBD")          # 细灰描边
+COLOR_TEXT_PRIMARY = COLOR_INK
+COLOR_TEXT_MUTED = QColor("#7A7A7A")
+COLOR_CAPSULE_BG = QColor(255, 255, 255, 245)
+COLOR_CAPSULE_BORDER = COLOR_EDGE
+COLOR_HALO = QColor(0, 0, 0, 72)        # 线条外衬暗影（雪地等亮背景防融色）
 
 SCENE_DISPLAY_NAMES: dict[GameScene, str] = {
     GameScene.BATTLE_PREP: "休整运营",
@@ -69,15 +77,351 @@ SCENE_DISPLAY_NAMES: dict[GameScene, str] = {
 }
 
 _FREE_CURSOR_SYNONYM_LABELS: frozenset[str] = frozenset({"自由鼠标", "自由光标"})
+_PENDING_KEYWORDS: tuple[str, ...] = ("再按", "待确认")
 
+# 面键在手柄上的物理方位（用于在细圆环上点一粒琥珀微点）
+FACE_BUTTON_POSITIONS: dict[str, tuple[int, int]] = {
+    "A": (0, 1),
+    "B": (1, 0),
+    "X": (-1, 0),
+    "Y": (0, -1),
+}
+# 兼容旧接口：面键 -> (底色, 字色)
 FACE_BUTTON_COLORS: dict[str, tuple[QColor, QColor]] = {
-    "A": (COLOR_GREEN, QColor("#FFFFFF")),
-    "B": (COLOR_RED, QColor("#FFFFFF")),
-    "X": (COLOR_BLUE, QColor("#FFFFFF")),
-    "Y": (COLOR_YELLOW, QColor("#111827")),
+    k: (COLOR_WHITE, COLOR_INK) for k in FACE_BUTTON_POSITIONS
 }
 
+_ICON_R = 10.0
+_CAP_H = 18.0
+_SEP_W = 11.0
 
+_DIR_ALIASES: dict[str, str] = {
+    "上": "up", "下": "down", "左": "left", "右": "right",
+    "↑": "up", "↓": "down", "←": "left", "→": "right",
+    "DPAD_UP": "up", "DPAD_DOWN": "down", "DPAD_LEFT": "left", "DPAD_RIGHT": "right",
+    "UP": "up", "DOWN": "down", "LEFT": "left", "RIGHT": "right",
+}
+_DPAD_ALIASES = frozenset({"D-PAD", "DPAD", "十字键", "方向键"})
+_STICK_ALIASES: dict[str, str] = {"LS": "LS", "RS": "RS", "摇杆": "LS", "左摇杆": "LS", "右摇杆": "RS"}
+_CAP_KEYS = frozenset({"LB", "RB", "LT", "RT"})
+_PREFIX_RE = re.compile(r"^(长按|按住|按下|松开|双击|连按|再按)\s*(.+)$")
+
+
+@dataclass(frozen=True)
+class ButtonGlyph:
+    """按钮图示解析单元：kind ∈ face/cap/start/back/stick/dpad/text/sep/prefix。"""
+
+    kind: str
+    value: str = ""
+
+
+def _alpha(color: QColor, alpha: int) -> QColor:
+    c = QColor(color)
+    c.setAlpha(max(0, min(255, int(alpha))))
+    return c
+
+
+def _pen(color: QColor, width: float, style: Qt.PenStyle = Qt.PenStyle.SolidLine,
+         cap: Qt.PenCapStyle = Qt.PenCapStyle.SquareCap) -> QPen:
+    pn = QPen(color, width, style)
+    pn.setCapStyle(cap)
+    pn.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+    return pn
+
+
+def chamfer_polygon(
+    rect: QRectF,
+    *,
+    tl: float = 0.0,
+    tr: float = 0.0,
+    br: float = 0.0,
+    bl: float = 0.0,
+) -> QPolygonF:
+    """构造带 45° 斜切角的矩形多边形。"""
+    x0, y0, x1, y1 = rect.left(), rect.top(), rect.right(), rect.bottom()
+    lim = max(0.0, min(rect.width(), rect.height()) / 2.0)
+    tl, tr, br, bl = (min(lim, max(0.0, v)) for v in (tl, tr, br, bl))
+    pts: list[QPointF] = [QPointF(x0 + tl, y0), QPointF(x1 - tr, y0)]
+    if tr > 0.0:
+        pts.append(QPointF(x1, y0 + tr))
+    pts.append(QPointF(x1, y1 - br))
+    if br > 0.0:
+        pts.append(QPointF(x1 - br, y1))
+    pts.append(QPointF(x0 + bl, y1))
+    if bl > 0.0:
+        pts.append(QPointF(x0, y1 - bl))
+    pts.append(QPointF(x0, y0 + tl))
+    return QPolygonF(pts)
+
+
+def diamond_polygon(cx: float, cy: float, rx: float, ry: float | None = None) -> QPolygonF:
+    """构造以 (cx, cy) 为中心的 45° 旋转菱形。"""
+    ry = rx if ry is None else ry
+    return QPolygonF([QPointF(cx, cy - ry), QPointF(cx + rx, cy), QPointF(cx, cy + ry), QPointF(cx - rx, cy)])
+
+
+# ----------------------------------------------------------------------
+# 手柄按钮图示解析与绘制（HUD 底栏与主控台键位手册共用）
+# ----------------------------------------------------------------------
+def _parse_atom(atom: str) -> list[ButtonGlyph]:
+    raw = atom.strip()
+    if not raw:
+        return []
+    m = _PREFIX_RE.match(raw)
+    if m and m.group(2).strip():
+        rest = _parse_atom(m.group(2))
+        if rest and all(g.kind != "text" for g in rest):
+            return [ButtonGlyph("prefix", m.group(1)), *rest]
+    up = raw.upper()
+    if up in FACE_BUTTON_POSITIONS:
+        return [ButtonGlyph("face", up)]
+    if up in _CAP_KEYS:
+        return [ButtonGlyph("cap", up)]
+    if up == "START":
+        return [ButtonGlyph("start")]
+    if up in ("BACK", "VIEW"):
+        return [ButtonGlyph("back")]
+    if raw in _STICK_ALIASES or up in _STICK_ALIASES:
+        return [ButtonGlyph("stick", _STICK_ALIASES.get(raw, _STICK_ALIASES.get(up, "LS")))]
+    if up in _DPAD_ALIASES or raw in _DPAD_ALIASES:
+        return [ButtonGlyph("dpad", "")]
+    if raw in _DIR_ALIASES or up in _DIR_ALIASES:
+        return [ButtonGlyph("dpad", _DIR_ALIASES.get(raw, _DIR_ALIASES.get(up, "")))]
+    return [ButtonGlyph("text", raw)]
+
+
+def parse_button_spec(spec: str) -> list[ButtonGlyph]:
+    """解析调度器 PromptItem.button 字符串为按钮图示序列。
+
+    语法：'/' 表示「或」，'+' 表示同时按下，'>' 表示依次连按；
+    支持「长按Start」「按住 LT」「松开 LT」「双击A」等中文前缀，
+    以及「LS/D-Pad」「摇杆/十字键」「左/上/下」等组合写法。
+    """
+    glyphs: list[ButtonGlyph] = []
+    seq_parts = [s for s in str(spec).split(">")]
+    for si, seq in enumerate(seq_parts):
+        if si > 0:
+            glyphs.append(ButtonGlyph("sep", "›"))
+        alts = seq.split("/")
+        for ai, alt in enumerate(alts):
+            if ai > 0:
+                glyphs.append(ButtonGlyph("sep", "/"))
+            chords = alt.split("+")
+            for ci, chord in enumerate(chords):
+                if ci > 0:
+                    glyphs.append(ButtonGlyph("sep", "+"))
+                glyphs.extend(_parse_atom(chord))
+    # 清理首尾与连续分隔符
+    cleaned: list[ButtonGlyph] = []
+    for g in glyphs:
+        if g.kind == "sep" and (not cleaned or cleaned[-1].kind == "sep"):
+            continue
+        cleaned.append(g)
+    while cleaned and cleaned[-1].kind == "sep":
+        cleaned.pop()
+    return cleaned or [ButtonGlyph("text", str(spec))]
+
+
+def _glyph_width(g: ButtonGlyph, font: QFont) -> float:
+    fm = QFontMetrics(font)
+    if g.kind in ("face", "start", "back", "stick"):
+        return _ICON_R * 2.0 + (0.5 if g.kind == "stick" else 0.0)
+    if g.kind == "dpad":
+        return 21.0
+    if g.kind == "cap":
+        return max(26.0, fm.horizontalAdvance(g.value) + 12.0)
+    if g.kind == "sep":
+        return _SEP_W
+    if g.kind == "prefix":
+        return QFontMetrics(_prefix_font(font)).horizontalAdvance(g.value) + 4.0
+    return max(24.0, fm.horizontalAdvance(g.value) + 12.0)
+
+
+def _prefix_font(font: QFont) -> QFont:
+    return QFont("Microsoft YaHei UI", max(1, font.pointSize()))
+
+
+def measure_button_spec(spec: str | Sequence[ButtonGlyph], font: QFont) -> float:
+    """测量按钮图示序列总宽度。"""
+    glyphs = parse_button_spec(spec) if isinstance(spec, str) else list(spec)
+    total = 0.0
+    for i, g in enumerate(glyphs):
+        if i > 0:
+            total += 2.0
+        total += _glyph_width(g, font)
+    return total
+
+
+def _halo_circle(painter: QPainter, c: QPointF, r: float) -> None:
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(QColor(0, 0, 0, 42)))
+    painter.drawEllipse(c + QPointF(0.0, 1.0), r + 0.6, r + 0.6)
+
+
+def paint_button_glyph(
+    painter: QPainter,
+    g: ButtonGlyph,
+    x: float,
+    cy: float,
+    font: QFont,
+    *,
+    highlight: bool = False,
+) -> float:
+    """绘制单个按钮图示，返回结束 X 坐标。highlight=True 时线框改为琥珀色（实时按下反馈）。"""
+    line = COLOR_AMBER if highlight else COLOR_CHARCOAL
+    w = _glyph_width(g, font)
+    r = _ICON_R
+    if g.kind == "face":
+        c = QPointF(x + r, cy)
+        _halo_circle(painter, c, r)
+        painter.setPen(_pen(line, 1.8 if highlight else 1.5))
+        painter.setBrush(QBrush(COLOR_WHITE))
+        painter.drawEllipse(c, r, r)
+        bold = QFont(font)
+        bold.setBold(True)
+        painter.setFont(bold)
+        painter.setPen(QPen(COLOR_INK))
+        painter.drawText(QRectF(c.x() - r, cy - r, 2 * r, 2 * r), Qt.AlignmentFlag.AlignCenter, g.value)
+        dx, dy = FACE_BUTTON_POSITIONS.get(g.value, (0, 1))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(COLOR_AMBER))
+        painter.drawEllipse(QPointF(c.x() + dx * r, cy + dy * r), 2.0, 2.0)
+    elif g.kind == "cap":
+        rect = QRectF(x, cy - _CAP_H / 2.0, w, _CAP_H)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 3.0, 3.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 38)))
+        painter.drawPath(path.translated(0.0, 1.0))
+        painter.setPen(_pen(line, 1.6 if highlight else 1.3))
+        painter.setBrush(QBrush(COLOR_WHITE))
+        painter.drawPath(path)
+        painter.setFont(font)
+        painter.setPen(QPen(COLOR_INK))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, g.value)
+    elif g.kind == "start":
+        c = QPointF(x + r, cy)
+        _halo_circle(painter, c, r)
+        painter.setPen(_pen(line, 1.5))
+        painter.setBrush(QBrush(COLOR_WHITE))
+        painter.drawEllipse(c, r, r)
+        bar = _pen(COLOR_INK, 1.4, cap=Qt.PenCapStyle.FlatCap)
+        painter.setPen(bar)
+        half = r * 0.46
+        for k in (-1, 0, 1):
+            yy = cy + k * r * 0.34
+            painter.drawLine(QPointF(c.x() - half, yy), QPointF(c.x() + half, yy))
+    elif g.kind == "back":
+        c = QPointF(x + r, cy)
+        _halo_circle(painter, c, r)
+        painter.setPen(_pen(line, 1.5))
+        painter.setBrush(QBrush(COLOR_WHITE))
+        painter.drawEllipse(c, r, r)
+        painter.setPen(_pen(COLOR_INK, 1.1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        s = r * 0.5
+        painter.drawRect(QRectF(c.x() - s * 0.95, cy - s * 0.75, s * 1.15, s * 0.95))
+        painter.setBrush(QBrush(COLOR_WHITE))
+        painter.drawRect(QRectF(c.x() - s * 0.25, cy - s * 0.15, s * 1.15, s * 0.95))
+    elif g.kind == "stick":
+        # H2：外圈深炭灰实线 + 内圈极细浅灰环 + 居中 LS/RS 字标
+        c = QPointF(x + r + 0.25, cy)
+        _halo_circle(painter, c, r)
+        painter.setPen(_pen(line, 1.5))
+        painter.setBrush(QBrush(COLOR_WHITE))
+        painter.drawEllipse(c, r, r)
+        painter.setPen(_pen(COLOR_EDGE, 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(c, r * 0.68, r * 0.68)
+        tiny = QFont("Segoe UI", max(1, font.pointSize() - 3), QFont.Weight.Bold)
+        painter.setFont(tiny)
+        painter.setPen(QPen(COLOR_INK))
+        painter.drawText(QRectF(c.x() - r, cy - r, 2 * r, 2 * r), Qt.AlignmentFlag.AlignCenter, g.value or "LS")
+    elif g.kind == "dpad":
+        c = QPointF(x + w / 2.0, cy)
+        s, a = 6.8, 3.5
+        cross = QPolygonF([
+            QPointF(c.x() - a, cy - s - a), QPointF(c.x() + a, cy - s - a), QPointF(c.x() + a, cy - a),
+            QPointF(c.x() + s + a, cy - a), QPointF(c.x() + s + a, cy + a), QPointF(c.x() + a, cy + a),
+            QPointF(c.x() + a, cy + s + a), QPointF(c.x() - a, cy + s + a), QPointF(c.x() - a, cy + a),
+            QPointF(c.x() - s - a, cy + a), QPointF(c.x() - s - a, cy - a), QPointF(c.x() - a, cy - a),
+        ])
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 38)))
+        painter.drawPolygon(cross.translated(0.0, 1.0))
+        painter.setPen(_pen(line, 1.2))
+        painter.setBrush(QBrush(COLOR_WHITE))
+        painter.drawPolygon(cross)
+        if g.value:
+            d = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}[g.value]
+            painter.setPen(_pen(COLOR_AMBER, 2.0, cap=Qt.PenCapStyle.RoundCap))
+            painter.drawLine(QPointF(c.x() + d[0] * 2.4, cy + d[1] * 2.4),
+                             QPointF(c.x() + d[0] * (s + 1.0), cy + d[1] * (s + 1.0)))
+    elif g.kind == "sep":
+        painter.setFont(font)
+        painter.setPen(QPen(COLOR_TEXT_MUTED))
+        painter.drawText(QRectF(x, cy - 9.0, w, 18.0), Qt.AlignmentFlag.AlignCenter, g.value)
+    elif g.kind == "prefix":
+        painter.setFont(_prefix_font(font))
+        painter.setPen(QPen(QColor("#444444")))
+        painter.drawText(QRectF(x, cy - 9.0, w, 18.0),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, g.value)
+    else:  # text 兜底键帽
+        rect = QRectF(x, cy - _CAP_H / 2.0, w, _CAP_H)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 3.0, 3.0)
+        painter.setPen(_pen(line, 1.1))
+        painter.setBrush(QBrush(COLOR_WHITE))
+        painter.drawPath(path)
+        f = QFont("Microsoft YaHei UI", max(1, font.pointSize() - 1))
+        painter.setFont(f)
+        painter.setPen(QPen(COLOR_INK))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, g.value)
+    return x + w
+
+
+def paint_button_spec(
+    painter: QPainter,
+    spec: str | Sequence[ButtonGlyph],
+    x: float,
+    cy: float,
+    font: QFont,
+    *,
+    highlight: bool = False,
+) -> float:
+    """绘制完整按钮图示序列（如「长按Start」「LS/D-Pad」「RT+A」），返回结束 X 坐标。"""
+    glyphs = parse_button_spec(spec) if isinstance(spec, str) else list(spec)
+    for i, g in enumerate(glyphs):
+        if i > 0:
+            x += 2.0
+        x = paint_button_glyph(painter, g, x, cy, font, highlight=highlight)
+    return x
+
+
+def measure_button_tokens(tokens: Sequence[str], fm: QFontMetrics) -> float:
+    """兼容旧接口：以 '+' 连接的组合按键宽度。"""
+    font = QFont("Segoe UI", 8, QFont.Weight.DemiBold)
+    del fm
+    return measure_button_spec("+".join(tokens), font)
+
+
+def paint_button_tokens(
+    painter: QPainter,
+    tokens: Sequence[str],
+    start_x: float,
+    center_y: float,
+    font: QFont,
+    *,
+    pressed: frozenset[str] | None = None,
+) -> float:
+    """兼容旧接口：绘制以 '+' 连接的组合按键。"""
+    hl = bool(pressed and any(t.upper() in pressed for t in tokens))
+    return paint_button_spec(painter, "+".join(tokens), start_x, center_y, font, highlight=hl)
+
+
+# ----------------------------------------------------------------------
+# Win32 穿透与对齐
+# ----------------------------------------------------------------------
 def _is_windows_qpa() -> bool:
     """判断当前是否运行在真实 Windows 桌面 QPA（排除 offscreen 等无头测试平台）。"""
     if sys.platform != "win32":
@@ -148,7 +492,22 @@ def align_widget_to_physical_rect(
             pass
 
 
-def apply_win32_click_through(hwnd: int) -> bool:
+def apply_win32_display_affinity(hwnd: int, exclude_from_capture: bool = True) -> bool:
+    """设置窗口截屏/屏幕共享可见性：True 为 WDA_EXCLUDEFROMCAPTURE（隐藏），False 为 WDA_NONE（可见）。"""
+    if not hwnd or not _is_windows_qpa():
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
+        affinity = WDA_EXCLUDEFROMCAPTURE if exclude_from_capture else WDA_NONE
+        return bool(user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), affinity))
+    except Exception:
+        # 兼容不支持 WDA_EXCLUDEFROMCAPTURE 的旧版系统或受限测试环境
+        return False
+
+
+def apply_win32_click_through(hwnd: int, *, exclude_from_capture: bool = True) -> bool:
     """对给定 Win32 窗口句柄双重加固透明鼠标穿透与不抢焦点样式。"""
     if not hwnd or not _is_windows_qpa():
         return False
@@ -187,20 +546,33 @@ def apply_win32_click_through(hwnd: int) -> bool:
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
-        try:
-            user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
-            user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
-            user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), WDA_EXCLUDEFROMCAPTURE)
-        except Exception:
-            # 兼容不支持 WDA_EXCLUDEFROMCAPTURE 的旧版系统或受限测试环境
-            pass
+        apply_win32_display_affinity(hwnd, exclude_from_capture)
         return True
     except Exception:
         return False
 
 
+def _corner_segments(pts: Sequence[QPointF], arm: float, ratio: float) -> list[tuple[QPointF, QPointF, QPointF]]:
+    """计算多边形每个顶点的两条折标端点（沿边向量，适配透视梯形格）。"""
+    n = len(pts)
+    segs: list[tuple[QPointF, QPointF, QPointF]] = []
+    for i in range(n):
+        c = pts[i]
+        ends: list[QPointF] = []
+        for nb in (pts[i - 1], pts[(i + 1) % n]):
+            dx, dy = nb.x() - c.x(), nb.y() - c.y()
+            seg = math.hypot(dx, dy)
+            if seg < 1e-3:
+                ends.append(c)
+                continue
+            a = min(arm, seg * ratio)
+            ends.append(QPointF(c.x() + dx / seg * a, c.y() + dy / seg * a))
+        segs.append((ends[0], c, ends[1]))
+    return segs
+
+
 class HUDWindow(QWidget):
-    """PRTS 风格透明鼠标穿透 HUD 悬浮层窗口。"""
+    """罗德岛 PRTS 纯白极简风透明鼠标穿透 HUD 悬浮层窗口。"""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -210,6 +582,7 @@ class HUDWindow(QWidget):
         self._last_geom_rect: tuple[int, int, int, int] | None = None
         self._last_repaint_ts: float = 0.0
         self._win32_styled: bool = False
+        self._hide_from_capture: bool = True
 
         self.setWindowTitle("ArkController HUD")
         self.setWindowFlags(
@@ -224,10 +597,12 @@ class HUDWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        self._font_title = QFont("Microsoft YaHei UI", 10, QFont.Weight.Bold)
-        self._font_badge = QFont("Segoe UI", 9, QFont.Weight.Bold)
-        self._font_prompt = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
+        # 全部字体显式给定正整数点字号，杜绝 QFont::setPointSize(-1) 警告
+        self._font_title = QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold)
+        self._font_badge = QFont("Segoe UI", 8, QFont.Weight.DemiBold)
+        self._font_prompt = QFont("Microsoft YaHei UI", 9)
         self._font_small = QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold)
+        self._font_micro = QFont("Segoe UI", 7, QFont.Weight.Bold)
 
     @property
     def overlay_enabled(self) -> bool:
@@ -243,6 +618,23 @@ class HUDWindow(QWidget):
             self._ensure_shown_and_aligned(self._viewport)
             self.update()
 
+    @property
+    def hide_from_capture(self) -> bool:
+        """是否在截屏 / 录屏 / 屏幕共享中隐藏 HUD（默认 True，防止 mss 采样自污染）。"""
+        return self._hide_from_capture
+
+    def set_hide_from_capture(self, enabled: bool) -> None:
+        """热切换截屏可见性：已创建窗口句柄时立即在 WDA_EXCLUDEFROMCAPTURE 与 WDA_NONE 间切换。"""
+        self._hide_from_capture = bool(enabled)
+        if not _is_windows_qpa() or not self.testAttribute(Qt.WidgetAttribute.WA_WState_Created):
+            return
+        try:
+            hwnd = int(self.winId())
+        except Exception:
+            hwnd = 0
+        if hwnd:
+            apply_win32_display_affinity(hwnd, self._hide_from_capture)
+
     def showEvent(self, event: QShowEvent) -> None:
         """窗口显示时通过 Win32 SetWindowLongW 双重加固鼠标穿透与不抢焦点属性。"""
         super().showEvent(event)
@@ -251,7 +643,9 @@ class HUDWindow(QWidget):
         except Exception:
             hwnd = 0
         if hwnd:
-            self._win32_styled = apply_win32_click_through(hwnd)
+            self._win32_styled = apply_win32_click_through(
+                hwnd, exclude_from_capture=self._hide_from_capture
+            )
         if self._viewport is not None:
             align_widget_to_physical_rect(
                 self,
@@ -329,7 +723,7 @@ class HUDWindow(QWidget):
                 )
 
     def paintEvent(self, _event) -> None:  # type: ignore[override]
-        """抗锯齿绘制 PRTS 科技风 HUD 元素。"""
+        """抗锯齿绘制纯白极简 HUD 元素。"""
         snapshot = self._snapshot
         if snapshot is None or not snapshot.visible:
             return
@@ -340,55 +734,102 @@ class HUDWindow(QWidget):
             return
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         try:
-            # 1. 抓取源琥珀色虚线框 + 动态引导连线
-            if snapshot.holding_source_norm is not None:
-                self._draw_holding_source_and_trajectory(painter, w, h, snapshot)
-
-            # 2. 焦点多边形高亮框（支持标准矩形与 3D 透视棋盘梯形格）
-            if (
-                snapshot.focus_polygon_norm
-                and len(snapshot.focus_polygon_norm) >= 3
-                and not snapshot.free_cursor_active
-            ):
-                accent = (
-                    COLOR_AMBER
-                    if snapshot.holding_source_norm is not None
-                    else COLOR_CYAN
-                )
-                self._draw_focus_polygon(painter, w, h, snapshot.focus_polygon_norm, accent)
-
-            # 3. 自由光标模式准星环
-            if snapshot.free_cursor_active:
-                self._draw_free_cursor_reticle(painter, w, h, snapshot.cursor_norm)
-
-            # 4. 两段式部署：四向定朝向十字轮盘
-            if (
-                snapshot.deploy_state == DeployState.AIMING_DIRECTION
-                and snapshot.aim_origin_norm is not None
-            ):
-                self._draw_direction_wheel(
-                    painter,
-                    w,
-                    h,
-                    snapshot.aim_origin_norm,
-                    snapshot.aim_preview_dir,
-                )
-
-            # 5. 顶部居中磨砂状态胶囊 + Toast 提示
-            self._draw_top_status_capsule(painter, w, h, snapshot)
-
-            # 6. 准备开战防误触长按进度环
-            if snapshot.ready_hold_progress > 0.0:
-                self._draw_ready_hold_ring(painter, w, h, snapshot.ready_hold_progress)
-
-            # 7. 底部紧凑 Xbox 彩色键位提示条
-            if snapshot.prompts:
-                self._draw_bottom_prompt_bar(painter, w, h, snapshot.prompts)
+            self.render_snapshot(painter, w, h, snapshot)
         finally:
             painter.end()
+
+    @staticmethod
+    def _is_pending(snapshot: HUDStateSnapshot) -> bool:
+        """当前焦点是否处于待二次确认 / 抓取目标态。"""
+        label = snapshot.focus_label or ""
+        return snapshot.holding_source_norm is not None or any(k in label for k in _PENDING_KEYWORDS)
+
+    def render_snapshot(
+        self,
+        painter: QPainter,
+        w: float,
+        h: float,
+        snapshot: HUDStateSnapshot,
+    ) -> None:
+        """在任意 QPainter 设备上绘制完整 HUD 图层（供 paintEvent 与离屏预览复用）。"""
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        # 1. 抓取源细虚线框 + 连线
+        if snapshot.holding_source_norm is not None:
+            self._draw_holding_source_and_trajectory(painter, w, h, snapshot)
+
+        # 2. S3 加粗取景折角选择框（支持标准矩形与 3D 透视棋盘梯形格，棋盘自动启用紧凑短折角）
+        if (
+            snapshot.focus_polygon_norm
+            and len(snapshot.focus_polygon_norm) >= 3
+            and not snapshot.free_cursor_active
+        ):
+            pending = self._is_pending(snapshot)
+            self._draw_focus_polygon(
+                painter,
+                w,
+                h,
+                snapshot.focus_polygon_norm,
+                COLOR_AMBER if pending else COLOR_WHITE,
+                pending=pending,
+                compact=(snapshot.focus_zone == FocusZone.BOARD),
+            )
+
+        # 3. 自由光标细线准星
+        if snapshot.free_cursor_active:
+            self._draw_free_cursor_reticle(painter, w, h, snapshot.cursor_norm)
+
+        # 4. 两段式部署：H2 十字细轴定朝向
+        if (
+            snapshot.deploy_state == DeployState.AIMING_DIRECTION
+            and snapshot.aim_origin_norm is not None
+        ):
+            self._draw_direction_wheel(
+                painter,
+                w,
+                h,
+                snapshot.aim_origin_norm,
+                snapshot.aim_preview_dir,
+            )
+
+        # 5. 顶部白底细边状态签 + Toast
+        self._draw_top_status_capsule(painter, w, h, snapshot)
+
+        # 6. 开战长按细环
+        if snapshot.ready_hold_progress > 0.0:
+            self._draw_ready_hold_ring(painter, w, h, snapshot.ready_hold_progress)
+
+        # 7. 底部半透白细带提示条
+        if snapshot.prompts:
+            self._draw_bottom_prompt_bar(painter, w, h, snapshot.prompts)
+
+    # ------------------------------------------------------------------
+    # 选择框
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _focus_box_metrics(
+        w: float,
+        h: float,
+        pts: Sequence[QPointF],
+        *,
+        compact: bool = False,
+    ) -> tuple[float, float, float, float, float, float, float, float]:
+        """计算 S3 选取框在当前分辨率与尺寸档位下的自适应几何参数。
+
+        返回 ``(scale, arm, ratio, halo_w, corner_w, tick_start, tick_end, tick_w)``。
+        """
+        scale = max(0.75, min(w / 1280.0, h / 720.0))
+        xs = [p.x() for p in pts]
+        ys = [p.y() for p in pts]
+        min_dim = min(max(xs) - min(xs), max(ys) - min(ys))
+        use_compact = compact or (min_dim < 78.0 * scale)
+        if use_compact:
+            arm = max(10.0 * scale, min(12.5 * scale, min_dim * 0.19))
+            return (scale, arm, 0.21, 5.8 * scale, 3.0 * scale, 3.5 * scale, 7.8 * scale, 1.2 * scale)
+        arm = max(20.0 * scale, min(30.0 * scale, min_dim * 0.12))
+        return (scale, arm, 0.34, 6.6 * scale, 3.4 * scale, 4.5 * scale, 10.5 * scale, 1.3 * scale)
 
     def _draw_focus_polygon(
         self,
@@ -397,56 +838,80 @@ class HUDWindow(QWidget):
         h: float,
         polygon_norm: Sequence[tuple[float, float]],
         color: QColor,
+        *,
+        pending: bool = False,
+        compact: bool = False,
     ) -> None:
-        """绘制青蓝/琥珀半透明发光焦点多边形与 PRTS 工业角标。"""
+        """S3：加粗取景折角 + 四边半透细连线 + 外角微刻线；棋盘与紧凑槽位自动切换短折角。"""
+        del color
         pts = [QPointF(u * w, v * h) for u, v in polygon_norm]
+        if len(pts) < 3:
+            return
+
+        scale, arm, ratio, halo_w, corner_w, tick_start, tick_end, tick_w = self._focus_box_metrics(
+            w, h, pts, compact=compact
+        )
+        col = COLOR_AMBER if pending else COLOR_WHITE
+        tick_col = COLOR_WHITE if pending else COLOR_AMBER
+
+        # 1. 四边半透细连线（暗底衬边 + 主色半透细框）
         poly = QPolygonF(pts)
-
-        # 内填半透明高光
-        fill_color = QColor(color)
-        fill_color.setAlpha(30)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(fill_color))
-        painter.drawPolygon(poly)
-
-        # 外层柔和发光描边
-        glow_color = QColor(color)
-        glow_color.setAlpha(68)
-        glow_pen = QPen(glow_color, 6.0)
-        glow_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(glow_pen)
+        painter.setPen(_pen(QColor(0, 0, 0, 90), 2.6 * scale))
+        painter.drawPolygon(poly)
+        painter.setPen(_pen(_alpha(col, 150), 1.1 * scale))
         painter.drawPolygon(poly)
 
-        # 主轮廓锐利描边
-        main_color = QColor(color)
-        main_color.setAlpha(235)
-        main_pen = QPen(main_color, 2.0)
-        main_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
-        painter.setPen(main_pen)
-        painter.drawPolygon(poly)
+        # 2. 加粗取景折角（深炭黑衬边 + 主色粗折角）
+        segs = _corner_segments(pts, arm, ratio)
+        corner_paths: list[QPainterPath] = []
+        for a, c, b in segs:
+            path = QPainterPath(a)
+            path.lineTo(c)
+            path.lineTo(b)
+            corner_paths.append(path)
 
-        # 沿多边形边向量绘制 4 个锐利角标（精准适配透视倾斜格子）
-        bracket_pen = QPen(QColor("#FFFFFF"), 2.6)
-        bracket_pen.setCapStyle(Qt.PenCapStyle.SquareCap)
-        painter.setPen(bracket_pen)
+        for pn in (_pen(QColor(12, 12, 12, 185), halo_w), _pen(col, corner_w)):
+            painter.setPen(pn)
+            for path in corner_paths:
+                painter.drawPath(path)
+
+        # 3. 外角微刻线（常规态琥珀 / 待确认态纯白，FlatCap）
         n = len(pts)
-        for i in range(n):
-            p_curr = pts[i]
-            p_prev = pts[(i - 1) % n]
-            p_next = pts[(i + 1) % n]
-            for neighbor in (p_prev, p_next):
-                dx = neighbor.x() - p_curr.x()
-                dy = neighbor.y() - p_curr.y()
-                seg_len = math.hypot(dx, dy)
-                if seg_len < 1e-3:
-                    continue
-                arm = min(13.0, seg_len * 0.28)
-                end_pt = QPointF(
-                    p_curr.x() + (dx / seg_len) * arm,
-                    p_curr.y() + (dy / seg_len) * arm,
-                )
-                painter.drawLine(p_curr, end_pt)
+        cx = sum(p.x() for p in pts) / n
+        cy = sum(p.y() for p in pts) / n
+        painter.setPen(_pen(tick_col, tick_w, cap=Qt.PenCapStyle.FlatCap))
+        for p in pts:
+            ox, oy = p.x() - cx, p.y() - cy
+            ol = math.hypot(ox, oy)
+            if ol < 1e-3:
+                continue
+            ux, uy = ox / ol, oy / ol
+            painter.drawLine(
+                QPointF(p.x() + ux * tick_start, p.y() + uy * tick_start),
+                QPointF(p.x() + ux * tick_end, p.y() + uy * tick_end),
+            )
+
+    # ------------------------------------------------------------------
+    # 抓取源与连线
+    # ------------------------------------------------------------------
+    def _draw_tag(self, painter: QPainter, x: float, y: float, text: str, accent: QColor = COLOR_AMBER) -> QRectF:
+        """白底细边小签（左侧 2px 强调竖线）。"""
+        fm = QFontMetrics(self._font_small)
+        rect = QRectF(x, y, fm.horizontalAdvance(text) + 18.0, fm.height() + 4.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 40)))
+        painter.drawRect(rect.translated(0.0, 1.0))
+        painter.setPen(_pen(COLOR_EDGE, 1.0))
+        painter.setBrush(QBrush(COLOR_CAPSULE_BG))
+        painter.drawRect(rect)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(accent))
+        painter.drawRect(QRectF(rect.left(), rect.top(), 2.0, rect.height()))
+        painter.setFont(self._font_small)
+        painter.setPen(QPen(COLOR_INK))
+        painter.drawText(rect.adjusted(3.0, 0.0, 0.0, 0.0), Qt.AlignmentFlag.AlignCenter, text)
+        return rect
 
     def _draw_holding_source_and_trajectory(
         self,
@@ -455,44 +920,37 @@ class HUDWindow(QWidget):
         h: float,
         snapshot: HUDStateSnapshot,
     ) -> None:
-        """绘制琥珀色抓取源虚线槽位框及指向当前焦点的动态虚线轨迹。"""
+        """H1：白色细虚线源框 + 白底细边小签 + 纤细白色虚线连线与空心小菱形终点。"""
         assert snapshot.holding_source_norm is not None
         su, sv = snapshot.holding_source_norm
         sx, sy = su * w, sv * h
+        now = time.monotonic()
 
         box_w = max(44.0, min(96.0, w * 0.068))
         box_h = max(44.0, min(96.0, h * 0.11))
         src_rect = QRectF(sx - box_w / 2.0, sy - box_h / 2.0, box_w, box_h)
+        offset = (now * 16.0) % 9.0
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        halo = _pen(COLOR_HALO, 3.0, Qt.PenStyle.CustomDashLine, Qt.PenCapStyle.FlatCap)
+        halo.setDashPattern([2.0, 1.0])
+        halo.setDashOffset(offset / 3.0)
+        dash = _pen(COLOR_WHITE, 1.4, Qt.PenStyle.CustomDashLine, Qt.PenCapStyle.FlatCap)
+        dash.setDashPattern([4.0, 2.4])
+        dash.setDashOffset(offset)
+        painter.setPen(halo)
+        painter.drawRect(src_rect)
+        painter.setPen(dash)
+        painter.drawRect(src_rect)
 
-        # 源槽位半透明底色
-        fill = QColor(COLOR_AMBER)
-        fill.setAlpha(36)
-        painter.setBrush(QBrush(fill))
-        dash_pen = QPen(COLOR_AMBER, 2.2, Qt.PenStyle.DashLine)
-        dash_pen.setDashPattern([6.0, 4.0])
-        dash_pen.setDashOffset((time.monotonic() * 24.0) % 10.0)
-        painter.setPen(dash_pen)
-        painter.drawRoundedRect(src_rect, 6.0, 6.0)
-
-        # 源槽位顶部标签
         if snapshot.deploy_state == DeployState.HOLDING_STRATEGY:
             tag_text = "策略源"
         elif snapshot.deploy_state == DeployState.HOLDING_EQUIP:
             tag_text = "装备源"
         else:
             tag_text = "抓取源"
-        painter.setFont(self._font_small)
         fm = QFontMetrics(self._font_small)
-        tw = fm.horizontalAdvance(tag_text) + 10
-        th = fm.height() + 4
-        tag_rect = QRectF(sx - tw / 2.0, src_rect.top() - th - 4.0, tw, th)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(24, 18, 8, 220)))
-        painter.drawRoundedRect(tag_rect, 4.0, 4.0)
-        painter.setPen(QPen(COLOR_AMBER))
-        painter.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, tag_text)
+        self._draw_tag(painter, src_rect.left(), src_rect.top() - fm.height() - 9.0, tag_text)
 
-        # 计算目标中心点（焦点多边形质心，否则使用光标坐标）
         if snapshot.focus_polygon_norm and not snapshot.free_cursor_active:
             tx = sum(u for u, _ in snapshot.focus_polygon_norm) / len(snapshot.focus_polygon_norm) * w
             ty = sum(v for _, v in snapshot.focus_polygon_norm) / len(snapshot.focus_polygon_norm) * h
@@ -501,34 +959,26 @@ class HUDWindow(QWidget):
             ty = snapshot.cursor_norm[1] * h
 
         dist = math.hypot(tx - sx, ty - sy)
-        if dist >= 16.0:
-            # 发光底线
-            glow_pen = QPen(QColor(255, 179, 0, 75), 6.0)
-            painter.setPen(glow_pen)
-            painter.drawLine(QPointF(sx, sy), QPointF(tx, ty))
+        if dist < 16.0:
+            return
+        ux, uy = (tx - sx) / dist, (ty - sy) / dist
+        end = QPointF(tx - ux * 5.5, ty - uy * 5.5)
+        painter.setPen(_pen(COLOR_HALO, 2.8, cap=Qt.PenCapStyle.FlatCap))
+        painter.drawLine(QPointF(sx, sy), end)
+        line = _pen(COLOR_WHITE, 1.2, Qt.PenStyle.CustomDashLine, Qt.PenCapStyle.FlatCap)
+        line.setDashPattern([5.0, 4.0])
+        line.setDashOffset(-(now * 30.0) % 9.0)
+        painter.setPen(line)
+        painter.drawLine(QPointF(sx, sy), end)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(_pen(COLOR_HALO, 3.2))
+        painter.drawPolygon(diamond_polygon(tx, ty, 5.0))
+        painter.setPen(_pen(COLOR_WHITE, 1.5))
+        painter.drawPolygon(diamond_polygon(tx, ty, 5.0))
 
-            # 动态流光虚线
-            traj_pen = QPen(COLOR_AMBER, 2.5, Qt.PenStyle.CustomDashLine)
-            traj_pen.setDashPattern([8.0, 6.0])
-            traj_pen.setDashOffset(-(time.monotonic() * 48.0) % 14.0)
-            painter.setPen(traj_pen)
-            painter.drawLine(QPointF(sx, sy), QPointF(tx, ty))
-
-            # 终点方向小箭头
-            angle = math.atan2(ty - sy, tx - sx)
-            arrow_len = 11.0
-            p1 = QPointF(
-                tx - arrow_len * math.cos(angle - math.pi / 6.0),
-                ty - arrow_len * math.sin(angle - math.pi / 6.0),
-            )
-            p2 = QPointF(
-                tx - arrow_len * math.cos(angle + math.pi / 6.0),
-                ty - arrow_len * math.sin(angle + math.pi / 6.0),
-            )
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(COLOR_AMBER))
-            painter.drawPolygon(QPolygonF([QPointF(tx, ty), p1, p2]))
-
+    # ------------------------------------------------------------------
+    # 自由光标准星
+    # ------------------------------------------------------------------
     def _draw_free_cursor_reticle(
         self,
         painter: QPainter,
@@ -536,21 +986,16 @@ class HUDWindow(QWidget):
         h: float,
         cursor_norm: tuple[float, float],
     ) -> None:
-        """自由光标模式下的轻量 PRTS 空心准星。"""
+        """H1：中心留空的分离式正交细白短线准星（不遮挡指针处游戏文字）。"""
         cx, cy = cursor_norm[0] * w, cursor_norm[1] * h
-        radius = 12.0
-        ring_pen = QPen(QColor(0, 229, 255, 190), 1.8)
-        painter.setPen(ring_pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(QPointF(cx, cy), radius, radius)
+        for pn in (_pen(COLOR_HALO, 3.2), _pen(COLOR_WHITE, 1.4)):
+            painter.setPen(pn)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                painter.drawLine(QPointF(cx + dx * 5.0, cy + dy * 5.0), QPointF(cx + dx * 12.0, cy + dy * 12.0))
 
-        tick = 5.0
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            painter.drawLine(
-                QPointF(cx + dx * (radius + 2.0), cy + dy * (radius + 2.0)),
-                QPointF(cx + dx * (radius + 2.0 + tick), cy + dy * (radius + 2.0 + tick)),
-            )
-
+    # ------------------------------------------------------------------
+    # H2 定朝向
+    # ------------------------------------------------------------------
     def _draw_direction_wheel(
         self,
         painter: QPainter,
@@ -559,73 +1004,52 @@ class HUDWindow(QWidget):
         origin_norm: tuple[float, float],
         preview_dir: str | None,
     ) -> None:
-        """绘制两段式定朝向十字四向轮盘。"""
+        """H2：中心小圆环 + 十字细轴线 + 四端空心折线箭头；预选方向点亮为双层琥珀折线箭头。"""
         cx = origin_norm[0] * w
         cy = origin_norm[1] * h
-        outer_r = max(52.0, min(94.0, min(w, h) * 0.085))
-        inner_r = outer_r * 0.34
+        L = max(30.0, min(46.0, min(w, h) * 0.05))
+        directions = (("up", 0, -1), ("right", 1, 0), ("down", 0, 1), ("left", -1, 0))
+        for key, dx, dy in directions:
+            on = preview_dir == key
+            for pn in (_pen(COLOR_HALO, 3.0), _pen(COLOR_WHITE, 1.1)):
+                painter.setPen(pn)
+                painter.drawLine(QPointF(cx + dx * 6.0, cy + dy * 6.0), QPointF(cx + dx * L, cy + dy * L))
+            for off in ((0.0, 7.0) if on else (0.0,)):
+                tip = QPointF(cx + dx * (L + 6.0 + off), cy + dy * (L + 6.0 + off))
+                a = QPointF(tip.x() - dx * 7.0 - dy * 6.0, tip.y() - dy * 7.0 + dx * 6.0)
+                b = QPointF(tip.x() - dx * 7.0 + dy * 6.0, tip.y() - dy * 7.0 - dx * 6.0)
+                path = QPainterPath(a)
+                path.lineTo(tip)
+                path.lineTo(b)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(_pen(QColor(0, 0, 0, 85), 3.8))
+                painter.drawPath(path)
+                painter.setPen(_pen(COLOR_AMBER if on else COLOR_WHITE, 2.2 if on else 1.4))
+                painter.drawPath(path)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for pn in (_pen(COLOR_HALO, 3.0), _pen(COLOR_WHITE, 1.2)):
+            painter.setPen(pn)
+            painter.drawEllipse(QPointF(cx, cy), 3.2, 3.2)
 
-        # 背景磨砂圆盘
-        painter.setPen(QPen(QColor(0, 229, 255, 130), 1.8))
-        painter.setBrush(QBrush(QColor(10, 15, 22, 196)))
-        painter.drawEllipse(QPointF(cx, cy), outer_r, outer_r)
-
-        # 内核中心圆
-        painter.setPen(QPen(QColor(255, 255, 255, 160), 1.5))
-        painter.setBrush(QBrush(QColor(0, 229, 255, 55)))
-        painter.drawEllipse(QPointF(cx, cy), inner_r * 0.62, inner_r * 0.62)
-
-        directions: list[tuple[str, float, float, str]] = [
-            ("up", 0.0, -1.0, "上"),
-            ("down", 0.0, 1.0, "下"),
-            ("left", -1.0, 0.0, "左"),
-            ("right", 1.0, 0.0, "右"),
-        ]
-        for dir_key, dx, dy, label in directions:
-            active = preview_dir == dir_key
-            tip = QPointF(cx + dx * (outer_r * 0.86), cy + dy * (outer_r * 0.86))
-            base_c = QPointF(cx + dx * (outer_r * 0.44), cy + dy * (outer_r * 0.44))
-            px, py = -dy, dx  # 垂直法向量
-            half_w = outer_r * (0.24 if active else 0.19)
-            wing1 = QPointF(base_c.x() + px * half_w, base_c.y() + py * half_w)
-            wing2 = QPointF(base_c.x() - px * half_w, base_c.y() - py * half_w)
-            arrow_poly = QPolygonF([tip, wing1, wing2])
-
-            if active:
-                glow_pen = QPen(QColor(255, 179, 0, 120), 6.0)
-                painter.setPen(glow_pen)
-                painter.setBrush(QBrush(COLOR_AMBER))
-                painter.drawPolygon(arrow_poly)
-                painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
-                painter.drawPolygon(arrow_poly)
-            else:
-                painter.setPen(QPen(QColor(0, 229, 255, 180), 1.4))
-                painter.setBrush(QBrush(QColor(0, 229, 255, 60)))
-                painter.drawPolygon(arrow_poly)
-
-            # 方向微文字
-            painter.setFont(self._font_small)
-            txt_pos = QPointF(cx + dx * (outer_r * 0.61), cy + dy * (outer_r * 0.61))
-            txt_rect = QRectF(txt_pos.x() - 12.0, txt_pos.y() - 10.0, 24.0, 20.0)
-            painter.setPen(QPen(QColor("#111827") if active else COLOR_TEXT_PRIMARY))
-            painter.drawText(txt_rect, Qt.AlignmentFlag.AlignCenter, label)
-
-        # 底部引导说明条
-        hint = "推摇杆 / 十字键定朝向  ·  B 取消部署"
-        painter.setFont(self._font_small)
+        hint = "推摇杆定朝向 · B 取消"
         fm = QFontMetrics(self._font_small)
-        hw = fm.horizontalAdvance(hint) + 20.0
-        hh = fm.height() + 8.0
-        hint_rect = QRectF(cx - hw / 2.0, cy + outer_r + 8.0, hw, hh)
-        painter.setPen(QPen(QColor(255, 179, 0, 170), 1.2))
-        painter.setBrush(QBrush(COLOR_CAPSULE_BG))
-        painter.drawRoundedRect(hint_rect, 6.0, 6.0)
-        painter.setPen(QPen(COLOR_AMBER))
-        painter.drawText(hint_rect, Qt.AlignmentFlag.AlignCenter, hint)
+        tw = fm.horizontalAdvance(hint) + 18.0
+        ty = cy + L + 22.0
+        if ty + fm.height() + 6.0 > h - 4.0:
+            ty = cy - L - 22.0 - fm.height() - 4.0
+        self._draw_tag(painter, cx - tw / 2.0, ty, hint)
 
+    def _draw_nameplate(self, painter: QPainter, rect: QRectF, text: str, accent: QColor, text_color: QColor) -> None:
+        """兼容旧接口：白底细边铭牌。"""
+        del text_color
+        self._draw_tag(painter, rect.left(), rect.top(), text, accent)
+
+    # ------------------------------------------------------------------
+    # 顶部状态签
+    # ------------------------------------------------------------------
     @staticmethod
     def _format_top_status_text(snapshot: HUDStateSnapshot) -> str:
-        """格式化顶部状态胶囊文案，消除自由鼠标与自由光标同义重复段。"""
+        """格式化顶部状态签文案，消除自由鼠标与自由光标同义重复段。"""
         scene_name = SCENE_DISPLAY_NAMES.get(snapshot.scene, snapshot.scene.value)
         segments: list[str] = [f"PRTS // {scene_name}"]
         focus_label = (snapshot.focus_label or "").strip()
@@ -653,6 +1077,10 @@ class HUDWindow(QWidget):
 
         return "  ·  ".join(segments)
 
+    def _status_accent(self, snapshot: HUDStateSnapshot) -> QColor:
+        """顶签左侧竖线颜色：暂停为红，其余为琥珀。"""
+        return COLOR_RED if snapshot.paused else COLOR_AMBER
+
     def _draw_top_status_capsule(
         self,
         painter: QPainter,
@@ -660,67 +1088,54 @@ class HUDWindow(QWidget):
         h: float,
         snapshot: HUDStateSnapshot,
     ) -> None:
-        """绘制顶部居中微型磨砂黑胶囊及可选 Toast 提示。"""
+        """H1：纯白底 1px 细灰描边纤薄横签 + 左侧 2px 琥珀竖线 + 深炭黑文字；Toast 为同风格次级签。"""
         text = self._format_top_status_text(snapshot)
-        painter.setFont(self._font_title)
         fm = QFontMetrics(self._font_title)
-        text_w = fm.horizontalAdvance(text)
-        capsule_h = max(30.0, fm.height() + 12.0)
-        capsule_w = min(w * 0.88, text_w + 46.0)
-        top_y = max(8.0, h * 0.014)
-        capsule_rect = QRectF((w - capsule_w) / 2.0, top_y, capsule_w, capsule_h)
-
-        # 胶囊底板
-        border_col = COLOR_RED if snapshot.paused else (
-            COLOR_AMBER if snapshot.scene_locked_manual else COLOR_CAPSULE_BORDER
-        )
-        painter.setPen(QPen(border_col, 1.4))
-        painter.setBrush(QBrush(COLOR_CAPSULE_BG))
-        painter.drawRoundedRect(capsule_rect, capsule_h / 2.0, capsule_h / 2.0)
-
-        # 状态指示灯点
-        dot_col = COLOR_RED if snapshot.paused else (
-            COLOR_AMBER
-            if snapshot.scene_locked_manual or snapshot.deploy_state != DeployState.IDLE
-            else COLOR_CYAN
-        )
-        dot_center = QPointF(capsule_rect.left() + 16.0, capsule_rect.center().y())
+        bar_h = max(26.0, fm.height() + 10.0)
+        bar_w = min(w * 0.9, fm.horizontalAdvance(text) + 34.0)
+        top_y = max(8.0, h * 0.012)
+        rect = QRectF((w - bar_w) / 2.0, top_y, bar_w, bar_h)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(dot_col))
-        painter.drawEllipse(dot_center, 4.5, 4.5)
-
-        # 文字内容
-        text_rect = QRectF(
-            capsule_rect.left() + 28.0,
-            capsule_rect.top(),
-            capsule_rect.width() - 38.0,
-            capsule_rect.height(),
-        )
-        painter.setPen(QPen(COLOR_TEXT_PRIMARY))
+        painter.setBrush(QBrush(QColor(0, 0, 0, 45)))
+        painter.drawRect(rect.translated(0.0, 1.0))
+        painter.setPen(_pen(COLOR_CAPSULE_BORDER, 1.0))
+        painter.setBrush(QBrush(COLOR_CAPSULE_BG))
+        painter.drawRect(rect)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(self._status_accent(snapshot)))
+        painter.drawRect(QRectF(rect.left() + 1.0, rect.top() + 5.0, 2.0, rect.height() - 10.0))
+        text_rect = rect.adjusted(14.0, 0.0, -10.0, 0.0)
+        painter.setFont(self._font_title)
+        painter.setPen(QPen(COLOR_INK))
         painter.drawText(
             text_rect,
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-            text,
+            fm.elidedText(text, Qt.TextElideMode.ElideRight, int(text_rect.width())),
         )
 
-        # Toast 次级消息胶囊
         if snapshot.toast_message:
-            painter.setFont(self._font_prompt)
             tfm = QFontMetrics(self._font_prompt)
-            tw = min(w * 0.8, tfm.horizontalAdvance(snapshot.toast_message) + 32.0)
-            th = tfm.height() + 10.0
-            toast_rect = QRectF((w - tw) / 2.0, capsule_rect.bottom() + 6.0, tw, th)
-            painter.setPen(QPen(QColor(0, 229, 255, 160), 1.2))
-            painter.setBrush(QBrush(QColor(12, 20, 30, 225)))
-            painter.drawRoundedRect(toast_rect, 6.0, 6.0)
-            # 左侧亮条
-            accent_bar = QRectF(toast_rect.left() + 2.0, toast_rect.top() + 4.0, 3.0, th - 8.0)
+            tw = min(w * 0.8, tfm.horizontalAdvance(snapshot.toast_message) + 28.0)
+            th = tfm.height() + 8.0
+            trect = QRectF((w - tw) / 2.0, rect.bottom() + 5.0, tw, th)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(COLOR_CYAN))
-            painter.drawRoundedRect(accent_bar, 1.5, 1.5)
-            painter.setPen(QPen(COLOR_TEXT_PRIMARY))
-            painter.drawText(toast_rect, Qt.AlignmentFlag.AlignCenter, snapshot.toast_message)
+            painter.setBrush(QBrush(QColor(0, 0, 0, 35)))
+            painter.drawRect(trect.translated(0.0, 1.0))
+            painter.setPen(_pen(COLOR_CAPSULE_BORDER, 1.0))
+            painter.setBrush(QBrush(QColor(255, 255, 255, 236)))
+            painter.drawRect(trect)
+            painter.setFont(self._font_prompt)
+            painter.setPen(QPen(QColor("#333333")))
+            inner = trect.adjusted(10.0, 0.0, -10.0, 0.0)
+            painter.drawText(
+                inner,
+                Qt.AlignmentFlag.AlignCenter,
+                tfm.elidedText(snapshot.toast_message, Qt.TextElideMode.ElideRight, int(inner.width())),
+            )
 
+    # ------------------------------------------------------------------
+    # 开战长按细环
+    # ------------------------------------------------------------------
     def _draw_ready_hold_ring(
         self,
         painter: QPainter,
@@ -728,44 +1143,46 @@ class HUDWindow(QWidget):
         h: float,
         progress: float,
     ) -> None:
-        """绘制准备开战防误触长按琥珀色进度环。"""
+        """H1：白色圆片细灰边底衬 + 琥珀细圆弧进度 + 百分比；右侧白底细边签配圆圈三横线 START 图示。"""
         clamped = max(0.0, min(1.0, float(progress)))
-        radius = max(32.0, min(46.0, min(w, h) * 0.055))
-        cx = w / 2.0
-        cy = max(94.0, h * 0.16)
+        r = 14.0
+        fm = QFontMetrics(self._font_prompt)
+        label = "长按开战"
+        tag_w = _ICON_R * 2.0 + 8.0 + fm.horizontalAdvance(label) + 20.0
+        total = r * 2.0 + 10.0 + tag_w
+        cx = (w - total) / 2.0 + r
+        # 位于顶部盟约图标与名称（y≈128）正下方，避免遮挡盟约及其视觉检测
+        cy = max(142.0, h * 0.012 + 134.0)
 
-        # 半透明圆形衬底
-        painter.setPen(QPen(QColor(255, 179, 0, 75), 5.0))
-        painter.setBrush(QBrush(QColor(14, 18, 24, 215)))
-        painter.drawEllipse(QPointF(cx, cy), radius, radius)
-
-        # 进度圆弧（从 12 点方向顺时针增长）
-        arc_rect = QRectF(cx - radius, cy - radius, radius * 2.0, radius * 2.0)
-        arc_pen = QPen(COLOR_AMBER, 5.5)
-        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(arc_pen)
+        painter.setPen(_pen(COLOR_EDGE, 1.0))
+        painter.setBrush(QBrush(QColor(255, 255, 255, 236)))
+        painter.drawEllipse(QPointF(cx, cy), r + 4.0, r + 4.0)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        span_angle = int(round(-clamped * 360.0 * 16.0))
-        painter.drawArc(arc_rect, 90 * 16, span_angle)
+        painter.setPen(_pen(QColor("#E3E3E3"), 2.2))
+        painter.drawEllipse(QPointF(cx, cy), r, r)
+        arc = _pen(COLOR_AMBER, 2.4, cap=Qt.PenCapStyle.FlatCap)
+        painter.setPen(arc)
+        painter.drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r), 90 * 16, int(round(-clamped * 360.0 * 16.0)))
+        painter.setFont(self._font_micro)
+        painter.setPen(QPen(COLOR_INK))
+        painter.drawText(QRectF(cx - r, cy - r, 2 * r, 2 * r), Qt.AlignmentFlag.AlignCenter, f"{int(clamped * 100)}%")
 
-        # 百分比读数
-        painter.setFont(self._font_title)
-        painter.setPen(QPen(COLOR_AMBER))
-        painter.drawText(arc_rect, Qt.AlignmentFlag.AlignCenter, f"{int(clamped * 100)}%")
-
-        # 下方提示文案
-        label = "长按 Start 准备开战"
-        painter.setFont(self._font_small)
-        fm = QFontMetrics(self._font_small)
-        lw = fm.horizontalAdvance(label) + 18.0
-        lh = fm.height() + 6.0
-        lrect = QRectF(cx - lw / 2.0, cy + radius + 8.0, lw, lh)
-        painter.setPen(QPen(QColor(255, 179, 0, 170), 1.0))
+        tag = QRectF(cx + r + 10.0, cy - 12.0, tag_w, 24.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 40)))
+        painter.drawRect(tag.translated(0.0, 1.0))
+        painter.setPen(_pen(COLOR_EDGE, 1.0))
         painter.setBrush(QBrush(COLOR_CAPSULE_BG))
-        painter.drawRoundedRect(lrect, 5.0, 5.0)
-        painter.setPen(QPen(COLOR_TEXT_PRIMARY))
-        painter.drawText(lrect, Qt.AlignmentFlag.AlignCenter, label)
+        painter.drawRect(tag)
+        x = paint_button_glyph(painter, ButtonGlyph("start"), tag.left() + 8.0, cy, self._font_badge)
+        painter.setFont(self._font_prompt)
+        painter.setPen(QPen(COLOR_INK))
+        painter.drawText(QRectF(x + 8.0, tag.top(), tag.right() - x - 8.0, tag.height()),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
 
+    # ------------------------------------------------------------------
+    # 底部提示条
+    # ------------------------------------------------------------------
     def _draw_bottom_prompt_bar(
         self,
         painter: QPainter,
@@ -773,67 +1190,44 @@ class HUDWindow(QWidget):
         h: float,
         prompts: Sequence[PromptItem],
     ) -> None:
-        """绘制底部紧凑 Xbox 彩色键位提示条。"""
-        badge_fm = QFontMetrics(self._font_badge)
+        """H1：纤薄半透纯白细带 + 1px 细灰边 + 矢量手柄按钮图示 + 深色文字。"""
         label_fm = QFontMetrics(self._font_prompt)
-
-        item_layouts: list[tuple[list[str], str, float]] = []
-        item_gap = 16.0
+        item_gap = 20.0
+        layouts: list[tuple[list[ButtonGlyph], str, float, float]] = []
         for item in prompts:
-            tokens = [tok.strip() for tok in item.button.split("+") if tok.strip()]
-            if not tokens:
-                tokens = [item.button]
-            tokens_w = self._measure_tokens_width(tokens, badge_fm)
-            label_w = label_fm.horizontalAdvance(item.label)
-            total_item_w = tokens_w + 6.0 + label_w
-            item_layouts.append((tokens, item.label, total_item_w))
+            glyphs = parse_button_spec(item.button)
+            gw = measure_button_spec(glyphs, self._font_badge)
+            lw = float(label_fm.horizontalAdvance(item.label))
+            layouts.append((glyphs, item.label, gw, lw))
 
         pad_x = 18.0
-        bar_h = 34.0
-        content_w = sum(x[2] for x in item_layouts) + item_gap * max(0, len(item_layouts) - 1)
+        bar_h = 32.0
+        content_w = sum(gw + 6.0 + lw for _g, _l, gw, lw in layouts) + item_gap * max(0, len(layouts) - 1)
         bar_w = min(w * 0.96, content_w + pad_x * 2.0)
-        bottom_margin = max(8.0, h * 0.015)
-        bar_rect = QRectF((w - bar_w) / 2.0, h - bar_h - bottom_margin, bar_w, bar_h)
+        bottom_margin = max(8.0, h * 0.014)
+        bar = QRectF((w - bar_w) / 2.0, h - bar_h - bottom_margin, bar_w, bar_h)
+        painter.setPen(_pen(QColor(189, 189, 189, 200), 1.0))
+        painter.setBrush(QBrush(QColor(255, 255, 255, 212)))
+        painter.drawRect(bar)
 
-        # 背景磨砂底条
-        path = QPainterPath()
-        path.addRoundedRect(bar_rect, 10.0, 10.0)
-        painter.setPen(QPen(QColor(255, 255, 255, 42), 1.2))
-        painter.setBrush(QBrush(COLOR_CAPSULE_BG))
-        painter.drawPath(path)
-
-        # 绘制每一个按键项（若总宽超出容器则安全截断不溢出）
-        cursor_x = bar_rect.left() + pad_x
-        center_y = bar_rect.center().y()
-        max_x = bar_rect.right() - pad_x + 2.0
-        for tokens, label, item_w in item_layouts:
-            if cursor_x + item_w > max_x and cursor_x > bar_rect.left() + pad_x:
+        x = bar.left() + pad_x
+        cy = bar.center().y()
+        max_x = bar.right() - pad_x + 2.0
+        for glyphs, label, gw, lw in layouts:
+            if x + gw + 6.0 + lw > max_x and x > bar.left() + pad_x:
                 break
-            cursor_x = self._draw_button_tokens(painter, tokens, cursor_x, center_y, badge_fm)
-            cursor_x += 6.0
+            x = paint_button_spec(painter, glyphs, x, cy, self._font_badge)
+            x += 6.0
             painter.setFont(self._font_prompt)
-            painter.setPen(QPen(COLOR_TEXT_PRIMARY))
-            lw = label_fm.horizontalAdvance(label)
-            lrect = QRectF(cursor_x, bar_rect.top(), lw + 2.0, bar_h)
-            painter.drawText(
-                lrect,
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                label,
-            )
-            cursor_x += lw + item_gap
+            painter.setPen(QPen(QColor("#333333")))
+            painter.drawText(QRectF(x, bar.top(), lw + 2.0, bar_h),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
+            x += lw + item_gap
 
     def _measure_tokens_width(self, tokens: Sequence[str], fm: QFontMetrics) -> float:
-        """计算组合按键徽章组合的水平宽度。"""
-        total = 0.0
-        for idx, tok in enumerate(tokens):
-            if idx > 0:
-                total += 10.0  # '+' 间距
-            upper = tok.upper()
-            if upper in FACE_BUTTON_COLORS:
-                total += 22.0
-            else:
-                total += max(26.0, fm.horizontalAdvance(tok) + 12.0)
-        return total
+        """兼容旧接口：计算组合按键宽度。"""
+        del fm
+        return measure_button_spec("+".join(tokens), self._font_badge)
 
     def _draw_button_tokens(
         self,
@@ -843,35 +1237,6 @@ class HUDWindow(QWidget):
         center_y: float,
         fm: QFontMetrics,
     ) -> float:
-        """绘制 Xbox 彩色圆形按键徽章或银灰肩键/扳机胶囊，返回结束 X 坐标。"""
-        x = start_x
-        painter.setFont(self._font_badge)
-        for idx, tok in enumerate(tokens):
-            if idx > 0:
-                plus_rect = QRectF(x, center_y - 9.0, 10.0, 18.0)
-                painter.setPen(QPen(COLOR_TEXT_MUTED))
-                painter.drawText(plus_rect, Qt.AlignmentFlag.AlignCenter, "+")
-                x += 10.0
-
-            upper = tok.upper()
-            if upper in FACE_BUTTON_COLORS:
-                bg_col, fg_col = FACE_BUTTON_COLORS[upper]
-                d = 22.0
-                circle_rect = QRectF(x, center_y - d / 2.0, d, d)
-                painter.setPen(QPen(QColor(255, 255, 255, 90), 1.0))
-                painter.setBrush(QBrush(bg_col))
-                painter.drawEllipse(circle_rect)
-                painter.setPen(QPen(fg_col))
-                painter.drawText(circle_rect, Qt.AlignmentFlag.AlignCenter, upper)
-                x += d
-            else:
-                pill_w = max(26.0, fm.horizontalAdvance(tok) + 12.0)
-                pill_h = 20.0
-                pill_rect = QRectF(x, center_y - pill_h / 2.0, pill_w, pill_h)
-                painter.setPen(QPen(QColor("#9CA3AF"), 1.1))
-                painter.setBrush(QBrush(QColor("#374151")))
-                painter.drawRoundedRect(pill_rect, 6.0, 6.0)
-                painter.setPen(QPen(QColor("#F8FAFC")))
-                painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, tok)
-                x += pill_w
-        return x
+        """兼容旧接口：绘制组合按键图示，返回结束 X 坐标。"""
+        del fm
+        return paint_button_spec(painter, "+".join(tokens), start_x, center_y, self._font_badge)

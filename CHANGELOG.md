@@ -2,6 +2,114 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [1.0.0] - 2026-11-22
+
+> **正式版里程碑基线（General Availability）**：完成从 `v0.2.2` 以来涵盖纯白极简 PRTS 桌面主控台、H1/H2/S3 鼠标穿透悬浮窗、三套卫戍主题全置灰鲁棒识别、Boss 战镜像战场、`>7` 盟约任意相位吸附与 Windows 独立单文件 `.exe` 打包的完整闭环，建立 `v1.0.0` 正式发版基线。
+
+### 新增与打包发版能力 (Added & Packaging)
+- **Windows 独立无控制台单文件可执行程序（`dist/ArkController.exe`）与可复现构建脚本 (`scripts/build_exe.py`)**：
+  - `pyproject.toml` 新增可选构建依赖分组 `[project.optional-dependencies].build = ["pyinstaller>=6.0.0"]`；
+  - 生成标准多尺寸（`16/32/48/64/128/256`）罗德岛 PRTS 纯白极简 + 源石琥珀几何图标 `assets/arkcontroller.ico`，并在 `main.py` 启动时为 `QApplication` 绑定窗口/任务栏图标；
+  - `scripts/build_exe.py` 支持一键构建无黑框 GUI 单文件 `dist/ArkController.exe`（嵌入 `1.0.0.0` Windows 版本资源与多尺寸图标，剔除 WebEngine/Qml/Quick/3D/Multimedia/Pdf/Sql/Network 等冗余扩展模块以精简体积），构建完成后自动同步干净默认配置至 `dist/configs/`（不复制本机 `user_override.json`）。
+- **PyInstaller 冻结运行环境（`sys.frozen`）全链路加固 (`arkcontroller.config` & `arkcontroller.platform` & `arkcontroller.main`)**：
+  - `ConfigLoader` 补全 `_LAYOUT_TOP_LEVEL_KEYS` 与 `_KEYMAP_TOP_LEVEL_KEYS` 全部字段，并在冻结态实现双层配置解析：优先读取 `.exe` 同级 `configs/`，纯单文件拷入空目录运行时自动回退读取 `_MEIPASS/configs/` 内置默认配置；用户持久化覆盖 `user_override.json` 始终写入可写的 `<exe_dir>/configs/user_override.json` 并自动建目录；
+  - `main.py` 在无控制台模式（`console=False`）最开头自动检测并为 `None` 的 `sys.stdout` / `sys.stderr` 挂载安全 `os.devnull` 流；`_resolve_templates_dir` 与 `_resolve_writable_templates_dir` 支持冻结态优先外置、回退 `_MEIPASS` 读取、校准保存始终写回 `<exe_dir>/assets/templates`；
+  - `uac.py:relaunch_as_admin` 在冻结态显式将 `ShellExecuteW` 工作目录锁定为 `<exe_dir>`，避免 UAC 提权重启后工作目录漂移至 `System32`；
+  - 新增冻结环境专项单元测试套件 `tests/test_frozen_packaging.py`。
+
+### 1.0.0 正式版核心能力汇总 (Highlights since v0.2.2)
+- **纯白极简 PRTS 桌面主控台（方案 B v2）+ H1/H2/S3 鼠标穿透悬浮 HUD**：四分区终端（`总览` 16Hz 实时手柄靶盘与 8 项快捷开关、`调校` 7 项手感滑块与实时响应曲线、`键位` 9 卡矢量手柄图示简报、`系统` 诊断档案）；HUD 升级为 **S3 加粗取景折角 + 四边半透细连线 + 外角琥珀微刻线**（棋盘格自动切为清爽短折角，多选一决策卡外扩 `+11px` 彻底错开白边且待确认态琥珀框完整包裹放大整卡与确认白条），支持 `WDA_EXCLUDEFROMCAPTURE` ↔ `WDA_NONE`（录屏/屏幕共享可见且零视觉自污染）热切换。
+- **三套卫戍协议主题全置灰鲁棒视觉识别**：完整覆盖闭合紫粉电玩风 / 乌萨斯复古辉光管风 / 罗德岛战术青绿风，新增刷新+冻结双灰按钮零色相三联结构商店识别、三主题置灰升级卡/准备按钮加固、右下费用栏直判作战期防止队友抽屉误报，以及宽纯白 HUD+Toast 两翼黑条防跌回护航。
+- **Boss 战右侧镜像战场与多盟约任意相位吸附**：自动检测并防抖锁存多人 Boss 战右侧分配时的 3D 棋盘（`4x7`）与 5 槽装备台水平镜像（保持 10 槽整备区与底部商店原位不变，HUD 显示 ` · 镜像战场`）；`>7` 溢出盟约支持 `RS` / `LB`/`RB` 顶部安全带平滑拖拽滑动与任意水平停靠相位实测圆心精确吸附（兼容满层高光徽章）。
+- **全流程防误触交互打磨**：商店连按两次 `A` 防误触购卡与 `RT+A` 查详情、无序 `LT+RT` 一键释放休整/作战双态本局策略头像、左上延迟区 `safe_blank` 确保队友抽屉按 `B` 必关、移除不存在的赠卡分支、`2x3` 交流表情面板锁焦翻页防逃逸，以及棋盘干员双击 `A` 原地回环转向。
+
+## [0.3.4] - 2026-11-22
+
+### 新增与优化 (Added & Changed)
+- **HUD 选取框升级为 S3 加粗取景折角方案 + 棋盘紧凑短折角自适应 (`arkcontroller.overlay.hud_window`)**：
+  - `HUDWindow._draw_focus_polygon` 全面升级为 **S3 取景折角风格**：四边绘制暗底衬边（`2.6*scale`）与半透细连线（`1.1*scale`），四角采用高反差深炭黑衬边 + 加粗纯白折角（常规态配琥珀 `#F59E0B` 外角微刻线；待确认/抓取目标态切换为琥珀折角配纯白外角微刻线），并随视口分辨率基于 `1280×720` 等比缩放；
+  - 新增静态几何计算 `HUDWindow._focus_box_metrics` 并由 `render_snapshot` 透传 `compact=(snapshot.focus_zone == FocusZone.BOARD)`：
+    - **棋盘格与紧凑小槽位**（`compact=True` 或短边 `< 78*scale`）：折角自动缩短至 `10.0~12.5*scale`（线宽 `3.0*scale`，外角刻线 `3.5->7.8*scale`），在 4×7 密集透视棋盘上清爽利落不拥挤；
+    - **商店卡槽、整备区、多选一决策卡与确认弹窗**：保持醒目长折角 `20.0~30.0*scale`（线宽 `3.4*scale`，外角刻线 `4.5->10.5*scale`），跨场景辨识度显著提升。
+- **多选一官方 PC 16:9 卡片微校准 + `+11px` 外扩错开白边 + 待确认整卡包裹框 (`arkcontroller.config`)**：
+  - 按官方 PC 16:9 实机截图（二选一 / 三选一 / 六选一）微校准 `choice_zone`、`choice_2_zone`、`choice_6_top_zone`、`choice_6_bottom_zone` 卡片本体白边尺寸（`0.22344 × 0.33403~0.33472`）与中心步距，并同步更新 `models.py` 默认工厂；
+  - `resolve_choice_card_polygon` 四边向卡片白边外侧统一扩大 **`11px`**（`pad_u=11/1280, pad_v=11/720`，安全夹紧至 `[0.004, 0.996]`），彻底错开卡片自带亮白边框落入深暗背景遮罩区（`1280×720` 下横向邻列与 `2×3` 上下排均保留 `34px` 净空绝不重叠）；
+  - `resolve_choice_confirm_polygon` 升级为包裹点中放大后整张卡片与底部「确认选择」白条再外扩 `11px` 的琥珀选框（`2×3` 上下排点中态均与对排卡片保持 `>= 15.5px` 净空），同时将 `resolve_choice_confirm_point` 微调至 `cv + sh * 0.513` 零误差命中底部「☑ 确认选择」白条正中；
+  - 经 `WDA_NONE`（截屏可见 HUD）26/26 端到端压测验证，加粗 S3 底边对 `SceneDetector`（含 `selected_choice_index` 白条判定与 `shop_open`）零自污染。
+- **确认弹窗选框左右贴边防裁切微调 (`arkcontroller.control.dispatcher`)**：
+  - `MODAL_CONFIRM` 取消/确认按钮选框横坐标从贴死屏幕极边的 `0.0..0.50` / `0.50..1.0` 微收至 `0.008..0.495` 与 `0.505..0.992`（点击中心保持不变），保障 S3 加粗折角与外角 `10.5px` 琥珀微刻线完整显示不被视口边界截断。
+
+## [0.3.3] - 2026-11-22
+
+### 新增、优化与修复 (Added, Changed & Fixed)
+- **零色相三联结构商店识别 + 三套卫戍主题全按钮置灰加固 (`arkcontroller.vision.scene_detector`)**：
+  - 彻底解决资源耗尽/条件受限时「刷新 + 冻结」双按钮同时变灰导致 `_detect_shop_open_heuristic` 误判商店关闭、整备/棋盘退回非缩放坐标的痛点：在保留色相快路径的基础上，新增零色相三联结构通道 `_has_real_pc_shop_open_structure`（上移黑底白字商店横幅 + 冻结/刷新双按钮底缘梯度 + 最右 4 固定槽竖边峰与 3 条暗缝联合判定）；
+  - `_detect_shop_slot_count_heuristic` 移除顶部双按钮色相硬门控并补齐低亮置灰升级卡兜底分支（搭配左邻排斥防止卡槽误判）；`_eval_real_pc_prep_banner` 新增乌萨斯主题二准备按钮置灰兜底（辉光管数字区 + 顶部暗边 + 灰帽特征），经三主题 7 图 × 三档置灰亮度（21/21）仿真 100% 稳定识别。
+- **Boss 战右侧分配 3D 棋盘与装备台水平镜像自动检测与动态切换 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 实机测绘确认多人 Boss 战分配至右侧时仅 3D 棋盘（`4x7`）与 5 槽装备台沿 `u_axis_normal ≈ 0.4709` 水平镜像，10 槽整备区与底部 2D 商店及所有按钮均保持原位不镜像；
+  - `configs/stronghold_layout_16_9.json` 与 `LayoutProfile` 新增实测 `mirrored_board_quad`（保持逻辑左→右列序）与 `mirrored_equip_zone`（`equip_mirrored`），`resolve_board_quad` / `resolve_equip_zone` / `resolve_bench_zone` 扩展关键字参数 `mirrored: bool = False`（`mirrored=True` 时基于镜像基准直接复用 `view_overrides` 镜头缩放矩阵并跳过静态非镜像覆写，`bench_zone` 保持不镜像），同时兼容旧版 JSON 缺省回退；
+  - `SceneDetector` 新增 `SceneDetectionResult.board_mirrored`、双态（`shop_open` / `normal`）非遮挡红蓝箱特征检测与防抖锁存 `_latched_board_mirrored`（在 `unit_selected`、队友抽屉、`MODAL_CHOICE`、`MODAL_CONFIRM` 期间稳定保持上一锁存状态，切至 `UNKNOWN_FREE_CURSOR` 或 `reset()` 时清零）；
+  - `ControlDispatcher` 预建 `mirrored in (False, True)` 双套三视图 `board`/`equip` 映射器实时切换，在 `HUDStateSnapshot.board_mirrored` 暴露状态，并在局内 `board_mirrored=True` 时于 HUD 顶部焦点签简洁追加 ` · 镜像战场` 标识。
+- **超过 7 枚盟约任意水平滚动相位精确吸附 + 满层高光徽章兼容 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - 针对滑动盟约栏后徽章停留在任意非对称水平位置以及满层高光金色圆环场景，`SceneDetector` 新增 `SceneDetectionResult.covenant_centers_u`、暗芯亮环 + 满层高光饱和双通道圆环评分、向量化 `2px` 局部带扫频与 `phi ∈ [0, 80)` 梳状相位匹配 + 单环微调 + 三重充要溢出判据（经 82 帧连续像素滚动仿真 100% 保持溢出且圆心最大误差 `<= 1.0px`）；
+  - `ControlDispatcher` 在 `FocusZone.TOP_INFO` 优先直接使用 `covenant_centers_u` 实测圆心生成吸附选框与点击坐标（空元组自动回退公式），且在可见盟约数因滑动边界在 `7 ↔ 6` 间波动时将焦点稳留在 `[1, new_count]` 盟约区内绝不误跳右侧出怪放大镜。
+- **共享/录屏可见模式（`WDA_NONE`）宽纯白 HUD 顶签 + Toast 抗遮挡加固 (`arkcontroller.vision.scene_detector`)**：
+  - `_has_stronghold_in_game_chrome` 在 `esc_red >= 0.22` 硬门禁后新增顶部左右两翼未被居中 HUD 覆盖黑条兜底（`wings_dk >= 0.70`），彻底避免开启 `WDA_NONE` 且同时展示宽顶签（含 ` · 镜像战场`）与第 2 行纯白 Toast 时误跌回 `UNKNOWN_FREE_CURSOR` 及清空镜像锁存。
+
+## [0.3.2] - 2026-11-22
+
+### 新增、变更与修复 (Added, Changed & Fixed)
+- **安全取消点击区迁至左上延迟区 + 多人队友抽屉按 `B` 必关 (`arkcontroller.config` & `arkcontroller.control`)**：
+  - 将 `safe_blank` 从原右侧策略头像下方 `(0.955, 0.445, right_edge)` 迁移至左上角退出按钮右侧延迟胶囊区 `(0.1172, 0.0903, left_edge)`，彻底杜绝多人查看队友抽屉时按 `B` 误触右侧队友策略。
+  - `ControlDispatcher` 新增 `_teammate_panel_open` 追踪：在 `BATTLE_PREP`、`BATTLE_COMBAT` 与 `FREE_CURSOR` 下按 **`B`** 时，若队友面板已展开或焦点位于 `FocusZone.TEAMMATES`，优先点击左上延迟区安全关闭队友抽屉并切回 `BOARD`。
+- **修复实机作战期展开队友抽屉误判为休整期商店 (`arkcontroller.vision.scene_detector`)**：
+  - 新增 `_has_real_pc_combat_cost_bar()` 检测右下作战期费用栏 `◆ C <费用>` 及底部白色回复进度条，在 `_detect_heuristic` 的 `2a` 与 `2b` 之间优先直判 `GameScene.BATTLE_COMBAT (shop_open=False)`，彻底根除作战期右下亮地形叠加 4 人队友抽屉误判 `BATTLE_PREP + shop_open=True`。
+- **彻底移除不存在的「赠送队友」功能 (`arkcontroller.config` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 移除 `DeployFSM.gift_holding()`、`ControlDispatcher` 中抓取干员/装备时按 `Y` 与移入队友栏按 `A` 的赠送分支及提示、`default_bindings.json` / `KeymapConfig` 的 `gift_teammate` 以及主控台键位手册对应文案（保留正常的点击左侧队友头像与 `LT+右` / `LT+A/B/X/Y` 切换队友战场视角功能）。
+- **新增无序 `LT + RT` 一键点击右侧本局策略头像 + 休整/作战双态策略坐标 (`arkcontroller.config` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 实机标定作战期下移后的策略锚点 `strategy_avatar_combat (0.9602, 0.7486, right_edge)` 与 `strategy_inspect_combat (0.9051, 0.7493, right_edge)`，`FocusZone.STRATEGY` 与 `DeployFSM` 随当前场景在休整期/作战期间自动切换精准坐标；
+  - 新增 `LT + RT`（无序双扳机组合，兼容 `LT->RT`、`RT->LT`、同帧双按）一键释放当前阶段右侧本局策略头像，与决策弹窗按住 `LT` 看场及干员/装备拖拽零冲突；同步写入 `lt_chords.use_strategy` 与主控台键位手册。
+
+## [0.3.1] - 2026-11-22
+
+### 新增与修复 (Added & Fixed)
+- **截屏 / 屏幕共享可见 HUD 热切换开关与开战充能环避让盟约栏 (`arkcontroller.config` & `arkcontroller.overlay` & `arkcontroller.main`)**：
+  - `configs/default_bindings.json` 与 `KeymapConfig` 新增 `hide_hud_from_capture: bool = True`（默认防自污染隐藏，兼容旧配置缺省回退）；
+  - `hud_window.py` 新增 `WDA_NONE = 0x00000000`、`apply_win32_display_affinity()` 与 `HUDWindow.set_hide_from_capture(enabled)`，支持运行中实时热切换 `WDA_EXCLUDEFROMCAPTURE` ↔ `WDA_NONE`（关闭后 OBS 录屏、截图与屏幕共享可直接捕获纯白极简 HUD），同时将长按开战充能环圆心下移至 `cy = max(142.0, h * 0.012 + 134.0)` 位于顶部盟约文字正下方，对顶部盟约栏零遮挡；
+  - `PRTSDashboardWindow` 总览页快捷开关双列网格补齐第 8 项空心框黄勾「截屏/共享时隐藏 HUD」，系统页「截屏隔离」文案随状态动态更新；`ControllerTray` 托盘右键菜单同步新增对应勾选项，并由 `ArkControllerApp` 统一热生效与持久化至 `configs/user_override.json`。
+- **三套卫戍协议主题 UI 全链路自适应识别 (`arkcontroller.vision.scene_detector`)**：
+  - 全面兼容**主题一（闭合紫粉电玩风）**、**主题二（乌萨斯复古辉光管风）**与**主题三（罗德岛战术青绿风）**，在严格保持局外 0 误判双锚点门禁的前提下：
+    - `_has_real_pc_prep_banner` 覆盖三主题准备按钮、顶中横幅与左右双放大镜共现（防止开启共享可见时 Toast 瞬态遮挡）；
+    - `_measure_shop_action_buttons` 扩展冻结青蓝（`H∈[78..125]`）与刷新黄掩码，商店展开态与动态槽位在三套主题下 100% 稳定识别；
+    - `_detect_shop_slot_count_heuristic` 升级为三主题商品卡底条并集（紫蓝 / 红棕 / 青绿）、亮态 + 暗屏绿黑 CRT / 灰 `LEVEL` 升级卡双分支与抗鼠标压边的深灰/暗蓝 `[ NO INFO ]` 空槽判定。
+- **顶部 `1~7` 多盟约间距精准校准与 `>7` 溢出态左右拖拽滑动 (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control`)**：
+  - 按实机像素校准 `SymmetricCovenantZone(v=0.1208, step_u=0.0625, overflow_start_u=0.2961)` 并扩展 `slot_center` / `slot_polygon(..., overflow=...)` 支持超过 7 枚盟约时的左对齐 7 槽排布；
+  - `SceneDetector` 新增脱离色相的 `HSV-V` 36 点圆环法向梯度（四象限门限排除矩形键帽）+ 多数鲁棒门限 + `covenant_overflow` 溢出检测，彻底解决乌萨斯银灰环 / 罗德岛青绿半环及单枚弱分回退 `n=1` 问题；
+  - `ControlDispatcher` 在 `FocusZone.TOP_INFO` 实时同步 `covenant_overflow`（溢出态显示 `羁绊 [k/7+]`），支持推右摇杆 **`RS`**（水平或垂直）及作战期 **`LB`/`RB`** 在顶部安全带 `u ∈ [0.38..0.62], v=0.1208` 执行平滑拖拽左右滑动盟约栏（远离两侧放大镜不误触）。
+- **彻底修复表情面板（`FocusZone.EMOTE_PANEL`）滑动翻页逃逸入棋盘 (`arkcontroller.vision` & `arkcontroller.control`)**：
+  - 升级 `_detect_emote_panel_open_heuristic` 为去色相结构化面板检测（暗底 + 上/右/下三边外框 + 泛亮前景与底部居中分页点对比），兼容非青绿及稀疏末页表情；
+  - `ControlDispatcher` 在进入 `EMOTE_PANEL` 及每次面板内导航/翻页/发送操作时自动续期 `1.8s` 保护锁、强制锁定吸附态（屏蔽 `L3` 误按与 `left_stick_mode="cursor"` 自由光标逃逸）、支持 `RS` 上下与左右推杆统一悬停面板中心滚轮翻页，并对视觉关闭检测增加连续 4 帧防抖，彻底根除翻页时选框逃逸进棋盘。
+
+## [0.3.0] - 2026-11-22
+
+### 新增与重绘 (Added & Redesigned)
+- **局内透明悬浮窗纯白极简 H1/H2 混搭重绘与通用手柄矢量图示体系 (`arkcontroller.overlay.hud_window`)**：
+  - 全面采用现代极简白 / 炭黑 / 琥珀（`#F59E0B`）高可读视觉语言（H1 极简基底 + H2 摇杆与定朝向混搭）：
+    - 顶部状态签与 Toast 为白底 `1px` 细灰边 + 左侧 `2px` 琥珀竖线；槽位与透视选择框为四角 `10px` 白色外衬暗描边细折标、内部完全镂空不挡画面（待确认/抓取目标态四角内侧点亮琥珀小点）；抓取源采用白色细虚线框、白底细边小签与白色虚线轨迹（终点空心菱形）；自由光标为分离式细线准星；开战长按为白底细环配琥珀弧与 `START` 图示小签；底部提示为半透白细带；
+    - 定朝向采用 **H2 十字细轴 + 四端空心折线箭头**（预选方向点亮双层琥珀箭头，下方配「推摇杆定朝向 · B 取消」白签）；
+  - 新增通用 Xbox 手柄矢量按钮解析与绘制原语 `parse_button_spec` / `paint_button_spec` / `measure_button_spec`（HUD 底栏与桌面主控台键位页共享）：支持 `/`（或）、`+`（同时按）、`>`（依次按）及长按/按住/双击/松开前缀与四向十字键语法；精准绘制 `A/B/X/Y` 方位琥珀点圆环、`LB/RB/LT/RT` 细线键帽、`START` 圆圈内三根等长平行横线、`BACK` 圆内双叠小方框、**H2 双层圆环 `LS/RS`** 及方向高亮十字键；
+  - 100% 保留 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST`、`WDA_EXCLUDEFROMCAPTURE` 防截屏污染与全部既有导出契约，零 Qt6 `setPointSize(-1)` 警告。
+- **全新终末地 / 莱茵纯白极简桌面主控前端（方案 B v2）(`arkcontroller.overlay.dashboard_window` & `arkcontroller.main`)**：
+  - 新增 `PRTSDashboardWindow`（普通窗口层级绝不置顶抢焦点；关闭默认隐藏至系统托盘并停止 60ms 遥测定时器零后台开销；全面消除闭包循环引用保障安全析构）：
+    - 通体高纯度瓷白画布（`#FAFAFA` / `#FFFFFF`）+ 顶部水平极简导航栏（`总览` / `调校` / `键位` / `系统` 配 `2px` 琥珀下划线）；右上「重载配置」与「启动校准向导 →」统一为白底 `1px` 细描边 `LineButton`；全部快捷开关与复选框采用 `CheckRow` / `AmberCheckBox`（白底 `1px` 细灰空心方框 + 勾选时框内琥珀黄色线条小勾 `✓`，无大面积填充）；
+    - 四大终端分区完整联动：**`总览`**（16Hz 实时双摇杆死区靶盘、`LT`/`RT` 细条、按键阵列高亮、大号细体游戏视口信息、7 项快捷开关与手感速览）、**`调校`**（7 项手感滑块 + 动态避让不压线的自由光标响应曲线图，白名单校验写入 `configs/user_override.json` 并即时热刷新，支持一键恢复默认）、**`键位`**（9 张卫戍协议 `v0.2.2+` 操作简报，直接复用矢量手柄按钮绘制器）、**`系统`**（版本、UAC 权限、路径、4x7 棋盘与 SIFT 补偿矩阵、零注入安全协议与退出入口）；
+  - CLI 主入口新增 `--minimized` 启动参数（静默常驻托盘，并在 UAC 提权重启时自动透传）。
+- **系统托盘与可视化校准向导纯白风格统一 (`arkcontroller.overlay.tray` & `calibration_ui`)**：
+  - `ControllerTray` 升级为白底炭灰细边 + 琥珀状态方点矢量托盘图标（暂停态为双竖条）与白底细灰边浅色高对比右键菜单（勾选为琥珀线条小勾），顶部新增「打开 PRTS 主控台」，支持单击/双击直接唤出主控台；
+  - `CalibrationDialog` 控制栏全面切换为方案 B 白底细灰边 + 左侧琥珀线风格，复用 `AmberCheckBox` 与 `LineButton`，画布外框折角升级为白色并优化浅底文字对比度（`#B45309`），保持全部透视校准与模板采样逻辑 100% 兼容。
+- **离屏 UI 自动化测试覆盖 (`tests/test_rhodes_ui.py`)**：
+  - 新增 39 项 `QT_QPA_PLATFORM=offscreen` 自动化 UI 渲染、全量 50+ 按钮表达式解析测量、像素级外观断言、遥测刷新、参数热保存、析构防崩溃与零 Qt 字体警告回归测试，全仓单元测试增至 **186 项**、覆盖率达 **86%**。
+
 ## [0.2.2] - 2026-11-21
 
 ### 新增与修复 (Added & Fixed)

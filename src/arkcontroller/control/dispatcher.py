@@ -34,7 +34,12 @@ from arkcontroller.input.xinput_driver import GamepadButton
 from arkcontroller.vision.scene_detector import GameScene, SceneDetectionResult
 
 if TYPE_CHECKING:
-    from arkcontroller.config.models import KeymapConfig, LayoutProfile
+    from arkcontroller.config.models import (
+        KeymapConfig,
+        LayoutProfile,
+        LinearZone,
+        PerspectiveQuad,
+    )
     from arkcontroller.input.virtual_hid import VirtualHID
     from arkcontroller.platform.window_tracker import ViewportRect
 
@@ -98,6 +103,7 @@ class HUDStateSnapshot:
     view_state: str = "normal"
     shop_open: bool = False
     left_stick_mode: str = "dpad"
+    board_mirrored: bool = False
 
 
 _DPAD_TO_DIR: dict[GamepadButton, Direction] = {
@@ -172,6 +178,14 @@ _SCROLL_WHEEL_DELTA: int = 120
 _TOAST_TTL_SECONDS: float = 1.8
 _STATE_SYNC_LOCK_SECONDS: float = 0.50
 _SHOP_PENDING_BUY_TTL_SECONDS: float = 2.0
+_EMOTE_LOCK_SECONDS: float = 1.8
+_EMOTE_CLOSE_DEBOUNCE_FRAMES: int = 4
+_EMOTE_SAME_RESULT_SKIP_MIN_SEC: float = 0.002
+_EMOTE_SAME_RESULT_SKIP_MAX_SEC: float = 0.25
+_COVENANT_DRAG_COOLDOWN_SECONDS: float = 0.30
+_COVENANT_DRAG_V_NORM: float = 0.1208
+_COVENANT_DRAG_LEFT_U: float = 0.38
+_COVENANT_DRAG_RIGHT_U: float = 0.62
 
 
 def _clamp01(value: float) -> float:
@@ -202,8 +216,9 @@ class ControlDispatcher:
 
         self.deploy_fsm = DeployFSM(keymap, layout, hid, rumble_cb=rumble_cb)
 
-        # 界面镜头/缩放视图态（normal / shop_open / unit_selected）与商店动态栏位数（1本4槽/2本5槽/4本6槽）
+        # 界面镜头/缩放视图态（normal / shop_open / unit_selected）、Boss 战镜像态与商店动态栏位数（1本4槽/2本5槽/4本6槽）
         self._view_state: LayoutViewState = LayoutViewState.NORMAL
+        self._board_mirrored: bool = False
         self._shop_open: bool = False
         self._shop_slot_count: int = self.layout.shop_zone.count
         self._shop_pending_buy_idx: int | None = None
@@ -213,11 +228,11 @@ class ControlDispatcher:
         self._shop_override_until: float = 0.0
         self._unit_override_until: float = 0.0
 
-        # 构建多视图态区域映射器缓存
+        # 构建多视图态（含常规与 Boss 镜像双态）区域映射器缓存
         self._shop_mappers: dict[LayoutViewState, LinearZoneMapper] = {}
         self._bench_mappers: dict[LayoutViewState, LinearZoneMapper] = {}
-        self._equip_mappers: dict[LayoutViewState, LinearZoneMapper] = {}
-        self._board_mappers: dict[LayoutViewState, PerspectiveBoardMapper] = {}
+        self._equip_mappers: dict[tuple[LayoutViewState, bool], LinearZoneMapper] = {}
+        self._board_mappers: dict[tuple[LayoutViewState, bool], PerspectiveBoardMapper] = {}
         self._shop_mapper: LinearZoneMapper
         self._bench_mapper: LinearZoneMapper
         self._equip_mapper: LinearZoneMapper
@@ -245,12 +260,19 @@ class ControlDispatcher:
         self._confirm_idx: int = 1  # 0=取消, 1=确认(默认), 2=本局不再提示
         self._confirm_has_dont_ask: bool = True
         self._covenant_count: int = self.layout.covenant_zone.default_count
+        self._covenant_overflow: bool = False
+        self._covenant_centers_u: tuple[float, ...] = ()
+        self._last_covenant_drag_at: float = -1e9
         self._top_info_idx: int = 0
         self._has_teammates: bool = False
         self._teammate_focus_idx: int = 0
+        self._teammate_panel_open: bool = False
         self._emote_panel_open: bool = False
         self._emote_idx: int = 0
         self._emote_override_until: float = 0.0
+        self._emote_false_streak: int = 0
+        self._last_emote_false_scene: SceneDetectionResult | None = None
+        self._last_emote_false_ts: float = -1e9
         self._zone_before_emote: FocusZone = FocusZone.BOARD
         self._info_overlay: Literal["match_info", "enemy_preview"] | None = None
         self._board_row: int = self._board_mapper.rows // 2
@@ -319,8 +341,24 @@ class ControlDispatcher:
         return self._covenant_count
 
     @property
+    def covenant_overflow(self) -> bool:
+        return self._covenant_overflow
+
+    @property
+    def covenant_centers_u(self) -> tuple[float, ...]:
+        return self._covenant_centers_u
+
+    @property
+    def board_mirrored(self) -> bool:
+        return self._board_mirrored
+
+    @property
     def has_teammates(self) -> bool:
         return self._has_teammates
+
+    @property
+    def teammate_panel_open(self) -> bool:
+        return self._teammate_panel_open
 
     @property
     def shop_pending_buy_index(self) -> int | None:
@@ -343,8 +381,28 @@ class ControlDispatcher:
         return self._confirm_has_dont_ask
 
     def set_covenant_count(self, count: int) -> None:
-        """设置顶部栏正下方居中对称羁绊槽位数（0~9）并安全同步顶部焦点索引。"""
+        """设置顶部栏正下方居中对称羁绊槽位数（0~9），清空动态相位坐标并安全同步顶部焦点索引。"""
+        self._covenant_centers_u = ()
         self._apply_covenant_count(count)
+
+    def set_covenant_overflow(self, enabled: bool) -> None:
+        """设置顶部多盟约栏是否处于 >7 枚左对齐溢出可滑动状态。"""
+        self._covenant_overflow = bool(enabled)
+
+    def set_covenant_centers_u(self, centers_u: Sequence[float]) -> None:
+        """设置视觉实测的顶部可见盟约归一化中心横坐标序列（支持任意水平滚动相位）。"""
+        normalized = tuple(_clamp01(float(u)) for u in list(centers_u)[:9])
+        self._covenant_centers_u = normalized
+        if normalized:
+            self._apply_covenant_count(len(normalized))
+
+    def set_board_mirrored(self, enabled: bool) -> None:
+        """切换 Boss 战右侧镜像 3D 棋盘/装备台坐标映射（整备区与商店保持不镜像）。"""
+        target = bool(enabled)
+        if target == self._board_mirrored:
+            return
+        self._board_mirrored = target
+        self._sync_active_mappers()
 
     def set_has_teammates(self, enabled: bool) -> None:
         """设置当前对局是否启用左侧多人联机队友头像栏。"""
@@ -461,6 +519,28 @@ class ControlDispatcher:
     # 内部初始化与工具方法
     # ------------------------------------------------------------------
 
+    def _resolve_equip_zone_compat(
+        self, vs: LayoutViewState, *, mirrored: bool
+    ) -> LinearZone:
+        """向后兼容解析装备台区域（支持可选 mirrored 参数）。"""
+        if not mirrored:
+            return self.layout.resolve_equip_zone(vs)
+        try:
+            return self.layout.resolve_equip_zone(vs, mirrored=True)
+        except TypeError:
+            return self.layout.resolve_equip_zone(vs)
+
+    def _resolve_board_quad_compat(
+        self, vs: LayoutViewState, *, mirrored: bool
+    ) -> PerspectiveQuad:
+        """向后兼容解析透视棋盘四角（支持可选 mirrored 参数）。"""
+        if not mirrored:
+            return self.layout.resolve_board_quad(vs)
+        try:
+            return self.layout.resolve_board_quad(vs, mirrored=True)
+        except TypeError:
+            return self.layout.resolve_board_quad(vs)
+
     def _rebuild_mappers(self) -> None:
         self._shop_mappers = {}
         self._bench_mappers = {}
@@ -471,10 +551,13 @@ class ControlDispatcher:
                 self.layout.resolve_shop_zone(vs, slot_count=self._shop_slot_count)
             )
             self._bench_mappers[vs] = LinearZoneMapper(self.layout.resolve_bench_zone(vs))
-            self._equip_mappers[vs] = LinearZoneMapper(self.layout.resolve_equip_zone(vs))
-            self._board_mappers[vs] = PerspectiveBoardMapper(
-                self.layout.resolve_board_quad(vs)
-            )
+            for mirrored in (False, True):
+                self._equip_mappers[(vs, mirrored)] = LinearZoneMapper(
+                    self._resolve_equip_zone_compat(vs, mirrored=mirrored)
+                )
+                self._board_mappers[(vs, mirrored)] = PerspectiveBoardMapper(
+                    self._resolve_board_quad_compat(vs, mirrored=mirrored)
+                )
         self._choice_mapper = LinearZoneMapper(self.layout.choice_zone)
         self._sync_active_mappers()
 
@@ -514,12 +597,13 @@ class ControlDispatcher:
         )
 
     def _sync_active_mappers(self) -> None:
-        """将当前生效的槽位与棋盘映射器指向对应缩放视图态缓存。"""
+        """将当前生效的槽位与棋盘映射器指向对应缩放视图态与镜像态缓存。"""
         vs = self._view_state
+        mirrored = self._board_mirrored
         self._shop_mapper = self._shop_mappers[vs]
         self._bench_mapper = self._bench_mappers[vs]
-        self._equip_mapper = self._equip_mappers[vs]
-        self._board_mapper = self._board_mappers[vs]
+        self._equip_mapper = self._equip_mappers[(vs, mirrored)]
+        self._board_mapper = self._board_mappers[(vs, mirrored)]
 
     def _compute_effective_view_state(self) -> LayoutViewState:
         """依据当前场景、选取角色状态与商店展开状态推导镜头缩放视图态。"""
@@ -575,9 +659,24 @@ class ControlDispatcher:
         return True
 
     def _click_safe_blank(self, viewport: ViewportRect) -> None:
-        """左键点击右侧策略头像正下方安全空白区以退出角色详情/羁绊浮窗（避免误买商店卡）。"""
+        """左键点击左上角退出按钮右侧延迟区安全空白以关闭队友面板/角色详情/羁绊浮窗（避免误触右侧策略与商店）。"""
         if not self._click_button("safe_blank", viewport):
-            self._click_norm(0.955, 0.445, viewport, anchor="right_edge", button="left")
+            self._click_norm(0.1172, 0.0903, viewport, anchor="left_edge", button="left")
+        self._teammate_panel_open = False
+
+    def _close_teammate_panel_if_open(self, viewport: ViewportRect) -> bool:
+        """若联机队友抽屉处于开启态或焦点位于队友栏，优先点击左上延迟区关闭并返回棋盘。"""
+        if not self._teammate_panel_open and self._focus_zone != FocusZone.TEAMMATES:
+            return False
+        was_open = self._teammate_panel_open
+        self._click_safe_blank(viewport)
+        if self._focus_zone == FocusZone.TEAMMATES:
+            if self._current_scene == GameScene.BATTLE_PREP:
+                self._enter_battle_prep_zone(FocusZone.BOARD, viewport)
+            else:
+                self._focus_zone = FocusZone.BOARD
+        self._set_toast("已关闭联机队友面板" if was_open else "已返回棋盘")
+        return True
 
     @staticmethod
     def _rect_poly(
@@ -592,16 +691,23 @@ class ControlDispatcher:
         ]
 
     def _apply_covenant_count(self, new_count: int) -> None:
-        """更新顶部栏下方居中对称羁绊数量，并在顶部栏吸附时保持右放大镜等相对焦点稳定。"""
+        """更新顶部栏下方羁绊数量，并在数量增减时保持右放大镜与盟约区间焦点稳定。"""
         clamped = max(0, min(9, int(new_count)))
         if clamped == self._covenant_count:
             return
-        old_total = self._covenant_count + 2
+        old_count = self._covenant_count
+        old_total = old_count + 2
         was_right_mag = self._top_info_idx == old_total - 1
+        was_on_covenant = 1 <= self._top_info_idx <= old_count
         self._covenant_count = clamped
         new_total = self._covenant_count + 2
         if was_right_mag:
             self._top_info_idx = new_total - 1
+        elif was_on_covenant:
+            if self._covenant_count > 0:
+                self._top_info_idx = max(1, min(self._covenant_count, self._top_info_idx))
+            else:
+                self._top_info_idx = 0
         else:
             self._top_info_idx = max(0, min(new_total - 1, self._top_info_idx))
 
@@ -616,7 +722,7 @@ class ControlDispatcher:
             list[tuple[float, float]],
         ]
     ]:
-        """构建顶部信息与居中对称羁绊栏的从左至右吸附序列：[左放大镜, 羁绊1..N, 右放大镜]。"""
+        """构建顶部信息与羁绊栏的从左至右吸附序列：[左放大镜, 羁绊1..N, 右放大镜]。"""
         left_pt = self.layout.buttons.get("covenant_panel")
         lu, lv = (left_pt.u, left_pt.v) if left_pt is not None else (0.265, 0.047)
         l_anchor = left_pt.anchor if left_pt is not None else "center_16_9"
@@ -644,13 +750,33 @@ class ControlDispatcher:
         ]
 
         cov_zone = self.layout.covenant_zone
+        cov_total_label = "7+" if self._covenant_overflow else str(self._covenant_count)
+        use_dynamic_centers = (
+            self._covenant_count > 0
+            and len(self._covenant_centers_u) == self._covenant_count
+        )
         for k in range(self._covenant_count):
-            cu, cv = cov_zone.slot_center(k, count=self._covenant_count)
-            poly = cov_zone.slot_polygon(k, count=self._covenant_count)
+            if use_dynamic_centers:
+                cu = self._covenant_centers_u[k]
+                cv = float(getattr(cov_zone, "v", _COVENANT_DRAG_V_NORM))
+                sw = float(getattr(cov_zone, "slot_w", 0.044))
+                sh = float(getattr(cov_zone, "slot_h", 0.082))
+                poly = self._rect_poly(cu, cv, sw, sh)
+            else:
+                try:
+                    cu, cv = cov_zone.slot_center(
+                        k, count=self._covenant_count, overflow=self._covenant_overflow
+                    )
+                    poly = cov_zone.slot_polygon(
+                        k, count=self._covenant_count, overflow=self._covenant_overflow
+                    )
+                except TypeError:
+                    cu, cv = cov_zone.slot_center(k, count=self._covenant_count)
+                    poly = cov_zone.slot_polygon(k, count=self._covenant_count)
             items.append(
                 (
                     "covenant",
-                    f"羁绊 [{k + 1}/{self._covenant_count}]",
+                    f"羁绊 [{k + 1}/{cov_total_label}]",
                     (cu, cv),
                     "center_16_9",
                     poly,
@@ -667,6 +793,36 @@ class ControlDispatcher:
             )
         )
         return items
+
+    def _scroll_covenant_bar(
+        self, direction: Literal["left", "right"], viewport: ViewportRect
+    ) -> bool:
+        """在远离两侧放大镜的安全带 (0.62, 0.1208) <-> (0.38, 0.1208) 平滑拖拽滑动顶部多盟约栏。"""
+        now = time.monotonic()
+        if now - self._last_covenant_drag_at < _COVENANT_DRAG_COOLDOWN_SECONDS:
+            return False
+
+        if direction == "right":
+            start_u, end_u = _COVENANT_DRAG_RIGHT_U, _COVENANT_DRAG_LEFT_U
+            toast = "向右滑动查看更多盟约"
+        else:
+            start_u, end_u = _COVENANT_DRAG_LEFT_U, _COVENANT_DRAG_RIGHT_U
+            toast = "向左滑回前序盟约"
+
+        start_xy = viewport.norm_to_screen(start_u, _COVENANT_DRAG_V_NORM)
+        end_xy = viewport.norm_to_screen(end_u, _COVENANT_DRAG_V_NORM)
+        self.hid.smooth_drag(
+            start_xy,
+            end_xy,
+            duration_ms=140,
+            steps=12,
+            release_at_end=True,
+        )
+        self._last_covenant_drag_at = now
+        self._last_cmd_cursor_px = end_xy
+        self._emit_rumble(0.14, 0.18, 28)
+        self._set_toast(toast)
+        return True
 
     def _nearest_top_info_idx(self, u: float) -> int:
         items = self._top_info_items()
@@ -768,22 +924,34 @@ class ControlDispatcher:
             (cu - hw, cv + hh),
         ]
 
+    def _strategy_button_keys(self) -> tuple[str, str]:
+        """按当前场景阶段返回本局策略头像与查看按钮键名（休整期右上中 / 作战期右下费用栏上方）。"""
+        if self._current_scene == GameScene.BATTLE_COMBAT:
+            return ("strategy_avatar_combat", "strategy_inspect_combat")
+        return ("strategy_avatar", "strategy_inspect")
+
     def _strategy_avatar_geometry(
         self,
     ) -> tuple[tuple[float, float], str, list[tuple[float, float]]]:
-        """返回右侧策略头像的固定中心坐标、锚点与选框多边形（绝不受 shop_open 缩放影响）。"""
-        pt = self.layout.buttons.get("strategy_avatar")
+        """返回右侧策略头像的固定中心坐标、锚点与选框多边形（休整/作战双态自适应，不受 shop_open 缩放影响）。"""
+        avatar_key, _ = self._strategy_button_keys()
+        pt = self.layout.buttons.get(avatar_key)
         if pt is not None:
             u, v, anchor = pt.u, pt.v, pt.anchor
+        elif avatar_key == "strategy_avatar_combat":
+            u, v, anchor = 0.9602, 0.7486, "right_edge"
         else:
             u, v, anchor = 0.9605, 0.3243, "right_edge"
         return ((u, v), anchor, self._rect_poly(u, v, 0.0656, 0.1167))
 
     def _strategy_inspect_point(self) -> tuple[float, float, str]:
-        """返回策略头像左侧「🔍 查看」按钮的固定坐标与锚点。"""
-        pt = self.layout.buttons.get("strategy_inspect")
+        """返回策略头像左侧「🔍 查看」按钮的固定坐标与锚点（休整/作战双态自适应）。"""
+        _, inspect_key = self._strategy_button_keys()
+        pt = self.layout.buttons.get(inspect_key)
         if pt is not None:
             return (pt.u, pt.v, pt.anchor)
+        if inspect_key == "strategy_inspect_combat":
+            return (0.9051, 0.7493, "right_edge")
         return (0.9047, 0.3236, "right_edge")
 
     def _confirm_dialog_item(
@@ -798,7 +966,7 @@ class ControlDispatcher:
                 if pt is not None
                 else (0.2496, 0.6729, "center_16_9")
             )
-            poly = [(0.0, 0.623), (0.50, 0.623), (0.50, 0.723), (0.0, 0.723)]
+            poly = [(0.008, 0.623), (0.495, 0.623), (0.495, 0.723), (0.008, 0.723)]
             return ("confirm_no", "取消", (u, v), anchor, poly)
         if clamped == 1:
             pt = self.layout.buttons.get("confirm_yes")
@@ -807,7 +975,7 @@ class ControlDispatcher:
                 if pt is not None
                 else (0.7496, 0.6729, "center_16_9")
             )
-            poly = [(0.50, 0.623), (1.0, 0.623), (1.0, 0.723), (0.50, 0.723)]
+            poly = [(0.505, 0.623), (0.992, 0.623), (0.992, 0.723), (0.505, 0.723)]
             return ("confirm_yes", "确认", (u, v), anchor, poly)
         pt = self.layout.buttons.get("confirm_dont_ask")
         u, v, anchor = (
@@ -930,6 +1098,13 @@ class ControlDispatcher:
             )
         self._focus_zone = target
 
+    def _refresh_emote_lock(self) -> None:
+        """刷新表情面板保护窗并清零视觉连续 False 防抖计数。"""
+        self._emote_override_until = time.monotonic() + _EMOTE_LOCK_SECONDS
+        self._emote_false_streak = 0
+        self._last_emote_false_scene = None
+        self._last_emote_false_ts = -1e9
+
     def _toggle_emote_panel(
         self,
         viewport: ViewportRect,
@@ -950,12 +1125,11 @@ class ControlDispatcher:
                 self._set_shop_open(False, viewport, announce=False)
                 self._wait_ui_transition(220)
             self._remember_zone_before_emote()
-            if self._free_cursor_active:
-                self._free_cursor_active = False
+            self._free_cursor_active = False
             bu, bv, b_anchor = self._emote_button_point()
             self._click_norm(bu, bv, viewport, anchor=b_anchor, button="left")
             self._emote_panel_open = True
-            self._emote_override_until = time.monotonic() + _STATE_SYNC_LOCK_SECONDS
+            self._refresh_emote_lock()
             self._focus_zone = FocusZone.EMOTE_PANEL
             self._emote_idx = max(0, min(5, self._emote_idx))
             self._wait_ui_transition(120)
@@ -967,6 +1141,9 @@ class ControlDispatcher:
         bu, bv, b_anchor = self._emote_button_point()
         self._click_norm(bu, bv, viewport, anchor=b_anchor, button="left")
         self._emote_panel_open = False
+        self._emote_false_streak = 0
+        self._last_emote_false_scene = None
+        self._last_emote_false_ts = -1e9
         self._emote_override_until = time.monotonic() + _STATE_SYNC_LOCK_SECONDS
         self._restore_zone_after_emote()
         self._emit_rumble(0.14, 0.18, 30)
@@ -986,6 +1163,7 @@ class ControlDispatcher:
             else:
                 self._emote_idx = 3 + ((self._emote_idx - 3 - 1) % 3)
             self._move_cursor_to_emote_slot(viewport)
+            self._refresh_emote_lock()
             return
         if button == GamepadButton.DPAD_RIGHT:
             if self._emote_idx < 3:
@@ -993,19 +1171,23 @@ class ControlDispatcher:
             else:
                 self._emote_idx = 3 + ((self._emote_idx - 3 + 1) % 3)
             self._move_cursor_to_emote_slot(viewport)
+            self._refresh_emote_lock()
             return
         if button in (GamepadButton.DPAD_UP, GamepadButton.DPAD_DOWN):
             # 2x3 网格严格上下跨排映射：0<->3, 1<->4, 2<->5
             self._emote_idx = (self._emote_idx + 3) % 6
             self._move_cursor_to_emote_slot(viewport)
+            self._refresh_emote_lock()
             return
         if button == GamepadButton.LB:
             self._move_cursor_to_emote_panel_center(viewport)
+            self._refresh_emote_lock()
             self.hid.scroll(_SCROLL_WHEEL_DELTA * 2, horizontal=False)
             self._set_toast("表情面板向上翻页")
             return
         if button == GamepadButton.RB:
             self._move_cursor_to_emote_panel_center(viewport)
+            self._refresh_emote_lock()
             self.hid.scroll(-_SCROLL_WHEEL_DELTA * 2, horizontal=False)
             self._set_toast("表情面板向下翻页")
             return
@@ -1018,10 +1200,14 @@ class ControlDispatcher:
             sx, sy = viewport.norm_to_screen(u, v, anchor="left_edge")
             self.hid.click(sx, sy, button="left")
             self._last_cmd_cursor_px = (sx, sy)
+            self._refresh_emote_lock()
             self._emit_rumble(0.22, 0.28, 40)
             self._set_toast(f"已发送交流表情 [{self._emote_idx + 1}/6]")
-        elif button in (GamepadButton.B, GamepadButton.LS):
+        elif button == GamepadButton.B:
             self._toggle_emote_panel(viewport, target_open=False)
+        elif button == GamepadButton.LS:
+            # 表情面板内忽略 L3 误按（仅由 B 与 LT+DPAD_DOWN 显式关闭）
+            return
         elif (
             button == GamepadButton.START
             and self._current_scene == GameScene.BATTLE_PREP
@@ -1066,19 +1252,52 @@ class ControlDispatcher:
     def _sync_emote_panel_open(
         self, scene_result: SceneDetectionResult, now: float
     ) -> None:
-        """同步视觉检测到的左下表情面板开关状态，并自动切换/恢复 FocusZone.EMOTE_PANEL。"""
-        if now < self._emote_override_until:
-            return
+        """同步视觉检测到的左下表情面板开关状态，并对关闭路径施加连续帧防抖。"""
         detected_emote = bool(getattr(scene_result, "emote_panel_open", False))
-        if detected_emote == self._emote_panel_open:
+        if now < self._emote_override_until:
+            if detected_emote:
+                self._emote_false_streak = 0
+                self._last_emote_false_scene = None
             return
-        self._emote_panel_open = detected_emote
+
         if detected_emote:
+            self._emote_false_streak = 0
+            self._last_emote_false_scene = None
+            if self._emote_panel_open:
+                return
+            self._emote_panel_open = True
             if not self.deploy_fsm.is_active and not self._unit_selected:
                 self._clear_shop_pending_buy()
                 self._remember_zone_before_emote()
+                self._free_cursor_active = False
                 self._focus_zone = FocusZone.EMOTE_PANEL
-        elif self._focus_zone == FocusZone.EMOTE_PANEL:
+                self._emote_override_until = now + _EMOTE_LOCK_SECONDS
+            return
+
+        if not self._emote_panel_open:
+            self._emote_false_streak = 0
+            self._last_emote_false_scene = None
+            return
+
+        # 防止 125Hz 输入循环将同一 5Hz 视觉结果帧在 ~200ms 内重复计为多帧
+        elapsed = now - self._last_emote_false_ts
+        if (
+            scene_result is self._last_emote_false_scene
+            and _EMOTE_SAME_RESULT_SKIP_MIN_SEC <= elapsed < _EMOTE_SAME_RESULT_SKIP_MAX_SEC
+        ):
+            return
+
+        self._last_emote_false_scene = scene_result
+        self._last_emote_false_ts = now
+        self._emote_false_streak += 1
+        if self._emote_false_streak < _EMOTE_CLOSE_DEBOUNCE_FRAMES:
+            return
+
+        self._emote_false_streak = 0
+        self._last_emote_false_scene = None
+        self._last_emote_false_ts = -1e9
+        self._emote_panel_open = False
+        if self._focus_zone == FocusZone.EMOTE_PANEL:
             self._restore_zone_after_emote()
 
     def _sync_shop_closed_fallback(self) -> None:
@@ -1118,6 +1337,26 @@ class ControlDispatcher:
             self._selected_choice_idx = detected_sel_choice
         return detected_sel_choice if isinstance(detected_sel_choice, int) else None
 
+    def _sync_covenants(self, scene_result: SceneDetectionResult) -> None:
+        """同步视觉识别出的多盟约数量、溢出状态及任意水平滚动相位的真实圆心横坐标。"""
+        raw_centers = getattr(scene_result, "covenant_centers_u", ())
+        centers_tuple: tuple[float, ...] = ()
+        if isinstance(raw_centers, (list, tuple)) and len(raw_centers) > 0:
+            centers_tuple = tuple(_clamp01(float(u)) for u in raw_centers[:9])
+
+        detected_cov = getattr(scene_result, "covenant_count", None)
+        if centers_tuple:
+            self._covenant_centers_u = centers_tuple
+            self._apply_covenant_count(len(centers_tuple))
+        elif isinstance(detected_cov, int) and detected_cov >= 0:
+            if detected_cov == 0 or detected_cov != len(self._covenant_centers_u):
+                self._covenant_centers_u = ()
+            self._apply_covenant_count(detected_cov)
+
+        self._covenant_overflow = bool(
+            getattr(scene_result, "covenant_overflow", False)
+        )
+
     def _sync_scene(self, scene_result: SceneDetectionResult | None) -> None:
         if scene_result is None:
             return
@@ -1132,9 +1371,10 @@ class ControlDispatcher:
             ):
                 if getattr(scene_result, "has_teammates", False):
                     self._has_teammates = True
-                detected_cov = getattr(scene_result, "covenant_count", None)
-                if isinstance(detected_cov, int) and detected_cov >= 0:
-                    self._apply_covenant_count(detected_cov)
+                self._sync_covenants(scene_result)
+                self.set_board_mirrored(
+                    bool(getattr(scene_result, "board_mirrored", False))
+                )
                 if now >= self._shop_override_until:
                     self._shop_open = bool(scene_result.shop_open)
                 if now >= self._unit_override_until:
@@ -1158,9 +1398,10 @@ class ControlDispatcher:
             ):
                 if getattr(scene_result, "has_teammates", False):
                     self._has_teammates = True
-                detected_cov = getattr(scene_result, "covenant_count", None)
-                if isinstance(detected_cov, int) and detected_cov >= 0:
-                    self._apply_covenant_count(detected_cov)
+                self._sync_covenants(scene_result)
+                self.set_board_mirrored(
+                    bool(getattr(scene_result, "board_mirrored", False))
+                )
                 if now >= self._unit_override_until:
                     self._unit_selected = bool(getattr(scene_result, "unit_selected", False))
                     if not self._unit_selected:
@@ -1196,13 +1437,11 @@ class ControlDispatcher:
         if getattr(scene_result, "has_teammates", False):
             self._has_teammates = True
 
-        detected_cov = getattr(scene_result, "covenant_count", None)
-        if (
-            scene_result.scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
-            and isinstance(detected_cov, int)
-            and detected_cov >= 0
-        ):
-            self._apply_covenant_count(detected_cov)
+        if scene_result.scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT):
+            self._sync_covenants(scene_result)
+            self.set_board_mirrored(
+                bool(getattr(scene_result, "board_mirrored", False))
+            )
 
         if now >= self._shop_override_until:
             self._shop_open = bool(scene_result.shop_open)
@@ -1264,6 +1503,7 @@ class ControlDispatcher:
         confirm_has_dont_ask: bool | None = None,
     ) -> None:
         self._clear_shop_pending_buy()
+        self._teammate_panel_open = False
         if self._current_scene == GameScene.MODAL_CHOICE and target_scene != GameScene.MODAL_CHOICE:
             self._choice_eye_hidden = False
             self._selected_choice_idx = None
@@ -1278,7 +1518,14 @@ class ControlDispatcher:
             self._unit_override_until = 0.0
             self._emote_panel_open = False
             self._emote_override_until = 0.0
+            self._emote_false_streak = 0
+            self._last_emote_false_scene = None
+            self._last_emote_false_ts = -1e9
+            self._covenant_overflow = False
+            self._covenant_centers_u = ()
             self._info_overlay = None
+        if target_scene == GameScene.UNKNOWN_FREE_CURSOR:
+            self.set_board_mirrored(False)
         if target_scene != GameScene.BATTLE_PREP:
             self._shop_override_until = 0.0
             self._unit_detail_from_shop = False
@@ -1340,6 +1587,9 @@ class ControlDispatcher:
             self._unit_detail_from_shop = False
             self._unit_override_until = now + _STATE_SYNC_LOCK_SECONDS
             self._emote_panel_open = False
+            self._emote_false_streak = 0
+            self._last_emote_false_scene = None
+            self._last_emote_false_ts = -1e9
             self._emote_override_until = now + _STATE_SYNC_LOCK_SECONDS
         self._refresh_view_state()
         if announce:
@@ -1505,10 +1755,17 @@ class ControlDispatcher:
         if self._paused:
             return
 
-        # 2. 全局 Back 单击手动切层；left_stick_mode="dpad" 下按 LS 一键切换自由光标
+        # 2. 全局 Back 单击手动切层；EMOTE_PANEL 内忽略 LS 误按；left_stick_mode="dpad" 下按 LS 一键切换自由光标
         if isinstance(event, ButtonTap):
             if event.button == GamepadButton.BACK:
                 self._cycle_manual_layer()
+                return
+            if (
+                event.button == GamepadButton.LS
+                and self._focus_zone == FocusZone.EMOTE_PANEL
+                and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+                and not self.deploy_fsm.is_active
+            ):
                 return
             if (
                 event.button == GamepadButton.LS
@@ -1605,12 +1862,21 @@ class ControlDispatcher:
         """左摇杆离散四向事件直接等效于十字键，驱动全场景吸附导航。"""
         if event.stick != "left":
             return
-        if getattr(self.keymap, "left_stick_mode", "dpad") != "dpad":
+        in_emote_panel = (
+            self._focus_zone == FocusZone.EMOTE_PANEL
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and not self.deploy_fsm.is_active
+        )
+        if not in_emote_panel and getattr(self.keymap, "left_stick_mode", "dpad") != "dpad":
             return
         if self.deploy_fsm.state == DeployState.AIMING_DIRECTION:
             return
-        if self._free_cursor_active or self._current_scene == GameScene.UNKNOWN_FREE_CURSOR:
+        if not in_emote_panel and (
+            self._free_cursor_active or self._current_scene == GameScene.UNKNOWN_FREE_CURSOR
+        ):
             return
+        if in_emote_panel and self._free_cursor_active:
+            self._free_cursor_active = False
 
         dpad_btn = _DIR_TO_DPAD[event.direction]
         self._handle_button_action(dpad_btn, viewport, is_repeat=event.is_repeat)
@@ -1631,6 +1897,14 @@ class ControlDispatcher:
             return
 
         if event.stick == "left":
+            # 表情面板活跃期间严禁左摇杆连续运动激活自由光标（即便 left_stick_mode="cursor" 也稳锁面板内）
+            if (
+                self._focus_zone == FocusZone.EMOTE_PANEL
+                and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+                and not self.deploy_fsm.is_active
+            ):
+                self._free_cursor_active = False
+                return
             # 左摇杆代替十字键模式下，仅在显式开启自由光标或未知自由层时移动鼠标光标
             if (
                 getattr(self.keymap, "left_stick_mode", "dpad") == "dpad"
@@ -1664,6 +1938,26 @@ class ControlDispatcher:
         raw_v = -event.dy_px
         raw_h = event.dx_px
 
+        # 表情面板活跃期间：无论上下推杆还是按底部「■ · ·」直觉左右推杆，统一映射为垂直滚轮翻页并续期保护锁
+        if (
+            self._focus_zone == FocusZone.EMOTE_PANEL
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and not self._free_cursor_active
+            and not self.deploy_fsm.is_active
+        ):
+            primary_delta = raw_v if abs(raw_v) >= abs(raw_h) else -raw_h
+            if primary_delta * self._scroll_v_accum < 0.0:
+                self._scroll_v_accum = 0.0
+            self._scroll_v_accum += primary_delta * scroll_scale
+            self._scroll_h_accum = 0.0
+            if abs(self._scroll_v_accum) >= _SCROLL_STEP_PX:
+                ticks = int(self._scroll_v_accum / _SCROLL_STEP_PX)
+                self._scroll_v_accum -= ticks * _SCROLL_STEP_PX
+                self._move_cursor_to_emote_panel_center(viewport)
+                self._refresh_emote_lock()
+                self.hid.scroll(ticks * _SCROLL_WHEEL_DELTA, horizontal=False)
+            return
+
         # 反向推杆时清零异号滚轮余量，消除换向迟滞
         if raw_v * self._scroll_v_accum < 0.0:
             self._scroll_v_accum = 0.0
@@ -1673,18 +1967,35 @@ class ControlDispatcher:
         self._scroll_v_accum += raw_v * scroll_scale
         self._scroll_h_accum += raw_h * scroll_scale
 
+        # 顶部多盟约栏（TOP_INFO）：右摇杆水平右/左（或垂直下/上）平滑拖拽滑动顶部盟约栏
+        if (
+            self._focus_zone == FocusZone.TOP_INFO
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+            and not self._free_cursor_active
+            and not self.deploy_fsm.is_active
+        ):
+            if abs(self._scroll_h_accum) >= _SCROLL_STEP_PX:
+                drag_dir: Literal["left", "right"] = (
+                    "right" if self._scroll_h_accum > 0.0 else "left"
+                )
+                self._scroll_h_accum = 0.0
+                self._scroll_v_accum = 0.0
+                self._scroll_covenant_bar(drag_dir, viewport)
+            elif abs(self._scroll_v_accum) >= _SCROLL_STEP_PX:
+                drag_dir = "right" if self._scroll_v_accum < 0.0 else "left"
+                self._scroll_h_accum = 0.0
+                self._scroll_v_accum = 0.0
+                self._scroll_covenant_bar(drag_dir, viewport)
+            return
+
         if abs(self._scroll_v_accum) >= _SCROLL_STEP_PX:
             ticks = int(self._scroll_v_accum / _SCROLL_STEP_PX)
             self._scroll_v_accum -= ticks * _SCROLL_STEP_PX
-            if self._focus_zone == FocusZone.EMOTE_PANEL and not self._free_cursor_active:
-                self._move_cursor_to_emote_panel_center(viewport)
             self.hid.scroll(ticks * _SCROLL_WHEEL_DELTA, horizontal=False)
 
         if abs(self._scroll_h_accum) >= _SCROLL_STEP_PX:
             ticks = int(self._scroll_h_accum / _SCROLL_STEP_PX)
             self._scroll_h_accum -= ticks * _SCROLL_STEP_PX
-            if self._focus_zone == FocusZone.EMOTE_PANEL and not self._free_cursor_active:
-                self._move_cursor_to_emote_panel_center(viewport)
             self.hid.scroll(ticks * _SCROLL_WHEEL_DELTA, horizontal=True)
 
     # ------------------------------------------------------------------
@@ -1708,17 +2019,21 @@ class ControlDispatcher:
             self.deploy_fsm.cancel(viewport)
         self._clear_shop_pending_buy()
         self._info_overlay = None
+        self._teammate_panel_open = False
         self._unit_selected = False
         self._unit_detail_from_shop = False
         self._unit_override_until = 0.0
         self._emote_panel_open = False
+        self._emote_false_streak = 0
+        self._last_emote_false_scene = None
+        self._last_emote_false_ts = -1e9
         self._emote_override_until = 0.0
         self._trigger_action("battle_ready", "battle_ready", "c", viewport)
         self._emit_rumble(0.50, 0.50, 80)
         self._set_toast("准备就绪 · 开始战斗")
 
     def _handle_chord(self, event: ChordTriggered, viewport: ViewportRect) -> None:
-        # RT + A：商店极速连买 / 三选一双击拿牌 / 回合确认直接确认 / 策略一键点击 / 自由光标双击
+        # RT + A：商店查详情 / 三选一双击拿牌 / 回合确认直接确认 / 策略一键点击 / 自由光标双击
         if event.modifier == GamepadButton.RT and event.button == GamepadButton.A:
             self._handle_rt_a(viewport)
             return
@@ -1730,6 +2045,22 @@ class ControlDispatcher:
                 self._trigger_battle_ready(viewport)
             elif self._current_scene == GameScene.MODAL_CONFIRM:
                 self._click_confirm_item(1, viewport)
+            return
+
+        # LT + RT（无序匹配，兼容 LT->RT、RT->LT 与同帧双按）：局内一键点击右侧本局策略头像
+        if {event.modifier, event.button} == {GamepadButton.LT, GamepadButton.RT}:
+            if (
+                self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+                and self.deploy_fsm.state
+                not in (
+                    DeployState.AIMING_DIRECTION,
+                    DeployState.HOLDING_UNIT,
+                    DeployState.HOLDING_EQUIP,
+                )
+            ):
+                avatar_key, _ = self._strategy_button_keys()
+                self.deploy_fsm.click_strategy_in_place(viewport, button_key=avatar_key)
+                self._set_toast("已快捷释放右侧本局策略 (LT+RT)")
             return
 
         # LT 信息速查与联机组合键（局内休整期与作战期全程可用）
@@ -1756,7 +2087,8 @@ class ControlDispatcher:
             and self._focus_zone == FocusZone.STRATEGY
             and self.deploy_fsm.state == DeployState.IDLE
         ):
-            self.deploy_fsm.click_strategy_in_place(viewport)
+            avatar_key, _ = self._strategy_button_keys()
+            self.deploy_fsm.click_strategy_in_place(viewport, button_key=avatar_key)
             self._set_toast("已直接使用右侧策略")
             return
 
@@ -1868,6 +2200,7 @@ class ControlDispatcher:
         self._teammate_focus_idx = idx - 1
         if not self._click_button(f"teammate_{idx}", viewport):
             self.hid.tap_key(str(idx))
+        self._teammate_panel_open = True
         self._emit_rumble(0.18, 0.25, 35)
         self._set_toast(f"切换队友 {idx} 号位视角")
 
@@ -1957,8 +2290,14 @@ class ControlDispatcher:
             self.hid.click(sx, sy, button="left")
             self._last_cmd_cursor_px = (sx, sy)
         elif button == GamepadButton.B:
-            if not self._close_info_overlay_if_open(viewport):
-                self._trigger_action("back", "back", "esc", viewport)
+            if self._close_info_overlay_if_open(viewport):
+                return
+            if (
+                self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+                and self._close_teammate_panel_if_open(viewport)
+            ):
+                return
+            self._trigger_action("back", "back", "esc", viewport)
         elif button == GamepadButton.START:
             if self._current_scene == GameScene.BATTLE_PREP and self.keymap.ready_hold_ms == 0:
                 self._trigger_battle_ready(viewport)
@@ -2287,6 +2626,15 @@ class ControlDispatcher:
             self._handle_emote_panel_button(button, viewport, is_repeat=is_repeat)
             return
 
+        if self._focus_zone == FocusZone.TOP_INFO and button in (
+            GamepadButton.LB,
+            GamepadButton.RB,
+        ):
+            self._scroll_covenant_bar(
+                "left" if button == GamepadButton.LB else "right", viewport
+            )
+            return
+
         if button in _DPAD_TO_DIR:
             direction = _DPAD_TO_DIR[button]
             if self._navigate_top_info_or_teammates(direction, viewport):
@@ -2332,7 +2680,8 @@ class ControlDispatcher:
                 self._teammate_cycle_pos = self._teammate_focus_idx + 1
                 self._switch_teammate_view(self._teammate_focus_idx + 1, viewport)
             elif self._focus_zone == FocusZone.STRATEGY:
-                self.deploy_fsm.click_strategy_in_place(viewport)
+                avatar_key, _ = self._strategy_button_keys()
+                self.deploy_fsm.click_strategy_in_place(viewport, button_key=avatar_key)
                 self._set_toast("已直接使用右侧策略")
             else:
                 u, v = self._board_mapper.cell_center(self._board_row, self._board_col)
@@ -2348,8 +2697,7 @@ class ControlDispatcher:
         elif button == GamepadButton.B:
             if self._close_info_overlay_if_open(viewport):
                 return
-            if self._focus_zone == FocusZone.TEAMMATES:
-                self._focus_zone = FocusZone.BOARD
+            if self._close_teammate_panel_if_open(viewport):
                 return
             self._click_safe_blank(viewport)
             if self._unit_selected:
@@ -2426,6 +2774,8 @@ class ControlDispatcher:
         elif button == GamepadButton.B:
             if self._close_info_overlay_if_open(viewport):
                 return
+            if self._close_teammate_panel_if_open(viewport):
+                return
             if self._focus_zone == FocusZone.SHOP and self._shop_pending_buy_idx is not None:
                 self._clear_shop_pending_buy()
                 self._set_toast("已取消商店购买预选")
@@ -2433,8 +2783,6 @@ class ControlDispatcher:
             if self._focus_zone == FocusZone.SHOP and self._shop_open:
                 self._set_shop_open(False, viewport, announce=True)
                 self._focus_zone = FocusZone.BENCH
-            elif self._focus_zone == FocusZone.TEAMMATES:
-                self._enter_battle_prep_zone(FocusZone.BOARD, viewport)
             else:
                 self._click_safe_blank(viewport)
         elif button == GamepadButton.X:
@@ -2614,7 +2962,7 @@ class ControlDispatcher:
                 cu, cv = self._board_mapper.cell_center(self._board_row, self._board_col)
                 self._enter_battle_prep_zone(FocusZone.EQUIPMENT, viewport)
                 self._equip_idx = self._equip_mapper.nearest_slot(cu, cv)
-            elif exit_dir == "left" and self._has_teammates and not is_holding_strategy:
+            elif exit_dir == "left" and self._has_teammates and not is_holding and not is_holding_strategy:
                 _, cv = self._board_mapper.cell_center(self._board_row, self._board_col)
                 self._teammate_focus_idx = self._nearest_teammate_idx(cv)
                 self._selected_teammate = self._teammate_focus_idx + 1
@@ -2721,7 +3069,8 @@ class ControlDispatcher:
             return
 
         if self._focus_zone == FocusZone.STRATEGY:
-            self.deploy_fsm.pick_strategy(viewport)
+            avatar_key, _ = self._strategy_button_keys()
+            self.deploy_fsm.pick_strategy(viewport, button_key=avatar_key)
             self._set_toast("已锁定右侧策略（再按 A 直接使用，或移至干员/商店按 A 拖拽）")
             return
 
@@ -2750,15 +3099,18 @@ class ControlDispatcher:
         if fsm_state == DeployState.HOLDING_STRATEGY:
             if button != GamepadButton.A:
                 return
+            avatar_key, _ = self._strategy_button_keys()
             if self._focus_zone == FocusZone.STRATEGY:
-                self.deploy_fsm.click_strategy_in_place(viewport)
+                self.deploy_fsm.click_strategy_in_place(viewport, button_key=avatar_key)
                 self._set_toast("已直接使用右侧策略")
             elif self._focus_zone == FocusZone.BOARD:
                 if self._shop_open and getattr(self.keymap, "auto_toggle_shop", True):
                     self._set_shop_open(False, viewport, announce=False)
                     self._wait_ui_transition(220)
                 pos = self._board_mapper.cell_center(self._board_row, self._board_col)
-                self.deploy_fsm.use_strategy_on_target(pos, viewport)
+                self.deploy_fsm.use_strategy_on_target(
+                    pos, viewport, button_key=avatar_key
+                )
                 self._set_toast(
                     f"已对场上 [{self._board_row + 1},{self._board_col + 1}] 干员释放策略"
                 )
@@ -2767,14 +3119,18 @@ class ControlDispatcher:
                     self._set_shop_open(False, viewport, announce=False)
                     self._wait_ui_transition(220)
                 pos = self._bench_mapper.slot_center(self._bench_idx)
-                self.deploy_fsm.use_strategy_on_target(pos, viewport)
+                self.deploy_fsm.use_strategy_on_target(
+                    pos, viewport, button_key=avatar_key
+                )
                 self._set_toast(f"已对整备区 [{self._bench_idx + 1}] 干员释放策略")
             elif self._focus_zone == FocusZone.SHOP:
                 if not self._shop_open:
                     self._set_shop_open(True, viewport, announce=False)
                     self._wait_ui_transition(220)
                 pos = self._shop_mapper.slot_center(self._shop_idx)
-                self.deploy_fsm.use_strategy_on_target(pos, viewport)
+                self.deploy_fsm.use_strategy_on_target(
+                    pos, viewport, button_key=avatar_key
+                )
                 self._set_toast(
                     f"已对商店 [{self._shop_idx + 1}/{self._shop_mapper.count}] 释放策略"
                 )
@@ -2785,19 +3141,7 @@ class ControlDispatcher:
                 self._set_toast("已出售目标")
             return
 
-        if button == GamepadButton.Y:
-            if self.deploy_fsm.gift_holding(self._selected_teammate, viewport):
-                self._set_toast(f"已赠予联机队友 {self._selected_teammate}")
-            return
-
         if button == GamepadButton.A:
-            if self._focus_zone == FocusZone.TEAMMATES:
-                mate_num = self._teammate_focus_idx + 1
-                if self.deploy_fsm.gift_holding(mate_num, viewport):
-                    self._selected_teammate = mate_num
-                    self._set_toast(f"已赠予联机队友 {mate_num}")
-                return
-
             if fsm_state == DeployState.HOLDING_UNIT:
                 if self._focus_zone == FocusZone.BENCH:
                     pos = self._bench_mapper.slot_center(self._bench_idx)
@@ -2861,6 +3205,16 @@ class ControlDispatcher:
     def _build_focus_label(self) -> str:
         if self._free_cursor_active or self._focus_zone == FocusZone.FREE_CURSOR:
             return "自由鼠标"
+        label = self._build_base_focus_label()
+        if (
+            self._board_mirrored
+            and label
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+        ):
+            return f"{label} · 镜像战场"
+        return label
+
+    def _build_base_focus_label(self) -> str:
         if (
             self._unit_selected
             and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
@@ -3020,12 +3374,15 @@ class ControlDispatcher:
 
         if scene == GameScene.BATTLE_COMBAT:
             if self._focus_zone == FocusZone.TOP_INFO:
-                return [
+                items = [
                     PromptItem(nav_key, "本局信息/羁绊/出怪"),
                     PromptItem("A", "查看详情"),
                     PromptItem("B", "关闭浮窗"),
                     PromptItem("下", "返回棋盘"),
                 ]
+                if self._covenant_overflow or self._covenant_count >= 7:
+                    items.insert(1, PromptItem("RS", "左右滑动盟约"))
+                return items
             if self._focus_zone == FocusZone.TEAMMATES:
                 return [
                     PromptItem(nav_key, "选队友"),
@@ -3063,33 +3420,25 @@ class ControlDispatcher:
                 and self.deploy_fsm.holding_source.board_cell
                 == (self._board_row, self._board_col)
             )
-            if self._focus_zone == FocusZone.TEAMMATES:
-                a_lbl = "赠予队友"
-            elif same_cell:
-                a_lbl = "原地转向"
-            else:
-                a_lbl = "部署/换位"
+            a_lbl = "原地转向" if same_cell else "部署/换位"
             return [
                 PromptItem(nav_key, "选目标格"),
                 PromptItem("LB/RB", "整备↔棋盘"),
                 PromptItem("A", a_lbl),
                 PromptItem("X", "出售"),
-                PromptItem("Y", f"赠队友{self._selected_teammate}"),
                 PromptItem("B", "取消"),
             ]
         if fsm_state == DeployState.HOLDING_EQUIP:
-            if self._focus_zone == FocusZone.EQUIPMENT:
-                eq_a_label = "移动/换位"
-            elif self._focus_zone == FocusZone.TEAMMATES:
-                eq_a_label = "赠予队友"
-            else:
-                eq_a_label = "穿戴装备"
+            eq_a_label = (
+                "移动/换位"
+                if self._focus_zone == FocusZone.EQUIPMENT
+                else "穿戴装备"
+            )
             return [
                 PromptItem(nav_key, "选目标槽/干员"),
                 PromptItem("LB/RB", "装备↔棋盘↔整备"),
                 PromptItem("A", eq_a_label),
                 PromptItem("X", "出售"),
-                PromptItem("Y", f"赠队友{self._selected_teammate}"),
                 PromptItem("B", "取消"),
             ]
         if fsm_state == DeployState.HOLDING_STRATEGY:
@@ -3116,13 +3465,16 @@ class ControlDispatcher:
                 PromptItem("B", "关闭说明"),
             ]
         if self._focus_zone == FocusZone.TOP_INFO:
-            return [
+            items = [
                 PromptItem(nav_key, "本局信息/对称羁绊/出怪"),
                 PromptItem("A", "点击查看"),
                 PromptItem("B", "关闭浮窗"),
                 PromptItem("LB/RB", "切区"),
                 PromptItem("长按Start", "开战"),
             ]
+            if self._covenant_overflow or self._covenant_count >= 7:
+                items.insert(1, PromptItem("RS", "左右滑动盟约"))
+            return items
         if self._focus_zone == FocusZone.TEAMMATES:
             return [
                 PromptItem(nav_key, "上下选队友"),
@@ -3205,4 +3557,5 @@ class ControlDispatcher:
             view_state=self._view_state.value,
             shop_open=self._shop_open,
             left_stick_mode=getattr(self.keymap, "left_stick_mode", "dpad"),
+            board_mirrored=self._board_mirrored,
         )
