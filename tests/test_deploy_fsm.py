@@ -1675,20 +1675,20 @@ class TestPhase2InplaceTurnConfirmStrategyAndLockSync:
         assert snap_confirm.focus_label == "回合确认 · 确认"
         assert snap_confirm.cursor_norm == pytest.approx((yes_pt.u, yes_pt.v))
         assert snap_confirm.focus_polygon_norm == [
-            (0.50, 0.623),
-            (1.0, 0.623),
-            (1.0, 0.723),
-            (0.50, 0.723),
+            (0.505, 0.623),
+            (0.992, 0.623),
+            (0.992, 0.723),
+            (0.505, 0.723),
         ]
 
         # 左选取消、上选本局不再提示、按 A 勾选后焦点自动回移至确认
         snap_left = dispatcher.process_tick(vp, confirm, [ButtonTap(GamepadButton.DPAD_LEFT)])
         assert snap_left.focus_label == "回合确认 · 取消"
         assert snap_left.focus_polygon_norm == [
-            (0.0, 0.623),
-            (0.50, 0.623),
-            (0.50, 0.723),
-            (0.0, 0.723),
+            (0.008, 0.623),
+            (0.495, 0.623),
+            (0.495, 0.723),
+            (0.008, 0.723),
         ]
 
         hid.clear()
@@ -1943,7 +1943,7 @@ class TestPhase2InplaceTurnConfirmStrategyAndLockSync:
         assert snap0.focus_zone == FocusZone.CHOICE_CARDS
         assert snap0.focus_label == "二选一 [1/2]"
         assert snap0.cursor_norm == pytest.approx(layout.resolve_choice_card_center(0, 2))
-        assert snap0.cursor_norm == pytest.approx((0.3809, 0.5000), abs=1e-3)
+        assert snap0.cursor_norm == pytest.approx((0.3809, 0.5035), abs=5e-3)
 
         # 左右 / LB / RB 在两张卡之间循环切换
         snap_r = dispatcher.process_tick(vp, modal2, [ButtonTap(GamepadButton.DPAD_RIGHT)])

@@ -966,7 +966,7 @@ class ControlDispatcher:
                 if pt is not None
                 else (0.2496, 0.6729, "center_16_9")
             )
-            poly = [(0.0, 0.623), (0.50, 0.623), (0.50, 0.723), (0.0, 0.723)]
+            poly = [(0.008, 0.623), (0.495, 0.623), (0.495, 0.723), (0.008, 0.723)]
             return ("confirm_no", "取消", (u, v), anchor, poly)
         if clamped == 1:
             pt = self.layout.buttons.get("confirm_yes")
@@ -975,7 +975,7 @@ class ControlDispatcher:
                 if pt is not None
                 else (0.7496, 0.6729, "center_16_9")
             )
-            poly = [(0.50, 0.623), (1.0, 0.623), (1.0, 0.723), (0.50, 0.723)]
+            poly = [(0.505, 0.623), (0.992, 0.623), (0.992, 0.723), (0.505, 0.723)]
             return ("confirm_yes", "确认", (u, v), anchor, poly)
         pt = self.layout.buttons.get("confirm_dont_ask")
         u, v, anchor = (
