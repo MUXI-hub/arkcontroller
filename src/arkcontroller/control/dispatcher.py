@@ -34,7 +34,12 @@ from arkcontroller.input.xinput_driver import GamepadButton
 from arkcontroller.vision.scene_detector import GameScene, SceneDetectionResult
 
 if TYPE_CHECKING:
-    from arkcontroller.config.models import KeymapConfig, LayoutProfile
+    from arkcontroller.config.models import (
+        KeymapConfig,
+        LayoutProfile,
+        LinearZone,
+        PerspectiveQuad,
+    )
     from arkcontroller.input.virtual_hid import VirtualHID
     from arkcontroller.platform.window_tracker import ViewportRect
 
@@ -98,6 +103,7 @@ class HUDStateSnapshot:
     view_state: str = "normal"
     shop_open: bool = False
     left_stick_mode: str = "dpad"
+    board_mirrored: bool = False
 
 
 _DPAD_TO_DIR: dict[GamepadButton, Direction] = {
@@ -210,8 +216,9 @@ class ControlDispatcher:
 
         self.deploy_fsm = DeployFSM(keymap, layout, hid, rumble_cb=rumble_cb)
 
-        # 界面镜头/缩放视图态（normal / shop_open / unit_selected）与商店动态栏位数（1本4槽/2本5槽/4本6槽）
+        # 界面镜头/缩放视图态（normal / shop_open / unit_selected）、Boss 战镜像态与商店动态栏位数（1本4槽/2本5槽/4本6槽）
         self._view_state: LayoutViewState = LayoutViewState.NORMAL
+        self._board_mirrored: bool = False
         self._shop_open: bool = False
         self._shop_slot_count: int = self.layout.shop_zone.count
         self._shop_pending_buy_idx: int | None = None
@@ -221,11 +228,11 @@ class ControlDispatcher:
         self._shop_override_until: float = 0.0
         self._unit_override_until: float = 0.0
 
-        # 构建多视图态区域映射器缓存
+        # 构建多视图态（含常规与 Boss 镜像双态）区域映射器缓存
         self._shop_mappers: dict[LayoutViewState, LinearZoneMapper] = {}
         self._bench_mappers: dict[LayoutViewState, LinearZoneMapper] = {}
-        self._equip_mappers: dict[LayoutViewState, LinearZoneMapper] = {}
-        self._board_mappers: dict[LayoutViewState, PerspectiveBoardMapper] = {}
+        self._equip_mappers: dict[tuple[LayoutViewState, bool], LinearZoneMapper] = {}
+        self._board_mappers: dict[tuple[LayoutViewState, bool], PerspectiveBoardMapper] = {}
         self._shop_mapper: LinearZoneMapper
         self._bench_mapper: LinearZoneMapper
         self._equip_mapper: LinearZoneMapper
@@ -254,6 +261,7 @@ class ControlDispatcher:
         self._confirm_has_dont_ask: bool = True
         self._covenant_count: int = self.layout.covenant_zone.default_count
         self._covenant_overflow: bool = False
+        self._covenant_centers_u: tuple[float, ...] = ()
         self._last_covenant_drag_at: float = -1e9
         self._top_info_idx: int = 0
         self._has_teammates: bool = False
@@ -337,6 +345,14 @@ class ControlDispatcher:
         return self._covenant_overflow
 
     @property
+    def covenant_centers_u(self) -> tuple[float, ...]:
+        return self._covenant_centers_u
+
+    @property
+    def board_mirrored(self) -> bool:
+        return self._board_mirrored
+
+    @property
     def has_teammates(self) -> bool:
         return self._has_teammates
 
@@ -365,12 +381,28 @@ class ControlDispatcher:
         return self._confirm_has_dont_ask
 
     def set_covenant_count(self, count: int) -> None:
-        """设置顶部栏正下方居中对称羁绊槽位数（0~9）并安全同步顶部焦点索引。"""
+        """设置顶部栏正下方居中对称羁绊槽位数（0~9），清空动态相位坐标并安全同步顶部焦点索引。"""
+        self._covenant_centers_u = ()
         self._apply_covenant_count(count)
 
     def set_covenant_overflow(self, enabled: bool) -> None:
         """设置顶部多盟约栏是否处于 >7 枚左对齐溢出可滑动状态。"""
         self._covenant_overflow = bool(enabled)
+
+    def set_covenant_centers_u(self, centers_u: Sequence[float]) -> None:
+        """设置视觉实测的顶部可见盟约归一化中心横坐标序列（支持任意水平滚动相位）。"""
+        normalized = tuple(_clamp01(float(u)) for u in list(centers_u)[:9])
+        self._covenant_centers_u = normalized
+        if normalized:
+            self._apply_covenant_count(len(normalized))
+
+    def set_board_mirrored(self, enabled: bool) -> None:
+        """切换 Boss 战右侧镜像 3D 棋盘/装备台坐标映射（整备区与商店保持不镜像）。"""
+        target = bool(enabled)
+        if target == self._board_mirrored:
+            return
+        self._board_mirrored = target
+        self._sync_active_mappers()
 
     def set_has_teammates(self, enabled: bool) -> None:
         """设置当前对局是否启用左侧多人联机队友头像栏。"""
@@ -487,6 +519,28 @@ class ControlDispatcher:
     # 内部初始化与工具方法
     # ------------------------------------------------------------------
 
+    def _resolve_equip_zone_compat(
+        self, vs: LayoutViewState, *, mirrored: bool
+    ) -> LinearZone:
+        """向后兼容解析装备台区域（支持可选 mirrored 参数）。"""
+        if not mirrored:
+            return self.layout.resolve_equip_zone(vs)
+        try:
+            return self.layout.resolve_equip_zone(vs, mirrored=True)
+        except TypeError:
+            return self.layout.resolve_equip_zone(vs)
+
+    def _resolve_board_quad_compat(
+        self, vs: LayoutViewState, *, mirrored: bool
+    ) -> PerspectiveQuad:
+        """向后兼容解析透视棋盘四角（支持可选 mirrored 参数）。"""
+        if not mirrored:
+            return self.layout.resolve_board_quad(vs)
+        try:
+            return self.layout.resolve_board_quad(vs, mirrored=True)
+        except TypeError:
+            return self.layout.resolve_board_quad(vs)
+
     def _rebuild_mappers(self) -> None:
         self._shop_mappers = {}
         self._bench_mappers = {}
@@ -497,10 +551,13 @@ class ControlDispatcher:
                 self.layout.resolve_shop_zone(vs, slot_count=self._shop_slot_count)
             )
             self._bench_mappers[vs] = LinearZoneMapper(self.layout.resolve_bench_zone(vs))
-            self._equip_mappers[vs] = LinearZoneMapper(self.layout.resolve_equip_zone(vs))
-            self._board_mappers[vs] = PerspectiveBoardMapper(
-                self.layout.resolve_board_quad(vs)
-            )
+            for mirrored in (False, True):
+                self._equip_mappers[(vs, mirrored)] = LinearZoneMapper(
+                    self._resolve_equip_zone_compat(vs, mirrored=mirrored)
+                )
+                self._board_mappers[(vs, mirrored)] = PerspectiveBoardMapper(
+                    self._resolve_board_quad_compat(vs, mirrored=mirrored)
+                )
         self._choice_mapper = LinearZoneMapper(self.layout.choice_zone)
         self._sync_active_mappers()
 
@@ -540,12 +597,13 @@ class ControlDispatcher:
         )
 
     def _sync_active_mappers(self) -> None:
-        """将当前生效的槽位与棋盘映射器指向对应缩放视图态缓存。"""
+        """将当前生效的槽位与棋盘映射器指向对应缩放视图态与镜像态缓存。"""
         vs = self._view_state
+        mirrored = self._board_mirrored
         self._shop_mapper = self._shop_mappers[vs]
         self._bench_mapper = self._bench_mappers[vs]
-        self._equip_mapper = self._equip_mappers[vs]
-        self._board_mapper = self._board_mappers[vs]
+        self._equip_mapper = self._equip_mappers[(vs, mirrored)]
+        self._board_mapper = self._board_mappers[(vs, mirrored)]
 
     def _compute_effective_view_state(self) -> LayoutViewState:
         """依据当前场景、选取角色状态与商店展开状态推导镜头缩放视图态。"""
@@ -633,16 +691,23 @@ class ControlDispatcher:
         ]
 
     def _apply_covenant_count(self, new_count: int) -> None:
-        """更新顶部栏下方居中对称羁绊数量，并在顶部栏吸附时保持右放大镜等相对焦点稳定。"""
+        """更新顶部栏下方羁绊数量，并在数量增减时保持右放大镜与盟约区间焦点稳定。"""
         clamped = max(0, min(9, int(new_count)))
         if clamped == self._covenant_count:
             return
-        old_total = self._covenant_count + 2
+        old_count = self._covenant_count
+        old_total = old_count + 2
         was_right_mag = self._top_info_idx == old_total - 1
+        was_on_covenant = 1 <= self._top_info_idx <= old_count
         self._covenant_count = clamped
         new_total = self._covenant_count + 2
         if was_right_mag:
             self._top_info_idx = new_total - 1
+        elif was_on_covenant:
+            if self._covenant_count > 0:
+                self._top_info_idx = max(1, min(self._covenant_count, self._top_info_idx))
+            else:
+                self._top_info_idx = 0
         else:
             self._top_info_idx = max(0, min(new_total - 1, self._top_info_idx))
 
@@ -657,7 +722,7 @@ class ControlDispatcher:
             list[tuple[float, float]],
         ]
     ]:
-        """构建顶部信息与居中对称羁绊栏的从左至右吸附序列：[左放大镜, 羁绊1..N, 右放大镜]。"""
+        """构建顶部信息与羁绊栏的从左至右吸附序列：[左放大镜, 羁绊1..N, 右放大镜]。"""
         left_pt = self.layout.buttons.get("covenant_panel")
         lu, lv = (left_pt.u, left_pt.v) if left_pt is not None else (0.265, 0.047)
         l_anchor = left_pt.anchor if left_pt is not None else "center_16_9"
@@ -686,17 +751,28 @@ class ControlDispatcher:
 
         cov_zone = self.layout.covenant_zone
         cov_total_label = "7+" if self._covenant_overflow else str(self._covenant_count)
+        use_dynamic_centers = (
+            self._covenant_count > 0
+            and len(self._covenant_centers_u) == self._covenant_count
+        )
         for k in range(self._covenant_count):
-            try:
-                cu, cv = cov_zone.slot_center(
-                    k, count=self._covenant_count, overflow=self._covenant_overflow
-                )
-                poly = cov_zone.slot_polygon(
-                    k, count=self._covenant_count, overflow=self._covenant_overflow
-                )
-            except TypeError:
-                cu, cv = cov_zone.slot_center(k, count=self._covenant_count)
-                poly = cov_zone.slot_polygon(k, count=self._covenant_count)
+            if use_dynamic_centers:
+                cu = self._covenant_centers_u[k]
+                cv = float(getattr(cov_zone, "v", _COVENANT_DRAG_V_NORM))
+                sw = float(getattr(cov_zone, "slot_w", 0.044))
+                sh = float(getattr(cov_zone, "slot_h", 0.082))
+                poly = self._rect_poly(cu, cv, sw, sh)
+            else:
+                try:
+                    cu, cv = cov_zone.slot_center(
+                        k, count=self._covenant_count, overflow=self._covenant_overflow
+                    )
+                    poly = cov_zone.slot_polygon(
+                        k, count=self._covenant_count, overflow=self._covenant_overflow
+                    )
+                except TypeError:
+                    cu, cv = cov_zone.slot_center(k, count=self._covenant_count)
+                    poly = cov_zone.slot_polygon(k, count=self._covenant_count)
             items.append(
                 (
                     "covenant",
@@ -1261,6 +1337,26 @@ class ControlDispatcher:
             self._selected_choice_idx = detected_sel_choice
         return detected_sel_choice if isinstance(detected_sel_choice, int) else None
 
+    def _sync_covenants(self, scene_result: SceneDetectionResult) -> None:
+        """同步视觉识别出的多盟约数量、溢出状态及任意水平滚动相位的真实圆心横坐标。"""
+        raw_centers = getattr(scene_result, "covenant_centers_u", ())
+        centers_tuple: tuple[float, ...] = ()
+        if isinstance(raw_centers, (list, tuple)) and len(raw_centers) > 0:
+            centers_tuple = tuple(_clamp01(float(u)) for u in raw_centers[:9])
+
+        detected_cov = getattr(scene_result, "covenant_count", None)
+        if centers_tuple:
+            self._covenant_centers_u = centers_tuple
+            self._apply_covenant_count(len(centers_tuple))
+        elif isinstance(detected_cov, int) and detected_cov >= 0:
+            if detected_cov == 0 or detected_cov != len(self._covenant_centers_u):
+                self._covenant_centers_u = ()
+            self._apply_covenant_count(detected_cov)
+
+        self._covenant_overflow = bool(
+            getattr(scene_result, "covenant_overflow", False)
+        )
+
     def _sync_scene(self, scene_result: SceneDetectionResult | None) -> None:
         if scene_result is None:
             return
@@ -1275,11 +1371,9 @@ class ControlDispatcher:
             ):
                 if getattr(scene_result, "has_teammates", False):
                     self._has_teammates = True
-                detected_cov = getattr(scene_result, "covenant_count", None)
-                if isinstance(detected_cov, int) and detected_cov >= 0:
-                    self._apply_covenant_count(detected_cov)
-                self._covenant_overflow = bool(
-                    getattr(scene_result, "covenant_overflow", False)
+                self._sync_covenants(scene_result)
+                self.set_board_mirrored(
+                    bool(getattr(scene_result, "board_mirrored", False))
                 )
                 if now >= self._shop_override_until:
                     self._shop_open = bool(scene_result.shop_open)
@@ -1304,11 +1398,9 @@ class ControlDispatcher:
             ):
                 if getattr(scene_result, "has_teammates", False):
                     self._has_teammates = True
-                detected_cov = getattr(scene_result, "covenant_count", None)
-                if isinstance(detected_cov, int) and detected_cov >= 0:
-                    self._apply_covenant_count(detected_cov)
-                self._covenant_overflow = bool(
-                    getattr(scene_result, "covenant_overflow", False)
+                self._sync_covenants(scene_result)
+                self.set_board_mirrored(
+                    bool(getattr(scene_result, "board_mirrored", False))
                 )
                 if now >= self._unit_override_until:
                     self._unit_selected = bool(getattr(scene_result, "unit_selected", False))
@@ -1345,12 +1437,10 @@ class ControlDispatcher:
         if getattr(scene_result, "has_teammates", False):
             self._has_teammates = True
 
-        detected_cov = getattr(scene_result, "covenant_count", None)
         if scene_result.scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT):
-            if isinstance(detected_cov, int) and detected_cov >= 0:
-                self._apply_covenant_count(detected_cov)
-            self._covenant_overflow = bool(
-                getattr(scene_result, "covenant_overflow", False)
+            self._sync_covenants(scene_result)
+            self.set_board_mirrored(
+                bool(getattr(scene_result, "board_mirrored", False))
             )
 
         if now >= self._shop_override_until:
@@ -1432,7 +1522,10 @@ class ControlDispatcher:
             self._last_emote_false_scene = None
             self._last_emote_false_ts = -1e9
             self._covenant_overflow = False
+            self._covenant_centers_u = ()
             self._info_overlay = None
+        if target_scene == GameScene.UNKNOWN_FREE_CURSOR:
+            self.set_board_mirrored(False)
         if target_scene != GameScene.BATTLE_PREP:
             self._shop_override_until = 0.0
             self._unit_detail_from_shop = False
@@ -3112,6 +3205,16 @@ class ControlDispatcher:
     def _build_focus_label(self) -> str:
         if self._free_cursor_active or self._focus_zone == FocusZone.FREE_CURSOR:
             return "自由鼠标"
+        label = self._build_base_focus_label()
+        if (
+            self._board_mirrored
+            and label
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+        ):
+            return f"{label} · 镜像战场"
+        return label
+
+    def _build_base_focus_label(self) -> str:
         if (
             self._unit_selected
             and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
@@ -3454,4 +3557,5 @@ class ControlDispatcher:
             view_state=self._view_state.value,
             shop_open=self._shop_open,
             left_stick_mode=getattr(self.keymap, "left_stick_mode", "dpad"),
+            board_mirrored=self._board_mirrored,
         )

@@ -3110,3 +3110,298 @@ class TestV032CovenantOverflowAndEmoteLock:
             ("click", combat_av_xy[0], combat_av_xy[1], "left"),
             ("click", combat_av_xy[0], combat_av_xy[1], "left"),
         ]
+
+
+class TestV033BoardMirroredAndDynamicCovenantPhase:
+    """v0.3.3 专项验证：Boss 战右侧镜像 3D 棋盘/装备台动态切换与 >7 盟约任意水平滚动相位精确吸附。"""
+
+    def test_board_mirrored_three_views_bench_shop_unchanged_and_exit_reset(self) -> None:
+        """需求 1：board_mirrored 三视图动态切换、不镜像整备与商店、手动锁层同步、出局复位及旧接口兜底。"""
+        dispatcher, hid, _, keymap, layout, vp = _make_env()
+
+        normal_board = PerspectiveBoardMapper(
+            layout.resolve_board_quad(LayoutViewState.NORMAL, mirrored=False)
+        )
+        mirrored_board = PerspectiveBoardMapper(
+            layout.resolve_board_quad(LayoutViewState.NORMAL, mirrored=True)
+        )
+        mirrored_board_shop = PerspectiveBoardMapper(
+            layout.resolve_board_quad(LayoutViewState.SHOP_OPEN, mirrored=True)
+        )
+        mirrored_board_unit = PerspectiveBoardMapper(
+            layout.resolve_board_quad(LayoutViewState.UNIT_SELECTED, mirrored=True)
+        )
+        normal_equip = LinearZoneMapper(
+            layout.resolve_equip_zone(LayoutViewState.NORMAL, mirrored=False)
+        )
+        mirrored_equip = LinearZoneMapper(
+            layout.resolve_equip_zone(LayoutViewState.NORMAL, mirrored=True)
+        )
+        mirrored_equip_shop = LinearZoneMapper(
+            layout.resolve_equip_zone(LayoutViewState.SHOP_OPEN, mirrored=True)
+        )
+        normal_bench = LinearZoneMapper(layout.resolve_bench_zone(LayoutViewState.NORMAL))
+        normal_shop_open = LinearZoneMapper(
+            layout.resolve_shop_zone(LayoutViewState.SHOP_OPEN, slot_count=6)
+        )
+
+        # 1. 非镜像态：focus_label 保持原字符串不变，棋盘与装备台使用正向坐标
+        prep_norm = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=False, board_mirrored=False
+        )
+        snap_norm_board = dispatcher.process_tick(
+            vp, prep_norm, [ButtonTap(GamepadButton.RB)]  # BENCH -> BOARD
+        )
+        assert dispatcher.board_mirrored is False
+        assert snap_norm_board.board_mirrored is False
+        assert "镜像战场" not in snap_norm_board.focus_label
+        center_r, center_c = normal_board.rows // 2, normal_board.cols // 2
+        assert snap_norm_board.cursor_norm == pytest.approx(
+            normal_board.cell_center(center_r, center_c)
+        )
+
+        # 2. 切换至 Boss 镜像态（NORMAL 视图）：棋盘与装备台立即切到 mirrored=True，focus_label 追加「 · 镜像战场」
+        prep_mir = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=False, board_mirrored=True
+        )
+        snap_mir_board = dispatcher.process_tick(vp, prep_mir, [])
+        assert dispatcher.board_mirrored is True
+        assert snap_mir_board.board_mirrored is True
+        assert snap_mir_board.focus_label.endswith(" · 镜像战场")
+        assert snap_mir_board.cursor_norm == pytest.approx(
+            mirrored_board.cell_center(center_r, center_c)
+        )
+        assert snap_mir_board.cursor_norm != pytest.approx(
+            normal_board.cell_center(center_r, center_c), abs=1e-2
+        )
+
+        # 切到装备栏 EQUIPMENT：使用镜像装备台坐标
+        snap_mir_eq = dispatcher.process_tick(
+            vp, prep_mir, [ButtonTap(GamepadButton.RB)]  # BOARD -> EQUIPMENT
+        )
+        assert snap_mir_eq.focus_zone == FocusZone.EQUIPMENT
+        assert snap_mir_eq.cursor_norm == pytest.approx(mirrored_equip.slot_center(0))
+        assert snap_mir_eq.cursor_norm != pytest.approx(
+            normal_equip.slot_center(0), abs=1e-2
+        )
+
+        # 切到整备区 BENCH（NORMAL 视图）：10 槽整备台严格不镜像
+        snap_mir_bench = dispatcher.process_tick(
+            vp,
+            prep_mir,
+            [ButtonTap(GamepadButton.RB), ButtonTap(GamepadButton.RB)],  # EQ -> SHOP -> BENCH
+        )
+        # 注意 SHOP 会自动展开商店，先把商店收起切回 NORMAL 视图再测 BENCH
+        dispatcher.process_tick(
+            vp, prep_mir, [ChordTriggered(GamepadButton.LT, GamepadButton.LB)]
+        )
+        snap_mir_bench = dispatcher.process_tick(vp, prep_mir, [])
+        assert snap_mir_bench.focus_zone == FocusZone.BENCH
+        assert snap_mir_bench.view_state == LayoutViewState.NORMAL.value
+        assert snap_mir_bench.cursor_norm == pytest.approx(normal_bench.slot_center(0))
+
+        # 3. SHOP_OPEN 视图下：商店 6 槽不镜像（4->6 槽顺移咬住原卡落在索引 2），而装备台与棋盘均使用 SHOP_OPEN + mirrored=True 投影
+        prep_mir_shop6 = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=True,
+            shop_slot_count=6,
+            board_mirrored=True,
+        )
+        dispatcher_s, _, _, _, _, _ = _make_env(auto_toggle_shop=False)
+        snap_s_shop = dispatcher_s.process_tick(vp, prep_mir_shop6, [])
+        assert snap_s_shop.focus_zone == FocusZone.SHOP
+        assert snap_s_shop.view_state == LayoutViewState.SHOP_OPEN.value
+        assert snap_s_shop.focus_label == "商店 [3/6] · 镜像战场"
+        assert snap_s_shop.cursor_norm == pytest.approx(normal_shop_open.slot_center(2))
+
+        snap_s_eq = dispatcher_s.process_tick(
+            vp, prep_mir_shop6, [ButtonTap(GamepadButton.LB)]  # SHOP -> EQUIPMENT
+        )
+        assert snap_s_eq.focus_zone == FocusZone.EQUIPMENT
+        assert snap_s_eq.cursor_norm == pytest.approx(mirrored_equip_shop.slot_center(0))
+
+        snap_s_board = dispatcher_s.process_tick(
+            vp, prep_mir_shop6, [ButtonTap(GamepadButton.LB)]  # EQUIPMENT -> BOARD
+        )
+        assert snap_s_board.focus_zone == FocusZone.BOARD
+        assert snap_s_board.cursor_norm == pytest.approx(
+            mirrored_board_shop.cell_center(center_r, center_c)
+        )
+
+        # 4. UNIT_SELECTED 视图 + 作战期 BATTLE_COMBAT 下同样应用 mirrored=True 棋盘映射
+        combat_mir_unit = SceneDetectionResult(
+            GameScene.BATTLE_COMBAT,
+            0.95,
+            unit_selected=True,
+            board_mirrored=True,
+        )
+        dispatcher_s.process_tick(vp, combat_mir_unit, [])
+        assert dispatcher_s.view_state == LayoutViewState.UNIT_SELECTED
+        assert dispatcher_s.board_mirrored is True
+        assert dispatcher_s._board_mapper.cell_center(center_r, center_c) == pytest.approx(
+            mirrored_board_unit.cell_center(center_r, center_c)
+        )
+
+        # 5. 手动锁层 BATTLE_PREP 实时同步 board_mirrored 切换
+        dispatcher_m, _, _, _, _, _ = _make_env()
+        dispatcher_m.process_tick(vp, prep_norm, [ButtonTap(GamepadButton.BACK)])
+        assert dispatcher_m.scene_locked_manual is True
+        assert dispatcher_m.board_mirrored is False
+        dispatcher_m.process_tick(vp, prep_mir, [])
+        assert dispatcher_m.board_mirrored is True
+        dispatcher_m.process_tick(vp, prep_norm, [])
+        assert dispatcher_m.board_mirrored is False
+
+        # 6. 出局切至 UNKNOWN_FREE_CURSOR 时 board_mirrored 自动复位为 False
+        dispatcher.process_tick(vp, prep_mir, [])
+        assert dispatcher.board_mirrored is True
+        unknown = SceneDetectionResult(GameScene.UNKNOWN_FREE_CURSOR, 0.0)
+        snap_exit = dispatcher.process_tick(vp, unknown, [])
+        assert dispatcher.board_mirrored is False
+        assert snap_exit.board_mirrored is False
+
+        # 7. 向后兼容：旧版不含 mirrored 关键字参数的自定义 LayoutProfile 安全回退不崩
+        class LegacyLayoutProxy:
+            def __init__(self, inner: LayoutProfile) -> None:
+                self._inner = inner
+                self.shop_zone = inner.shop_zone
+                self.bench_zone = inner.bench_zone
+                self.equip_zone = inner.equip_zone
+                self.choice_zone = inner.choice_zone
+                self.covenant_zone = inner.covenant_zone
+                self.board_quad = inner.board_quad
+                self.buttons = inner.buttons
+
+            def resolve_shop_zone(
+                self, vs: LayoutViewState, *, slot_count: int | None = None
+            ) -> LinearZone:
+                return self._inner.resolve_shop_zone(vs, slot_count=slot_count)
+
+            def resolve_bench_zone(self, vs: LayoutViewState) -> LinearZone:
+                return self._inner.resolve_bench_zone(vs)
+
+            def resolve_equip_zone(self, vs: LayoutViewState) -> LinearZone:
+                return self._inner.resolve_equip_zone(vs)
+
+            def resolve_board_quad(self, vs: LayoutViewState):
+                return self._inner.resolve_board_quad(vs)
+
+        legacy_disp = ControlDispatcher(keymap, LegacyLayoutProxy(layout), hid)  # type: ignore[arg-type]
+        legacy_disp.set_board_mirrored(True)
+        assert legacy_disp.board_mirrored is True
+        assert legacy_disp.process_tick(vp, prep_mir, []).board_mirrored is True
+
+    def test_dynamic_covenant_centers_u_arbitrary_phase_focus_hold_and_fallback(self) -> None:
+        """需求 2：covenant_centers_u 任意非对称相位精确吸附、数量波动焦点稳留盟约与空元组回退公式。"""
+        dispatcher, hid, _, _, layout, vp = _make_env()
+        cov_v = layout.covenant_zone.v
+
+        # 1. 溢出态 7 枚任意非对称滚动相位（既非居中也非 0.2961 静态左对齐）
+        phase7 = (0.2890, 0.3515, 0.4140, 0.4765, 0.5390, 0.6015, 0.6640)
+        prep_phase7 = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=False,
+            covenant_count=7,
+            covenant_overflow=True,
+            covenant_centers_u=phase7,
+        )
+        # 切到棋盘顶行并上跨进 TOP_INFO
+        dispatcher.process_tick(vp, prep_phase7, [ButtonTap(GamepadButton.RB)])
+        assert dispatcher.covenant_count == 7
+        assert dispatcher.covenant_centers_u == pytest.approx(phase7)
+        snap_top = dispatcher.process_tick(
+            vp, prep_phase7, [ButtonTap(GamepadButton.DPAD_UP)] * 6
+        )
+        assert snap_top.focus_zone == FocusZone.TOP_INFO
+
+        # 退到最左「查看本局信息」再依次右移 7 格，逐一核对精确圆心吸附与 A 键点击坐标
+        for _ in range(12):
+            snap_top = dispatcher.process_tick(
+                vp, prep_phase7, [ButtonTap(GamepadButton.DPAD_LEFT)]
+            )
+            if "查看本局信息" in snap_top.focus_label:
+                break
+
+        for idx, expected_u in enumerate(phase7):
+            snap_cov = dispatcher.process_tick(
+                vp, prep_phase7, [ButtonTap(GamepadButton.DPAD_RIGHT)]
+            )
+            assert snap_cov.cursor_norm == pytest.approx((expected_u, cov_v))
+            assert f"羁绊 [{idx + 1}/7+]" in snap_cov.focus_label
+
+        # 此时正好停在第 7 枚盟约（_top_info_idx == 7），按 A 点击必须精准命中第 7 枚实测相位圆心
+        hid.clear()
+        dispatcher.process_tick(vp, prep_phase7, [ButtonTap(GamepadButton.A)])
+        expected_xy6 = vp.norm_to_screen(phase7[6], cov_v)
+        assert hid.calls == [("click", expected_xy6[0], expected_xy6[1], "left")]
+
+        # 2. 滚动导致可见完整盟约数由 7 -> 6（新非对称相位）：原焦点在第 7 枚盟约，必须稳留在第 6 枚盟约而不误跳右放大镜！
+        phase6 = (0.3203, 0.3828, 0.4453, 0.5078, 0.5703, 0.6328)
+        prep_phase6 = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=False,
+            covenant_count=6,
+            covenant_overflow=True,
+            covenant_centers_u=phase6,
+        )
+        snap_fluct = dispatcher.process_tick(vp, prep_phase6, [])
+        assert dispatcher.covenant_count == 6
+        assert dispatcher.covenant_centers_u == pytest.approx(phase6)
+        assert "查看本轮出怪" not in snap_fluct.focus_label
+        assert "羁绊 [6/7+]" in snap_fluct.focus_label
+        assert snap_fluct.cursor_norm == pytest.approx((phase6[5], cov_v))
+
+        # 若玩家明确右移到右放大镜「查看本轮出怪」，盟约数从 6 -> 7 变化时焦点应继续粘在右放大镜
+        snap_rm = dispatcher.process_tick(
+            vp, prep_phase6, [ButtonTap(GamepadButton.DPAD_RIGHT)]
+        )
+        assert "查看本轮出怪" in snap_rm.focus_label
+        snap_rm_after = dispatcher.process_tick(vp, prep_phase7, [])
+        assert "查看本轮出怪" in snap_rm_after.focus_label
+
+        # 3. 手动锁层 BATTLE_PREP 同样实时同步动态相位坐标
+        dispatcher.process_tick(vp, prep_phase7, [ButtonTap(GamepadButton.BACK)])
+        assert dispatcher.scene_locked_manual is True
+        dispatcher.process_tick(vp, prep_phase6, [])
+        assert dispatcher.covenant_centers_u == pytest.approx(phase6)
+        assert dispatcher.covenant_count == 6
+
+        # 4. 空元组回退兼容：Mock 传入不同 covenant_count 且 covenant_centers_u=() 时清空相位坐标并回退 cov_zone 公式
+        prep_legacy4 = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=False,
+            covenant_count=4,
+            covenant_overflow=False,
+            covenant_centers_u=(),
+        )
+        dispatcher.process_tick(vp, prep_legacy4, [])
+        assert dispatcher.covenant_centers_u == ()
+        assert dispatcher.covenant_count == 4
+        # 切到第 1 枚羁绊核对已回退至 cov_zone 居中公式
+        dispatcher.process_tick(vp, prep_legacy4, [ButtonTap(GamepadButton.BACK)] * 4)  # 回到自动
+        dispatcher.process_tick(vp, prep_legacy4, [ButtonTap(GamepadButton.RB)])
+        dispatcher.process_tick(vp, prep_legacy4, [ButtonTap(GamepadButton.DPAD_UP)] * 6)
+        for _ in range(10):
+            s_left = dispatcher.process_tick(
+                vp, prep_legacy4, [ButtonTap(GamepadButton.DPAD_LEFT)]
+            )
+            if "查看本局信息" in s_left.focus_label:
+                break
+        s_cov0_formula = dispatcher.process_tick(
+            vp, prep_legacy4, [ButtonTap(GamepadButton.DPAD_RIGHT)]
+        )
+        assert s_cov0_formula.cursor_norm == pytest.approx(
+            layout.covenant_zone.slot_center(0, count=4, overflow=False)
+        )
+
+        # 5. set_covenant_centers_u / set_covenant_count 手动接口联动
+        dispatcher.set_covenant_centers_u([0.41, 0.59])
+        assert dispatcher.covenant_count == 2
+        assert dispatcher.covenant_centers_u == pytest.approx((0.41, 0.59))
+        dispatcher.set_covenant_count(3)
+        assert dispatcher.covenant_count == 3
+        assert dispatcher.covenant_centers_u == ()
