@@ -258,6 +258,7 @@ class ControlDispatcher:
         self._top_info_idx: int = 0
         self._has_teammates: bool = False
         self._teammate_focus_idx: int = 0
+        self._teammate_panel_open: bool = False
         self._emote_panel_open: bool = False
         self._emote_idx: int = 0
         self._emote_override_until: float = 0.0
@@ -338,6 +339,10 @@ class ControlDispatcher:
     @property
     def has_teammates(self) -> bool:
         return self._has_teammates
+
+    @property
+    def teammate_panel_open(self) -> bool:
+        return self._teammate_panel_open
 
     @property
     def shop_pending_buy_index(self) -> int | None:
@@ -596,9 +601,24 @@ class ControlDispatcher:
         return True
 
     def _click_safe_blank(self, viewport: ViewportRect) -> None:
-        """左键点击右侧策略头像正下方安全空白区以退出角色详情/羁绊浮窗（避免误买商店卡）。"""
+        """左键点击左上角退出按钮右侧延迟区安全空白以关闭队友面板/角色详情/羁绊浮窗（避免误触右侧策略与商店）。"""
         if not self._click_button("safe_blank", viewport):
-            self._click_norm(0.955, 0.445, viewport, anchor="right_edge", button="left")
+            self._click_norm(0.1172, 0.0903, viewport, anchor="left_edge", button="left")
+        self._teammate_panel_open = False
+
+    def _close_teammate_panel_if_open(self, viewport: ViewportRect) -> bool:
+        """若联机队友抽屉处于开启态或焦点位于队友栏，优先点击左上延迟区关闭并返回棋盘。"""
+        if not self._teammate_panel_open and self._focus_zone != FocusZone.TEAMMATES:
+            return False
+        was_open = self._teammate_panel_open
+        self._click_safe_blank(viewport)
+        if self._focus_zone == FocusZone.TEAMMATES:
+            if self._current_scene == GameScene.BATTLE_PREP:
+                self._enter_battle_prep_zone(FocusZone.BOARD, viewport)
+            else:
+                self._focus_zone = FocusZone.BOARD
+        self._set_toast("已关闭联机队友面板" if was_open else "已返回棋盘")
+        return True
 
     @staticmethod
     def _rect_poly(
@@ -828,22 +848,34 @@ class ControlDispatcher:
             (cu - hw, cv + hh),
         ]
 
+    def _strategy_button_keys(self) -> tuple[str, str]:
+        """按当前场景阶段返回本局策略头像与查看按钮键名（休整期右上中 / 作战期右下费用栏上方）。"""
+        if self._current_scene == GameScene.BATTLE_COMBAT:
+            return ("strategy_avatar_combat", "strategy_inspect_combat")
+        return ("strategy_avatar", "strategy_inspect")
+
     def _strategy_avatar_geometry(
         self,
     ) -> tuple[tuple[float, float], str, list[tuple[float, float]]]:
-        """返回右侧策略头像的固定中心坐标、锚点与选框多边形（绝不受 shop_open 缩放影响）。"""
-        pt = self.layout.buttons.get("strategy_avatar")
+        """返回右侧策略头像的固定中心坐标、锚点与选框多边形（休整/作战双态自适应，不受 shop_open 缩放影响）。"""
+        avatar_key, _ = self._strategy_button_keys()
+        pt = self.layout.buttons.get(avatar_key)
         if pt is not None:
             u, v, anchor = pt.u, pt.v, pt.anchor
+        elif avatar_key == "strategy_avatar_combat":
+            u, v, anchor = 0.9602, 0.7486, "right_edge"
         else:
             u, v, anchor = 0.9605, 0.3243, "right_edge"
         return ((u, v), anchor, self._rect_poly(u, v, 0.0656, 0.1167))
 
     def _strategy_inspect_point(self) -> tuple[float, float, str]:
-        """返回策略头像左侧「🔍 查看」按钮的固定坐标与锚点。"""
-        pt = self.layout.buttons.get("strategy_inspect")
+        """返回策略头像左侧「🔍 查看」按钮的固定坐标与锚点（休整/作战双态自适应）。"""
+        _, inspect_key = self._strategy_button_keys()
+        pt = self.layout.buttons.get(inspect_key)
         if pt is not None:
             return (pt.u, pt.v, pt.anchor)
+        if inspect_key == "strategy_inspect_combat":
+            return (0.9051, 0.7493, "right_edge")
         return (0.9047, 0.3236, "right_edge")
 
     def _confirm_dialog_item(
@@ -1381,6 +1413,7 @@ class ControlDispatcher:
         confirm_has_dont_ask: bool | None = None,
     ) -> None:
         self._clear_shop_pending_buy()
+        self._teammate_panel_open = False
         if self._current_scene == GameScene.MODAL_CHOICE and target_scene != GameScene.MODAL_CHOICE:
             self._choice_eye_hidden = False
             self._selected_choice_idx = None
@@ -1893,6 +1926,7 @@ class ControlDispatcher:
             self.deploy_fsm.cancel(viewport)
         self._clear_shop_pending_buy()
         self._info_overlay = None
+        self._teammate_panel_open = False
         self._unit_selected = False
         self._unit_detail_from_shop = False
         self._unit_override_until = 0.0
@@ -1906,7 +1940,7 @@ class ControlDispatcher:
         self._set_toast("准备就绪 · 开始战斗")
 
     def _handle_chord(self, event: ChordTriggered, viewport: ViewportRect) -> None:
-        # RT + A：商店极速连买 / 三选一双击拿牌 / 回合确认直接确认 / 策略一键点击 / 自由光标双击
+        # RT + A：商店查详情 / 三选一双击拿牌 / 回合确认直接确认 / 策略一键点击 / 自由光标双击
         if event.modifier == GamepadButton.RT and event.button == GamepadButton.A:
             self._handle_rt_a(viewport)
             return
@@ -1918,6 +1952,22 @@ class ControlDispatcher:
                 self._trigger_battle_ready(viewport)
             elif self._current_scene == GameScene.MODAL_CONFIRM:
                 self._click_confirm_item(1, viewport)
+            return
+
+        # LT + RT（无序匹配，兼容 LT->RT、RT->LT 与同帧双按）：局内一键点击右侧本局策略头像
+        if {event.modifier, event.button} == {GamepadButton.LT, GamepadButton.RT}:
+            if (
+                self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+                and self.deploy_fsm.state
+                not in (
+                    DeployState.AIMING_DIRECTION,
+                    DeployState.HOLDING_UNIT,
+                    DeployState.HOLDING_EQUIP,
+                )
+            ):
+                avatar_key, _ = self._strategy_button_keys()
+                self.deploy_fsm.click_strategy_in_place(viewport, button_key=avatar_key)
+                self._set_toast("已快捷释放右侧本局策略 (LT+RT)")
             return
 
         # LT 信息速查与联机组合键（局内休整期与作战期全程可用）
@@ -1944,7 +1994,8 @@ class ControlDispatcher:
             and self._focus_zone == FocusZone.STRATEGY
             and self.deploy_fsm.state == DeployState.IDLE
         ):
-            self.deploy_fsm.click_strategy_in_place(viewport)
+            avatar_key, _ = self._strategy_button_keys()
+            self.deploy_fsm.click_strategy_in_place(viewport, button_key=avatar_key)
             self._set_toast("已直接使用右侧策略")
             return
 
@@ -2056,6 +2107,7 @@ class ControlDispatcher:
         self._teammate_focus_idx = idx - 1
         if not self._click_button(f"teammate_{idx}", viewport):
             self.hid.tap_key(str(idx))
+        self._teammate_panel_open = True
         self._emit_rumble(0.18, 0.25, 35)
         self._set_toast(f"切换队友 {idx} 号位视角")
 
@@ -2145,8 +2197,14 @@ class ControlDispatcher:
             self.hid.click(sx, sy, button="left")
             self._last_cmd_cursor_px = (sx, sy)
         elif button == GamepadButton.B:
-            if not self._close_info_overlay_if_open(viewport):
-                self._trigger_action("back", "back", "esc", viewport)
+            if self._close_info_overlay_if_open(viewport):
+                return
+            if (
+                self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+                and self._close_teammate_panel_if_open(viewport)
+            ):
+                return
+            self._trigger_action("back", "back", "esc", viewport)
         elif button == GamepadButton.START:
             if self._current_scene == GameScene.BATTLE_PREP and self.keymap.ready_hold_ms == 0:
                 self._trigger_battle_ready(viewport)
@@ -2529,7 +2587,8 @@ class ControlDispatcher:
                 self._teammate_cycle_pos = self._teammate_focus_idx + 1
                 self._switch_teammate_view(self._teammate_focus_idx + 1, viewport)
             elif self._focus_zone == FocusZone.STRATEGY:
-                self.deploy_fsm.click_strategy_in_place(viewport)
+                avatar_key, _ = self._strategy_button_keys()
+                self.deploy_fsm.click_strategy_in_place(viewport, button_key=avatar_key)
                 self._set_toast("已直接使用右侧策略")
             else:
                 u, v = self._board_mapper.cell_center(self._board_row, self._board_col)
@@ -2545,8 +2604,7 @@ class ControlDispatcher:
         elif button == GamepadButton.B:
             if self._close_info_overlay_if_open(viewport):
                 return
-            if self._focus_zone == FocusZone.TEAMMATES:
-                self._focus_zone = FocusZone.BOARD
+            if self._close_teammate_panel_if_open(viewport):
                 return
             self._click_safe_blank(viewport)
             if self._unit_selected:
@@ -2623,6 +2681,8 @@ class ControlDispatcher:
         elif button == GamepadButton.B:
             if self._close_info_overlay_if_open(viewport):
                 return
+            if self._close_teammate_panel_if_open(viewport):
+                return
             if self._focus_zone == FocusZone.SHOP and self._shop_pending_buy_idx is not None:
                 self._clear_shop_pending_buy()
                 self._set_toast("已取消商店购买预选")
@@ -2630,8 +2690,6 @@ class ControlDispatcher:
             if self._focus_zone == FocusZone.SHOP and self._shop_open:
                 self._set_shop_open(False, viewport, announce=True)
                 self._focus_zone = FocusZone.BENCH
-            elif self._focus_zone == FocusZone.TEAMMATES:
-                self._enter_battle_prep_zone(FocusZone.BOARD, viewport)
             else:
                 self._click_safe_blank(viewport)
         elif button == GamepadButton.X:
@@ -2811,7 +2869,7 @@ class ControlDispatcher:
                 cu, cv = self._board_mapper.cell_center(self._board_row, self._board_col)
                 self._enter_battle_prep_zone(FocusZone.EQUIPMENT, viewport)
                 self._equip_idx = self._equip_mapper.nearest_slot(cu, cv)
-            elif exit_dir == "left" and self._has_teammates and not is_holding_strategy:
+            elif exit_dir == "left" and self._has_teammates and not is_holding and not is_holding_strategy:
                 _, cv = self._board_mapper.cell_center(self._board_row, self._board_col)
                 self._teammate_focus_idx = self._nearest_teammate_idx(cv)
                 self._selected_teammate = self._teammate_focus_idx + 1
@@ -2918,7 +2976,8 @@ class ControlDispatcher:
             return
 
         if self._focus_zone == FocusZone.STRATEGY:
-            self.deploy_fsm.pick_strategy(viewport)
+            avatar_key, _ = self._strategy_button_keys()
+            self.deploy_fsm.pick_strategy(viewport, button_key=avatar_key)
             self._set_toast("已锁定右侧策略（再按 A 直接使用，或移至干员/商店按 A 拖拽）")
             return
 
@@ -2947,15 +3006,18 @@ class ControlDispatcher:
         if fsm_state == DeployState.HOLDING_STRATEGY:
             if button != GamepadButton.A:
                 return
+            avatar_key, _ = self._strategy_button_keys()
             if self._focus_zone == FocusZone.STRATEGY:
-                self.deploy_fsm.click_strategy_in_place(viewport)
+                self.deploy_fsm.click_strategy_in_place(viewport, button_key=avatar_key)
                 self._set_toast("已直接使用右侧策略")
             elif self._focus_zone == FocusZone.BOARD:
                 if self._shop_open and getattr(self.keymap, "auto_toggle_shop", True):
                     self._set_shop_open(False, viewport, announce=False)
                     self._wait_ui_transition(220)
                 pos = self._board_mapper.cell_center(self._board_row, self._board_col)
-                self.deploy_fsm.use_strategy_on_target(pos, viewport)
+                self.deploy_fsm.use_strategy_on_target(
+                    pos, viewport, button_key=avatar_key
+                )
                 self._set_toast(
                     f"已对场上 [{self._board_row + 1},{self._board_col + 1}] 干员释放策略"
                 )
@@ -2964,14 +3026,18 @@ class ControlDispatcher:
                     self._set_shop_open(False, viewport, announce=False)
                     self._wait_ui_transition(220)
                 pos = self._bench_mapper.slot_center(self._bench_idx)
-                self.deploy_fsm.use_strategy_on_target(pos, viewport)
+                self.deploy_fsm.use_strategy_on_target(
+                    pos, viewport, button_key=avatar_key
+                )
                 self._set_toast(f"已对整备区 [{self._bench_idx + 1}] 干员释放策略")
             elif self._focus_zone == FocusZone.SHOP:
                 if not self._shop_open:
                     self._set_shop_open(True, viewport, announce=False)
                     self._wait_ui_transition(220)
                 pos = self._shop_mapper.slot_center(self._shop_idx)
-                self.deploy_fsm.use_strategy_on_target(pos, viewport)
+                self.deploy_fsm.use_strategy_on_target(
+                    pos, viewport, button_key=avatar_key
+                )
                 self._set_toast(
                     f"已对商店 [{self._shop_idx + 1}/{self._shop_mapper.count}] 释放策略"
                 )
@@ -2982,19 +3048,7 @@ class ControlDispatcher:
                 self._set_toast("已出售目标")
             return
 
-        if button == GamepadButton.Y:
-            if self.deploy_fsm.gift_holding(self._selected_teammate, viewport):
-                self._set_toast(f"已赠予联机队友 {self._selected_teammate}")
-            return
-
         if button == GamepadButton.A:
-            if self._focus_zone == FocusZone.TEAMMATES:
-                mate_num = self._teammate_focus_idx + 1
-                if self.deploy_fsm.gift_holding(mate_num, viewport):
-                    self._selected_teammate = mate_num
-                    self._set_toast(f"已赠予联机队友 {mate_num}")
-                return
-
             if fsm_state == DeployState.HOLDING_UNIT:
                 if self._focus_zone == FocusZone.BENCH:
                     pos = self._bench_mapper.slot_center(self._bench_idx)
@@ -3263,33 +3317,25 @@ class ControlDispatcher:
                 and self.deploy_fsm.holding_source.board_cell
                 == (self._board_row, self._board_col)
             )
-            if self._focus_zone == FocusZone.TEAMMATES:
-                a_lbl = "赠予队友"
-            elif same_cell:
-                a_lbl = "原地转向"
-            else:
-                a_lbl = "部署/换位"
+            a_lbl = "原地转向" if same_cell else "部署/换位"
             return [
                 PromptItem(nav_key, "选目标格"),
                 PromptItem("LB/RB", "整备↔棋盘"),
                 PromptItem("A", a_lbl),
                 PromptItem("X", "出售"),
-                PromptItem("Y", f"赠队友{self._selected_teammate}"),
                 PromptItem("B", "取消"),
             ]
         if fsm_state == DeployState.HOLDING_EQUIP:
-            if self._focus_zone == FocusZone.EQUIPMENT:
-                eq_a_label = "移动/换位"
-            elif self._focus_zone == FocusZone.TEAMMATES:
-                eq_a_label = "赠予队友"
-            else:
-                eq_a_label = "穿戴装备"
+            eq_a_label = (
+                "移动/换位"
+                if self._focus_zone == FocusZone.EQUIPMENT
+                else "穿戴装备"
+            )
             return [
                 PromptItem(nav_key, "选目标槽/干员"),
                 PromptItem("LB/RB", "装备↔棋盘↔整备"),
                 PromptItem("A", eq_a_label),
                 PromptItem("X", "出售"),
-                PromptItem("Y", f"赠队友{self._selected_teammate}"),
                 PromptItem("B", "取消"),
             ]
         if fsm_state == DeployState.HOLDING_STRATEGY:

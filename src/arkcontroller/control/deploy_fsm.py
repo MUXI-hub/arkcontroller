@@ -1,4 +1,4 @@
-"""卫戍协议干员与装备抓取、换位、穿戴、两段式定朝向、出售与联机赠卡状态机。"""
+"""卫戍协议干员与装备抓取、换位、穿戴、两段式定朝向与快速出售状态机。"""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class DeployFSM:
     """卫戍协议两段式部署与拖拽交互状态机。
 
     采用“锁定源槽位 -> 选择目标格 -> 原子平滑拖拽”的设计，确保用户在挑选目标格时
-    可以随时按 B 安全取消，或按 X 出售、按 Y 赠送联机队友而不会误拖乱丢干员。
+    可以随时按 B 安全取消，或按 X 快速出售而不会误拖乱丢干员。
     """
 
     def __init__(
@@ -171,11 +171,15 @@ class DeployFSM:
         self._emit_rumble(0.20, 0.30, 40)
         return True
 
-    def _strategy_avatar_point(self) -> tuple[float, float, str]:
-        """返回右侧策略头像的固定 HUD 归一化坐标与锚点（绝不随 shop_open 缩放）。"""
-        pt = self._layout.buttons.get("strategy_avatar")
+    def _strategy_avatar_point(
+        self, button_key: str = "strategy_avatar"
+    ) -> tuple[float, float, str]:
+        """返回右侧策略头像的固定 HUD 归一化坐标与锚点（支持休整/作战双态，不受 shop_open 缩放影响）。"""
+        pt = self._layout.buttons.get(button_key)
         if pt is not None:
             return (float(pt.u), float(pt.v), str(pt.anchor))
+        if button_key == "strategy_avatar_combat":
+            return (0.9602, 0.7486, "right_edge")
         return (0.9605, 0.3243, "right_edge")
 
     def pick_strategy(
@@ -184,10 +188,11 @@ class DeployFSM:
         *,
         source_norm: tuple[float, float] | None = None,
         anchor: str | None = None,
+        button_key: str = "strategy_avatar",
     ) -> bool:
         """锁定右侧策略头像作为抓取源，等待原地再按 A 使用或拖拽至干员/商店释放。"""
         _ = viewport
-        default_u, default_v, default_anchor = self._strategy_avatar_point()
+        default_u, default_v, default_anchor = self._strategy_avatar_point(button_key)
         su, sv = (
             (float(source_norm[0]), float(source_norm[1]))
             if source_norm is not None
@@ -217,13 +222,14 @@ class DeployFSM:
         viewport: ViewportRect,
         *,
         target_anchor: str = "center_16_9",
+        button_key: str = "strategy_avatar",
     ) -> bool:
         """将右侧策略头像平滑拖拽至目标干员格、整备槽或商店卡槽完成释放。"""
         if self._state != DeployState.HOLDING_STRATEGY or self._holding_source is None:
             return False
 
         # 起点严格取固定右侧 HUD 策略头像坐标，绝不受 shop_open 镜头缩放影响
-        su, sv, s_anchor = self._strategy_avatar_point()
+        su, sv, s_anchor = self._strategy_avatar_point(button_key)
         start_xy = viewport.norm_to_screen(su, sv, anchor=s_anchor)
         end_xy = viewport.norm_to_screen(
             target_norm[0], target_norm[1], anchor=target_anchor
@@ -234,9 +240,17 @@ class DeployFSM:
         self.reset()
         return True
 
-    def click_strategy_in_place(self, viewport: ViewportRect) -> bool:
-        """原地左键直接点击右侧策略头像使用策略（兼容空闲态 RT+A 与抓取态二次按 A）。"""
-        su, sv, s_anchor = self._strategy_avatar_point()
+    def click_strategy_in_place(
+        self,
+        viewport: ViewportRect,
+        *,
+        button_key: str = "strategy_avatar",
+        point: tuple[float, float, str] | None = None,
+    ) -> bool:
+        """原地左键直接点击右侧策略头像使用策略（兼容休整/作战双态、空闲态 RT+A、LT+RT 与抓取态二次按 A）。"""
+        su, sv, s_anchor = (
+            point if point is not None else self._strategy_avatar_point(button_key)
+        )
         sx, sy = viewport.norm_to_screen(su, sv, anchor=s_anchor)
         self._hid.click(sx, sy, button="left")
 
@@ -434,26 +448,5 @@ class DeployFSM:
             self._hid.smooth_drag(start_xy, end_xy, release_at_end=True)
 
         self._emit_rumble(0.30, 0.40, 55)
-        self.reset()
-        return True
-
-    def gift_holding(self, teammate_index: int, viewport: ViewportRect) -> bool:
-        """联机赠卡：将当前抓取的干员或装备平滑拖拽至指定联机队友头像（1~4）。"""
-        if (
-            self._state not in (DeployState.HOLDING_UNIT, DeployState.HOLDING_EQUIP)
-            or self._holding_source is None
-        ):
-            return False
-
-        idx = max(1, min(4, int(teammate_index)))
-        mate_pt = self._layout.buttons.get(f"teammate_{idx}")
-        if mate_pt is None:
-            return False
-
-        start_xy = viewport.norm_to_screen(*self._holding_source.norm_pos)
-        end_xy = viewport.norm_to_screen(mate_pt.u, mate_pt.v, mate_pt.anchor)
-        self._hid.smooth_drag(start_xy, end_xy, release_at_end=True)
-
-        self._emit_rumble(0.30, 0.50, 60)
         self.reset()
         return True
