@@ -50,7 +50,7 @@ VISION_POLL_INTERVAL_MS = 200   # 5Hz 异步场景视觉识别读取
 
 # 主控台允许热切换并持久化的布尔型 KeymapConfig 开关
 DASHBOARD_KEYMAP_FLAGS: frozenset[str] = frozenset(
-    {"auto_toggle_shop", "vibration_enabled", "allow_retreat_chord"}
+    {"auto_toggle_shop", "vibration_enabled", "allow_retreat_chord", "hide_hud_from_capture"}
 )
 
 # 主控台「参数调校」允许写入的 KeymapConfig 手感字段
@@ -188,6 +188,8 @@ class ArkControllerApp(QObject):
         # 5. 初始化 PySide6 透明穿透 HUD 与系统托盘
         self.hud = HUDWindow()
         self.hud.set_overlay_enabled(not no_overlay)
+        self._hide_capture_fallback: bool = True
+        self.hud.set_hide_from_capture(self._hide_hud_from_capture())
 
         self.tray = ControllerTray(
             overlay_enabled=not no_overlay,
@@ -202,6 +204,13 @@ class ArkControllerApp(QObject):
         self.tray.reload_config_requested.connect(self.reload_configs)
         self.tray.quit_requested.connect(self.request_quit)
         self.tray.open_dashboard_requested.connect(self.show_dashboard)
+        self.tray.toggle_hide_capture_requested.connect(self._on_tray_hide_capture)
+        self.tray.sync_settings(
+            overlay_enabled=not no_overlay,
+            use_native_shortcuts=self.keymap.use_native_keyboard_shortcuts,
+            paused=False,
+            hide_hud_from_capture=self._hide_hud_from_capture(),
+        )
 
         # 6. 初始化罗德岛 PRTS 桌面主控台（普通窗口层级，关闭即隐藏至托盘）
         self.dashboard = PRTSDashboardWindow()
@@ -436,6 +445,7 @@ class ArkControllerApp(QObject):
             overlay_enabled=self.hud.overlay_enabled,
             paused=paused,
             refresh_tuning=refresh_tuning,
+            hide_hud_from_capture=self._hide_hud_from_capture(),
         )
 
     def show_dashboard(self) -> None:
@@ -452,12 +462,24 @@ class ArkControllerApp(QObject):
             "PRTS 主控台已隐藏至系统托盘，单击或双击托盘图标即可重新打开。",
         )
 
+    def _hide_hud_from_capture(self) -> bool:
+        """当前「截屏/共享时隐藏 HUD」设置（兼容尚未包含该字段的旧版 KeymapConfig）。"""
+        return bool(getattr(self.keymap, "hide_hud_from_capture", self._hide_capture_fallback))
+
+    def _on_tray_hide_capture(self, enabled: bool) -> None:
+        self.set_keymap_flag("hide_hud_from_capture", bool(enabled))
+
     def set_keymap_flag(self, name: str, enabled: bool) -> None:
-        """热切换并持久化主控台战术快捷矩阵中的布尔型 KeymapConfig 开关。"""
+        """热切换并持久化主控台快捷开关中的布尔型 KeymapConfig 开关。"""
         if name not in DASHBOARD_KEYMAP_FLAGS:
             logger.warning("忽略未知的主控台开关字段：%s", name)
             return
-        new_keymap = replace(self.keymap, **{name: bool(enabled)})
+        if hasattr(self.keymap, name):
+            new_keymap = replace(self.keymap, **{name: bool(enabled)})
+        else:
+            new_keymap = self.keymap
+            if name == "hide_hud_from_capture":
+                self._hide_capture_fallback = bool(enabled)
         self._apply_updated_configs(new_keymap, self.layout)
         try:
             self.config_loader.save_user_override({"keymap": {name: bool(enabled)}})
@@ -660,7 +682,9 @@ class ArkControllerApp(QObject):
             use_native_shortcuts=keymap.use_native_keyboard_shortcuts,
             paused=paused,
             left_stick_as_dpad=(keymap.left_stick_mode == "dpad"),
+            hide_hud_from_capture=self._hide_hud_from_capture(),
         )
+        self.hud.set_hide_from_capture(self._hide_hud_from_capture())
         dashboard = getattr(self, "dashboard", None)
         if dashboard is not None:
             self._sync_dashboard_settings(refresh_tuning=refresh_tuning)

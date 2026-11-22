@@ -50,6 +50,7 @@ SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 SWP_NOOWNERZORDER = 0x0200
+WDA_NONE = 0x00000000
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 # 纯白极简调色板（以白为主，琥珀微点缀）
@@ -491,7 +492,22 @@ def align_widget_to_physical_rect(
             pass
 
 
-def apply_win32_click_through(hwnd: int) -> bool:
+def apply_win32_display_affinity(hwnd: int, exclude_from_capture: bool = True) -> bool:
+    """设置窗口截屏/屏幕共享可见性：True 为 WDA_EXCLUDEFROMCAPTURE（隐藏），False 为 WDA_NONE（可见）。"""
+    if not hwnd or not _is_windows_qpa():
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
+        affinity = WDA_EXCLUDEFROMCAPTURE if exclude_from_capture else WDA_NONE
+        return bool(user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), affinity))
+    except Exception:
+        # 兼容不支持 WDA_EXCLUDEFROMCAPTURE 的旧版系统或受限测试环境
+        return False
+
+
+def apply_win32_click_through(hwnd: int, *, exclude_from_capture: bool = True) -> bool:
     """对给定 Win32 窗口句柄双重加固透明鼠标穿透与不抢焦点样式。"""
     if not hwnd or not _is_windows_qpa():
         return False
@@ -530,13 +546,7 @@ def apply_win32_click_through(hwnd: int) -> bool:
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
-        try:
-            user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
-            user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
-            user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), WDA_EXCLUDEFROMCAPTURE)
-        except Exception:
-            # 兼容不支持 WDA_EXCLUDEFROMCAPTURE 的旧版系统或受限测试环境
-            pass
+        apply_win32_display_affinity(hwnd, exclude_from_capture)
         return True
     except Exception:
         return False
@@ -572,6 +582,7 @@ class HUDWindow(QWidget):
         self._last_geom_rect: tuple[int, int, int, int] | None = None
         self._last_repaint_ts: float = 0.0
         self._win32_styled: bool = False
+        self._hide_from_capture: bool = True
 
         self.setWindowTitle("ArkController HUD")
         self.setWindowFlags(
@@ -607,6 +618,23 @@ class HUDWindow(QWidget):
             self._ensure_shown_and_aligned(self._viewport)
             self.update()
 
+    @property
+    def hide_from_capture(self) -> bool:
+        """是否在截屏 / 录屏 / 屏幕共享中隐藏 HUD（默认 True，防止 mss 采样自污染）。"""
+        return self._hide_from_capture
+
+    def set_hide_from_capture(self, enabled: bool) -> None:
+        """热切换截屏可见性：已创建窗口句柄时立即在 WDA_EXCLUDEFROMCAPTURE 与 WDA_NONE 间切换。"""
+        self._hide_from_capture = bool(enabled)
+        if not _is_windows_qpa() or not self.testAttribute(Qt.WidgetAttribute.WA_WState_Created):
+            return
+        try:
+            hwnd = int(self.winId())
+        except Exception:
+            hwnd = 0
+        if hwnd:
+            apply_win32_display_affinity(hwnd, self._hide_from_capture)
+
     def showEvent(self, event: QShowEvent) -> None:
         """窗口显示时通过 Win32 SetWindowLongW 双重加固鼠标穿透与不抢焦点属性。"""
         super().showEvent(event)
@@ -615,7 +643,9 @@ class HUDWindow(QWidget):
         except Exception:
             hwnd = 0
         if hwnd:
-            self._win32_styled = apply_win32_click_through(hwnd)
+            self._win32_styled = apply_win32_click_through(
+                hwnd, exclude_from_capture=self._hide_from_capture
+            )
         if self._viewport is not None:
             align_widget_to_physical_rect(
                 self,
@@ -1063,7 +1093,8 @@ class HUDWindow(QWidget):
         tag_w = _ICON_R * 2.0 + 8.0 + fm.horizontalAdvance(label) + 20.0
         total = r * 2.0 + 10.0 + tag_w
         cx = (w - total) / 2.0 + r
-        cy = max(92.0, h * 0.012 + 84.0)
+        # 位于顶部盟约图标与名称（y≈128）正下方，避免遮挡盟约及其视觉检测
+        cy = max(142.0, h * 0.012 + 134.0)
 
         painter.setPen(_pen(COLOR_EDGE, 1.0))
         painter.setBrush(QBrush(QColor(255, 255, 255, 236)))

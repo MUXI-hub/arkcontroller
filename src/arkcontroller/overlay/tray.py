@@ -124,6 +124,7 @@ class ControllerTray(QSystemTrayIcon):
     toggle_overlay_requested = Signal(bool)
     toggle_shortcuts_mode_requested = Signal(bool)
     toggle_left_stick_dpad_requested = Signal(bool)
+    toggle_hide_capture_requested = Signal(bool)
     open_calibration_requested = Signal()
     reload_config_requested = Signal()
     quit_requested = Signal()
@@ -192,6 +193,13 @@ class ControllerTray(QSystemTrayIcon):
         self._action_left_stick_dpad.triggered.connect(self.toggle_left_stick_dpad_requested.emit)
         self._menu.addAction(self._action_left_stick_dpad)
 
+        # 截屏 / 屏幕共享时隐藏 HUD
+        self._action_hide_capture = QAction("截屏/共享时隐藏 HUD（关闭后共享可见）", self._menu)
+        self._action_hide_capture.setCheckable(True)
+        self._action_hide_capture.setChecked(True)
+        self._action_hide_capture.triggered.connect(self._on_hide_capture_triggered)
+        self._menu.addAction(self._action_hide_capture)
+
         self._menu.addSeparator()
 
         # 可视化校准向导
@@ -229,6 +237,9 @@ class ControllerTray(QSystemTrayIcon):
             QSystemTrayIcon.ActivationReason.DoubleClick,
         ):
             self.open_dashboard_requested.emit()
+
+    def _on_hide_capture_triggered(self, _checked: bool = False) -> None:
+        self.toggle_hide_capture_requested.emit(self._action_hide_capture.isChecked())
 
     def update_status(
         self,
@@ -276,8 +287,14 @@ class ControllerTray(QSystemTrayIcon):
         use_native_shortcuts: bool,
         paused: bool,
         left_stick_as_dpad: bool | None = None,
+        hide_hud_from_capture: bool | None = None,
     ) -> None:
         """从主控状态反向同步托盘菜单勾选框状态（不触发回环信号）。"""
+        if hide_hud_from_capture is not None:
+            self._action_hide_capture.blockSignals(True)
+            self._action_hide_capture.setChecked(bool(hide_hud_from_capture))
+            self._action_hide_capture.blockSignals(False)
+
         self._action_overlay.blockSignals(True)
         self._action_overlay.setChecked(overlay_enabled)
         self._action_overlay.blockSignals(False)

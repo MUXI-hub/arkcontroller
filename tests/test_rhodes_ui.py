@@ -660,3 +660,88 @@ def test_dashboard_header_status_texts(qapp, dashboard) -> None:
     texts = dashboard.header_status_texts()
     assert "手柄在线" in texts
     assert any("明日方舟" in t for t in texts)
+
+
+# ----------------------------------------------------------------------
+# v0.3.2：截屏 / 屏幕共享可见性热切换与充能环避让盟约栏
+# ----------------------------------------------------------------------
+def test_display_affinity_constants_and_offscreen_safe(qapp) -> None:
+    assert hud_window.WDA_NONE == 0x00000000
+    assert hud_window.WDA_EXCLUDEFROMCAPTURE == 0x00000011
+    assert hud_window.apply_win32_display_affinity(12345, True) is False
+    assert hud_window.apply_win32_display_affinity(12345, False) is False
+    assert apply_win32_click_through(12345, exclude_from_capture=False) is False
+
+
+def test_hud_hide_from_capture_hot_switch(qapp, monkeypatch) -> None:
+    calls: list[tuple[int, bool]] = []
+    monkeypatch.setattr(hud_window, "_is_windows_qpa", lambda: True)
+    monkeypatch.setattr(hud_window, "apply_win32_display_affinity",
+                        lambda hwnd, exclude=True: calls.append((hwnd, exclude)) or True)
+    hud = HUDWindow()
+    assert hud.hide_from_capture is True
+    hud.set_hide_from_capture(False)  # 句柄未创建：仅记录状态
+    assert hud.hide_from_capture is False and calls == []
+    hwnd = int(hud.winId())
+    hud.set_hide_from_capture(True)
+    hud.set_hide_from_capture(False)
+    assert calls == [(hwnd, True), (hwnd, False)]
+
+
+def test_ready_ring_below_covenant_bar(qapp) -> None:
+    hud = HUDWindow()
+    img = _render(hud, _snapshot(ready_hold_progress=0.5, prompts=[], focus_polygon_norm=None))
+    # 顶签 (y<40) 与充能环 (cy>=142) 之间的盟约栏区域保持全透明
+    band = sum(1 for y in range(48, 118, 2) for x in range(480, 800, 4) if img.pixelColor(x, y).alpha() > 0)
+    assert band == 0
+    ring = sum(1 for y in range(122, 166, 2) for x in range(480, 800, 4) if img.pixelColor(x, y).alpha() > 0)
+    assert ring > 20
+
+
+def test_dashboard_hide_capture_switch_and_protocol_text(dashboard) -> None:
+    events: list[tuple[str, bool]] = []
+    dashboard.keymap_flag_toggled.connect(lambda k, v: events.append((k, v)))
+    km = KeymapConfig()
+    dashboard.sync_settings(keymap=km, overlay_enabled=True, paused=False, hide_hud_from_capture=True)
+    assert dashboard.toggle_hide_capture.isChecked()
+    assert "WDA_EXCLUDEFROMCAPTURE" in dashboard.capture_mode_text()
+    assert events == []
+    dashboard.toggle_hide_capture.click()
+    assert events == [("hide_hud_from_capture", False)]
+    dashboard.sync_settings(keymap=km, overlay_enabled=True, paused=False, hide_hud_from_capture=False)
+    assert not dashboard.toggle_hide_capture.isChecked()
+    assert "WDA_NONE" in dashboard.capture_mode_text()
+
+
+def test_tray_hide_capture_action(qapp) -> None:
+    tray = ControllerTray()
+    hits: list[bool] = []
+    tray.toggle_hide_capture_requested.connect(lambda v: hits.append(v))
+    tray.sync_settings(overlay_enabled=True, use_native_shortcuts=True, paused=False, hide_hud_from_capture=False)
+    assert tray._action_hide_capture.isChecked() is False
+    assert hits == []
+    tray._action_hide_capture.trigger()
+    assert hits == [True]
+    tray.sync_settings(overlay_enabled=True, use_native_shortcuts=True, paused=False)  # 向后兼容
+    assert tray._action_hide_capture.isChecked() is True
+
+
+def test_main_app_hide_capture_persist_and_hot_apply(qapp, tmp_configs) -> None:
+    from arkcontroller.main import DASHBOARD_KEYMAP_FLAGS, ArkControllerApp
+
+    assert "hide_hud_from_capture" in DASHBOARD_KEYMAP_FLAGS
+    app = ArkControllerApp(qt_app=qapp, config_dir=tmp_configs, dry_run=True)
+    try:
+        assert app.hud.hide_from_capture is True
+        app.set_keymap_flag("hide_hud_from_capture", False)
+        assert app.hud.hide_from_capture is False
+        assert app.dashboard.toggle_hide_capture.isChecked() is False
+        assert app.tray._action_hide_capture.isChecked() is False
+        saved = json.loads((tmp_configs / "user_override.json").read_text(encoding="utf-8"))
+        assert saved["keymap"]["hide_hud_from_capture"] is False
+        app._on_tray_hide_capture(True)
+        assert app.hud.hide_from_capture is True
+        assert app.dashboard.toggle_hide_capture.isChecked() is True
+    finally:
+        app.shutdown()
+        _dispose(qapp, app.dashboard, app.hud)

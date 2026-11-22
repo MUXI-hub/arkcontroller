@@ -1350,6 +1350,7 @@ class PRTSDashboardWindow(QMainWindow):
         self.toggle_auto_shop = CheckRow("跨区自动开关商店", "切区自动展开 / 收起")
         self.toggle_vibration = CheckRow("震动反馈", "落位与确认时轻震")
         self.toggle_retreat = CheckRow("允许 LT+RB 撤退", "官方 Q 键一键撤退")
+        self.toggle_hide_capture = CheckRow("截屏/共享时隐藏 HUD", "关闭后截图、录屏与屏幕共享可见悬浮窗")
         self.toggle_pause.clicked.connect(self._on_pause_clicked)
         self.toggle_overlay.toggled.connect(self.overlay_toggled.emit)
         self.toggle_native.toggled.connect(self.native_shortcuts_toggled.emit)
@@ -1357,9 +1358,10 @@ class PRTSDashboardWindow(QMainWindow):
         self.toggle_auto_shop.toggled.connect(self._on_auto_shop_toggled)
         self.toggle_vibration.toggled.connect(self._on_vibration_toggled)
         self.toggle_retreat.toggled.connect(self._on_retreat_toggled)
+        self.toggle_hide_capture.toggled.connect(self._on_hide_capture_toggled)
         for i, t in enumerate((
             self.toggle_pause, self.toggle_overlay, self.toggle_native, self.toggle_dpad,
-            self.toggle_auto_shop, self.toggle_vibration, self.toggle_retreat,
+            self.toggle_auto_shop, self.toggle_vibration, self.toggle_retreat, self.toggle_hide_capture,
         )):
             toggles.addWidget(t, i // 3, i % 3)
         sw.body.addLayout(toggles)
@@ -1531,8 +1533,8 @@ class PRTSDashboardWindow(QMainWindow):
         self._sec_grid.set_value("input", "Win32 SendInput 硬件扫描码 / 鼠标合成")
         self._sec_grid.set_value("memory", "零读取 · 零写入 · 零 DLL 注入", COLOR_GREEN)
         self._sec_grid.set_value("hud", "WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TOPMOST")
-        self._sec_grid.set_value("capture", "SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)")
         self._sec_grid.set_value("frontend", "普通层级（不置顶）· 关闭即隐藏至托盘 · 隐藏时零遥测开销")
+        self._set_capture_mode_text(True)
         sec.body.addWidget(self._sec_grid)
         sec.body.addStretch(1)
         grid.addWidget(sec, 1, 1, 1, 2)
@@ -1644,6 +1646,15 @@ class PRTSDashboardWindow(QMainWindow):
         self._paused = bool(paused)
         self.toggle_pause.set_checked_silently(self._paused)
 
+    def _set_capture_mode_text(self, hide: bool) -> None:
+        if hide:
+            self._sec_grid.set_value("capture", "WDA_EXCLUDEFROMCAPTURE (默认隐藏防自污染)")
+        else:
+            self._sec_grid.set_value("capture", "WDA_NONE (截图与屏幕共享可见)", AMBER_TEXT)
+
+    def capture_mode_text(self) -> str:
+        return self._sec_grid.value("capture")
+
     def _sync_param_views(self, keymap: KeymapConfig) -> None:
         for key, view in self._param_views.items():
             view.set_value(float(getattr(keymap, key)))
@@ -1655,8 +1666,13 @@ class PRTSDashboardWindow(QMainWindow):
         overlay_enabled: bool,
         paused: bool,
         refresh_tuning: bool = False,
+        hide_hud_from_capture: bool | None = None,
     ) -> None:
         """从主控运行态反向同步开关、遥测标定与调校滑块（不触发回环信号）。"""
+        if hide_hud_from_capture is None:
+            hide_hud_from_capture = bool(getattr(keymap, "hide_hud_from_capture", True))
+        self.toggle_hide_capture.set_checked_silently(hide_hud_from_capture)
+        self._set_capture_mode_text(bool(hide_hud_from_capture))
         self._keymap = keymap
         self.toggle_overlay.set_checked_silently(overlay_enabled)
         self.toggle_native.set_checked_silently(keymap.use_native_keyboard_shortcuts)
@@ -1781,6 +1797,9 @@ class PRTSDashboardWindow(QMainWindow):
 
     def _on_retreat_toggled(self, checked: bool) -> None:
         self.keymap_flag_toggled.emit("allow_retreat_chord", bool(checked))
+
+    def _on_hide_capture_toggled(self, checked: bool) -> None:
+        self.keymap_flag_toggled.emit("hide_hud_from_capture", bool(checked))
 
     def _on_pause_clicked(self, _checked: bool = False) -> None:
         # 由主控切换暂停状态并通过 sync 回写；先恢复为当前真实状态避免不一致
