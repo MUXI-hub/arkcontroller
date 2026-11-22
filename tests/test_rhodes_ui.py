@@ -398,10 +398,15 @@ def test_dashboard_tuning_apply_and_reset(dashboard) -> None:
 
 def test_dashboard_keymap_manual_covers_v022_mappings(dashboard) -> None:
     assert len(dashboard.keymap_cards) == len(KEYMAP_BRIEFS) == 9
-    all_text = " ".join(desc for _c, _t, _s, rows in KEYMAP_BRIEFS for _k, desc in rows)
+    all_rows = [(k, desc) for _c, _t, _s, rows in KEYMAP_BRIEFS for k, desc in rows]
+    all_keys = [k for k, _ in all_rows]
+    all_text = " ".join(desc for _, desc in all_rows)
     for keyword in ("双击 A 买牌", "查看商店干员详情", "升本", "刷新商店", "冻结", "原地转向",
-                    "白条", "不再提示", "表情", "撤退", "队友"):
+                    "白条", "不再提示", "表情", "撤退", "队友", "本局策略"):
         assert keyword in all_text, keyword
+    assert "赠予" not in all_text
+    assert "LT + RT" in all_keys
+    assert ("LT + RT", "无需移焦点，一键点击右侧本局策略") in all_rows
 
 
 def test_dashboard_pages_render_offscreen(qapp, dashboard) -> None:
@@ -558,7 +563,7 @@ def test_main_app_shows_dashboard_unless_minimized(qapp, tmp_configs) -> None:
 # ----------------------------------------------------------------------
 DISPATCHER_BUTTON_SPECS = (
     "A", "B", "X", "Y", "A/RT+A", "Back+Start", "LB/RB", "LS", "RS", "RS/LB/RB",
-    "LT+Back", "LT+LB", "LT+RB", "LT+Start", "LT+十字键", "RT+A", "Start/RT+A",
+    "LT+Back", "LT+LB", "LT+RB", "LT+Start", "LT+十字键", "LT + RT", "RT+A", "Start/RT+A",
     "按住 LT", "松开 LT", "下", "摇杆/十字键", "右/B", "长按Start", "左/上", "左/上/下",
     "LS/D-Pad", "LS/十字键", "D-Pad", "双击A",
 )
@@ -582,6 +587,7 @@ def test_button_spec_parser_maps_dispatcher_strings(qapp) -> None:
     assert _kinds("按住 LT") == [("prefix", "按住"), ("cap", "LT")]
     assert _kinds("松开 LT") == [("prefix", "松开"), ("cap", "LT")]
     assert _kinds("Back+Start") == [("back", ""), ("sep", "+"), ("start", "")]
+    assert _kinds("LT + RT") == [("cap", "LT"), ("sep", "+"), ("cap", "RT")]
     assert _kinds("双击A") == [("prefix", "双击"), ("face", "A")]
     assert _kinds("A>A") == [("face", "A"), ("sep", "›"), ("face", "A")]
     # 未知 token 兜底为文字键帽，不丢失信息
