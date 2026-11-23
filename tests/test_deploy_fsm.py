@@ -3405,3 +3405,328 @@ class TestV033BoardMirroredAndDynamicCovenantPhase:
         dispatcher.set_covenant_count(3)
         assert dispatcher.covenant_count == 3
         assert dispatcher.covenant_centers_u == ()
+
+
+class TestV110BossShopCombatAndEquipReplace:
+    """v1.1.0 专项验证：Boss 左侧开店居中视图、作战期独立推近视图（含镜像）与满装备「销毁并替换」全闭环操控。"""
+
+    def test_boss_shop_centered_view_state_and_exit_reset(self) -> None:
+        """需求 1：SHOP_OPEN_BOSS 视图态自动切换、镜像局排斥、手动锁层同步与出局清零。"""
+        dispatcher, _, _, _, layout, vp = _make_env(auto_toggle_shop=False)
+        shop_board = PerspectiveBoardMapper(
+            layout.resolve_board_quad(LayoutViewState.SHOP_OPEN, mirrored=False)
+        )
+        boss_board = PerspectiveBoardMapper(
+            layout.resolve_board_quad(LayoutViewState.SHOP_OPEN_BOSS, mirrored=False)
+        )
+        boss_bench = LinearZoneMapper(
+            layout.resolve_bench_zone(LayoutViewState.SHOP_OPEN_BOSS)
+        )
+        boss_equip = LinearZoneMapper(
+            layout.resolve_equip_zone(LayoutViewState.SHOP_OPEN_BOSS, mirrored=False)
+        )
+        mir_shop_board = PerspectiveBoardMapper(
+            layout.resolve_board_quad(LayoutViewState.SHOP_OPEN, mirrored=True)
+        )
+        center_r, center_c = boss_board.rows // 2, boss_board.cols // 2
+
+        # 1. 普通关卡开店 -> SHOP_OPEN
+        prep_normal_shop = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=True,
+            shop_slot_count=6,
+            boss_shop_centered=False,
+            board_mirrored=False,
+        )
+        snap_norm = dispatcher.process_tick(vp, prep_normal_shop, [])
+        assert snap_norm.view_state == LayoutViewState.SHOP_OPEN.value
+        assert dispatcher.boss_shop_centered is False
+        assert dispatcher._board_mapper.cell_center(center_r, center_c) == pytest.approx(
+            shop_board.cell_center(center_r, center_c)
+        )
+
+        # 2. Boss 左侧正向开店（boss_shop_centered=True, board_mirrored=False）-> SHOP_OPEN_BOSS
+        prep_boss_shop = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=True,
+            shop_slot_count=6,
+            boss_shop_centered=True,
+            board_mirrored=False,
+        )
+        snap_boss = dispatcher.process_tick(vp, prep_boss_shop, [])
+        assert snap_boss.view_state == LayoutViewState.SHOP_OPEN_BOSS.value
+        assert dispatcher.boss_shop_centered is True
+        assert dispatcher._board_mapper.cell_center(center_r, center_c) == pytest.approx(
+            boss_board.cell_center(center_r, center_c)
+        )
+        assert dispatcher._board_mapper.cell_center(center_r, center_c) != pytest.approx(
+            shop_board.cell_center(center_r, center_c), abs=1e-2
+        )
+        assert dispatcher._bench_mapper.slot_center(0) == pytest.approx(
+            boss_bench.slot_center(0)
+        )
+        assert dispatcher._equip_mapper.slot_center(0) == pytest.approx(
+            boss_equip.slot_center(0)
+        )
+
+        # 3. 若处于右侧 Boss 镜像局（board_mirrored=True），即使 boss_shop_centered=True 仍强制走 SHOP_OPEN + mirrored=True
+        prep_mir_shop = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=True,
+            shop_slot_count=6,
+            boss_shop_centered=True,
+            board_mirrored=True,
+        )
+        snap_mir = dispatcher.process_tick(vp, prep_mir_shop, [])
+        assert snap_mir.view_state == LayoutViewState.SHOP_OPEN.value
+        assert dispatcher._board_mapper.cell_center(center_r, center_c) == pytest.approx(
+            mir_shop_board.cell_center(center_r, center_c)
+        )
+
+        # 4. 商店收起回 NORMAL；手动锁层 BATTLE_PREP 实时同步 boss_shop_centered
+        prep_closed = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=False,
+            boss_shop_centered=True,
+            board_mirrored=False,
+        )
+        snap_closed = dispatcher.process_tick(vp, prep_closed, [])
+        assert snap_closed.view_state == LayoutViewState.NORMAL.value
+
+        dispatcher.process_tick(vp, prep_normal_shop, [ButtonTap(GamepadButton.BACK)])
+        assert dispatcher.scene_locked_manual is True
+        snap_lock_boss = dispatcher.process_tick(vp, prep_boss_shop, [])
+        assert snap_lock_boss.view_state == LayoutViewState.SHOP_OPEN_BOSS.value
+        assert dispatcher.boss_shop_centered is True
+
+        # 5. 出局切至 UNKNOWN_FREE_CURSOR 清零 boss_shop_centered
+        dispatcher.process_tick(vp, prep_boss_shop, [ButtonTap(GamepadButton.BACK)] * 4)  # 回到自动
+        dispatcher.process_tick(vp, prep_boss_shop, [])
+        assert dispatcher.boss_shop_centered is True
+        dispatcher.process_tick(vp, SceneDetectionResult(GameScene.UNKNOWN_FREE_CURSOR, 0.0), [])
+        assert dispatcher.boss_shop_centered is False
+
+        # 6. set_boss_shop_centered 公开接口联动
+        dispatcher.process_tick(vp, prep_normal_shop, [])
+        assert dispatcher.view_state == LayoutViewState.SHOP_OPEN
+        dispatcher.set_boss_shop_centered(True)
+        assert dispatcher.view_state == LayoutViewState.SHOP_OPEN_BOSS
+        dispatcher.set_boss_shop_centered(False)
+        assert dispatcher.view_state == LayoutViewState.SHOP_OPEN
+
+    def test_combat_view_state_normal_and_mirrored_board_alignment(self) -> None:
+        """需求 3：BATTLE_COMBAT 自动切换 COMBAT 推近视图（兼容普通与镜像棋盘、点人详情切 UNIT_SELECTED 与恢复）。"""
+        dispatcher, _, _, _, layout, vp = _make_env()
+        normal_board = PerspectiveBoardMapper(
+            layout.resolve_board_quad(LayoutViewState.NORMAL, mirrored=False)
+        )
+        combat_board = PerspectiveBoardMapper(
+            layout.resolve_board_quad(LayoutViewState.COMBAT, mirrored=False)
+        )
+        combat_board_mir = PerspectiveBoardMapper(
+            layout.resolve_board_quad(LayoutViewState.COMBAT, mirrored=True)
+        )
+        combat_bench = LinearZoneMapper(layout.resolve_bench_zone(LayoutViewState.COMBAT))
+        center_r, center_c = combat_board.rows // 2, combat_board.cols // 2
+
+        # 1. 普通作战期 -> LayoutViewState.COMBAT，棋盘与整备区使用推近坐标
+        combat_norm = SceneDetectionResult(
+            GameScene.BATTLE_COMBAT, 0.95, unit_selected=False, board_mirrored=False
+        )
+        snap_cb = dispatcher.process_tick(vp, combat_norm, [])
+        assert snap_cb.scene == GameScene.BATTLE_COMBAT
+        assert snap_cb.view_state == LayoutViewState.COMBAT.value
+        assert snap_cb.cursor_norm == pytest.approx(
+            combat_board.cell_center(center_r, center_c)
+        )
+        assert snap_cb.cursor_norm != pytest.approx(
+            normal_board.cell_center(center_r, center_c), abs=1e-2
+        )
+        assert dispatcher._bench_mapper.slot_center(0) == pytest.approx(
+            combat_bench.slot_center(0)
+        )
+
+        # 作战期按 A 选中干员 -> UNIT_SELECTED，按 B 退出恢复 COMBAT
+        snap_unit = dispatcher.process_tick(vp, combat_norm, [ButtonTap(GamepadButton.A)])
+        assert snap_unit.view_state == LayoutViewState.UNIT_SELECTED.value
+        snap_exit_unit = dispatcher.process_tick(vp, combat_norm, [ButtonTap(GamepadButton.B)])
+        assert snap_exit_unit.view_state == LayoutViewState.COMBAT.value
+
+        # 2. Boss 镜像作战期 -> LayoutViewState.COMBAT + mirrored=True
+        combat_mir = SceneDetectionResult(
+            GameScene.BATTLE_COMBAT, 0.95, unit_selected=False, board_mirrored=True
+        )
+        snap_cb_mir = dispatcher.process_tick(vp, combat_mir, [])
+        assert snap_cb_mir.view_state == LayoutViewState.COMBAT.value
+        assert snap_cb_mir.board_mirrored is True
+        assert snap_cb_mir.cursor_norm == pytest.approx(
+            combat_board_mir.cell_center(center_r, center_c)
+        )
+        assert snap_cb_mir.cursor_norm != pytest.approx(
+            combat_board.cell_center(center_r, center_c), abs=1e-2
+        )
+
+    def test_equip_replace_panel_navigation_confirm_cancel_lock_and_debounce(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """需求 2：满装备「销毁并替换」弹窗优先于 unit_selected、左右选槽、A 替换、B 关闭、防逃逸与 2 帧防抖。"""
+        now = 6000.0
+        monkeypatch.setattr("arkcontroller.control.dispatcher.time.monotonic", lambda: now)
+
+        dispatcher, hid, _, _, layout, vp = _make_env(left_stick_mode="cursor")
+        prep_plain = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=False, unit_selected=False, equip_replace_open=False
+        )
+        # 进入休整期 -> 棋盘 -> 装备栏抓取装备（模拟真实拖拽满装干员前场景）
+        dispatcher.process_tick(
+            vp,
+            prep_plain,
+            [
+                ButtonTap(GamepadButton.RB),  # BENCH -> BOARD
+                ButtonTap(GamepadButton.RB),  # BOARD -> EQUIPMENT
+                ButtonTap(GamepadButton.A),   # HOLDING_EQUIP
+                ButtonTap(GamepadButton.RB),  # -> BOARD
+            ],
+        )
+        assert dispatcher.deploy_fsm.state == DeployState.HOLDING_EQUIP
+
+        # 1. 视觉检测到满装替换弹窗（真实 d9897b6b.jpg 同时存在左侧装备详情 unit_selected=True）
+        prep_replace = SceneDetectionResult(
+            GameScene.BATTLE_PREP,
+            0.96,
+            shop_open=False,
+            unit_selected=True,
+            equip_replace_open=True,
+        )
+        snap_open = dispatcher.process_tick(vp, prep_replace, [])
+        assert dispatcher.deploy_fsm.state == DeployState.IDLE
+        assert dispatcher.equip_replace_open is True
+        assert snap_open.focus_zone == FocusZone.EQUIP_REPLACE
+        assert snap_open.free_cursor_active is False
+        assert snap_open.focus_label == "替换装备 [1/2]"
+        assert snap_open.focus_polygon_norm == layout.resolve_equip_replace_card_polygon(0)
+        assert snap_open.cursor_norm == pytest.approx(
+            layout.resolve_equip_replace_click_point(0)
+        )
+        assert [(p.button, p.label) for p in snap_open.prompts] == [
+            ("LS/十字键", "选择已穿戴装备"),
+            ("A", "销毁并替换"),
+            ("B", "取消关闭"),
+        ]
+
+        # 2. 左右方向键 & 左摇杆离散方向在 [0, 1] 切换；上下/LB/RB/LS/左摇杆连续运动/LT+RT 全部锁死防逃逸！
+        hid.clear()
+        snap_r = dispatcher.process_tick(
+            vp, prep_replace, [ButtonTap(GamepadButton.DPAD_RIGHT)]
+        )
+        assert dispatcher.equip_replace_index == 1
+        assert snap_r.focus_label == "替换装备 [2/2]"
+        assert snap_r.focus_polygon_norm == layout.resolve_equip_replace_card_polygon(1)
+
+        # 左摇杆离散方向（即便 left_stick_mode="cursor"）也能切回槽 0 再切到槽 1
+        snap_ls_l = dispatcher.process_tick(
+            vp, prep_replace, [StickDirection("left", "left")]
+        )
+        assert dispatcher.equip_replace_index == 0
+        assert snap_ls_l.focus_label == "替换装备 [1/2]"
+        dispatcher.process_tick(vp, prep_replace, [StickDirection("left", "right")])
+        assert dispatcher.equip_replace_index == 1
+
+        # 尝试各种可能逃逸的按键/摇杆/组合键：全部严禁逃逸且零误点击！
+        snap_locked = dispatcher.process_tick(
+            vp,
+            prep_replace,
+            [
+                ButtonTap(GamepadButton.DPAD_UP),
+                ButtonTap(GamepadButton.DPAD_DOWN),
+                ButtonTap(GamepadButton.LB),
+                ButtonTap(GamepadButton.RB),
+                ButtonTap(GamepadButton.LS),
+                StickMotion("left", 0.9, 0.2, 22.0, 5.0),
+                ChordTriggered(GamepadButton.LT, GamepadButton.RT),
+                ChordTriggered(GamepadButton.LT, GamepadButton.DPAD_DOWN),
+            ],
+        )
+        assert snap_locked.focus_zone == FocusZone.EQUIP_REPLACE
+        assert snap_locked.free_cursor_active is False
+        assert dispatcher.equip_replace_index == 1
+        assert hid.calls == []
+
+        # 3. 按 A：点击槽 1 底部暗红「销毁并替换」按钮中心、清 unit_selected、恢复 BOARD 并 Toast
+        click1_xy = vp.norm_to_screen(*layout.resolve_equip_replace_click_point(1))
+        snap_confirm = dispatcher.process_tick(
+            vp, prep_replace, [ButtonTap(GamepadButton.A)]
+        )
+        assert hid.calls == [("click", click1_xy[0], click1_xy[1], "left")]
+        assert dispatcher.equip_replace_open is False
+        assert dispatcher.unit_selected is False
+        assert snap_confirm.focus_zone == FocusZone.BOARD
+        assert snap_confirm.view_state == LayoutViewState.NORMAL.value
+        assert snap_confirm.toast_message == "已销毁旧装备并替换"
+
+        # 在 0.65s 保护窗内视觉仍残报 equip_replace_open=True 不会被重新拉入面板
+        now += 0.30
+        snap_guard = dispatcher.process_tick(vp, prep_replace, [])
+        assert dispatcher.equip_replace_open is False
+        assert snap_guard.focus_zone == FocusZone.BOARD
+
+        # 4. 超过保护窗后再次由视觉打开，按 B 点击右上 [×] 取消并恢复 BOARD
+        now += 0.50
+        snap_reopen = dispatcher.process_tick(vp, prep_replace, [])
+        assert dispatcher.equip_replace_open is True
+        assert snap_reopen.focus_zone == FocusZone.EQUIP_REPLACE
+
+        close_pt = layout.buttons["equip_replace_close"]
+        close_xy = vp.norm_to_screen(close_pt.u, close_pt.v, close_pt.anchor)
+        hid.clear()
+        snap_cancel = dispatcher.process_tick(
+            vp, prep_replace, [ButtonTap(GamepadButton.B)]
+        )
+        assert hid.calls == [("click", close_xy[0], close_xy[1], "left")]
+        assert dispatcher.equip_replace_open is False
+        assert snap_cancel.focus_zone == FocusZone.BOARD
+        assert snap_cancel.toast_message == "已取消替换装备"
+
+        # 5. 视觉 2 帧关闭防抖 + 125Hz 同对象防重复计数
+        now += 1.0
+        dispatcher.process_tick(vp, prep_replace, [])
+        assert dispatcher.equip_replace_open is True
+
+        # 125Hz 主循环连续 10 次传同一 False 帧（间隔 8ms）-> 仅计为 1 帧，稳留 EQUIP_REPLACE
+        shared_false = SceneDetectionResult(
+            GameScene.BATTLE_PREP, 0.96, shop_open=False, unit_selected=False, equip_replace_open=False
+        )
+        for _ in range(10):
+            now += 0.008
+            snap_125 = dispatcher.process_tick(vp, shared_false, [])
+            assert dispatcher.equip_replace_open is True
+            assert snap_125.focus_zone == FocusZone.EQUIP_REPLACE
+
+        # 中途来 1 帧 True 清零计数，再给 1 帧新 False 仍稳留，第 2 帧新 False 才安全退出回 BOARD
+        now += 0.20
+        dispatcher.process_tick(vp, prep_replace, [])
+        now += 0.20
+        snap_f1 = dispatcher.process_tick(
+            vp,
+            SceneDetectionResult(
+                GameScene.BATTLE_PREP, 0.96, shop_open=False, equip_replace_open=False
+            ),
+            [],
+        )
+        assert dispatcher.equip_replace_open is True
+        assert snap_f1.focus_zone == FocusZone.EQUIP_REPLACE
+
+        now += 0.20
+        snap_f2 = dispatcher.process_tick(
+            vp,
+            SceneDetectionResult(
+                GameScene.BATTLE_PREP, 0.96, shop_open=False, equip_replace_open=False
+            ),
+            [],
+        )
+        assert dispatcher.equip_replace_open is False
+        assert snap_f2.focus_zone == FocusZone.BOARD

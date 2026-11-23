@@ -66,6 +66,7 @@ class FocusZone(str, Enum):
     TOP_INFO = "top_info"
     TEAMMATES = "teammates"
     EMOTE_PANEL = "emote_panel"
+    EQUIP_REPLACE = "equip_replace"
     CHOICE_CARDS = "choice_cards"
     CONFIRM_DIALOG = "confirm_dialog"
     FREE_CURSOR = "free_cursor"
@@ -182,6 +183,8 @@ _EMOTE_LOCK_SECONDS: float = 1.8
 _EMOTE_CLOSE_DEBOUNCE_FRAMES: int = 4
 _EMOTE_SAME_RESULT_SKIP_MIN_SEC: float = 0.002
 _EMOTE_SAME_RESULT_SKIP_MAX_SEC: float = 0.25
+_EQUIP_REPLACE_ACTION_LOCK_SECONDS: float = 0.65
+_EQUIP_REPLACE_CLOSE_DEBOUNCE_FRAMES: int = 2
 _COVENANT_DRAG_COOLDOWN_SECONDS: float = 0.30
 _COVENANT_DRAG_V_NORM: float = 0.1208
 _COVENANT_DRAG_LEFT_U: float = 0.38
@@ -216,9 +219,10 @@ class ControlDispatcher:
 
         self.deploy_fsm = DeployFSM(keymap, layout, hid, rumble_cb=rumble_cb)
 
-        # 界面镜头/缩放视图态（normal / shop_open / unit_selected）、Boss 战镜像态与商店动态栏位数（1本4槽/2本5槽/4本6槽）
+        # 界面镜头/缩放视图态（normal / shop_open / shop_open_boss / combat / unit_selected）、Boss 战镜像态与商店动态栏位数
         self._view_state: LayoutViewState = LayoutViewState.NORMAL
         self._board_mirrored: bool = False
+        self._boss_shop_centered: bool = False
         self._shop_open: bool = False
         self._shop_slot_count: int = self.layout.shop_zone.count
         self._shop_pending_buy_idx: int | None = None
@@ -274,6 +278,13 @@ class ControlDispatcher:
         self._last_emote_false_scene: SceneDetectionResult | None = None
         self._last_emote_false_ts: float = -1e9
         self._zone_before_emote: FocusZone = FocusZone.BOARD
+        self._equip_replace_open: bool = False
+        self._equip_replace_idx: int = 0
+        self._equip_replace_override_until: float = 0.0
+        self._equip_replace_false_streak: int = 0
+        self._last_equip_replace_false_scene: SceneDetectionResult | None = None
+        self._last_equip_replace_false_ts: float = -1e9
+        self._zone_before_equip_replace: FocusZone = FocusZone.BOARD
         self._info_overlay: Literal["match_info", "enemy_preview"] | None = None
         self._board_row: int = self._board_mapper.rows // 2
         self._board_col: int = self._board_mapper.cols // 2
@@ -353,6 +364,18 @@ class ControlDispatcher:
         return self._board_mirrored
 
     @property
+    def boss_shop_centered(self) -> bool:
+        return self._boss_shop_centered
+
+    @property
+    def equip_replace_open(self) -> bool:
+        return self._equip_replace_open
+
+    @property
+    def equip_replace_index(self) -> int:
+        return self._equip_replace_idx
+
+    @property
     def has_teammates(self) -> bool:
         return self._has_teammates
 
@@ -402,7 +425,16 @@ class ControlDispatcher:
         if target == self._board_mirrored:
             return
         self._board_mirrored = target
+        self._refresh_view_state()
         self._sync_active_mappers()
+
+    def set_boss_shop_centered(self, enabled: bool) -> None:
+        """切换 Boss 战左侧正向开店居中视图态（shop_open_boss）。"""
+        target = bool(enabled)
+        if target == self._boss_shop_centered:
+            return
+        self._boss_shop_centered = target
+        self._refresh_view_state()
 
     def set_has_teammates(self, enabled: bool) -> None:
         """设置当前对局是否启用左侧多人联机队友头像栏。"""
@@ -435,6 +467,7 @@ class ControlDispatcher:
         self._top_info_idx = max(0, min(len(top_items) - 1, self._top_info_idx))
         self._teammate_focus_idx = max(0, min(3, self._teammate_focus_idx))
         self._emote_idx = max(0, min(5, self._emote_idx))
+        self._equip_replace_idx = max(0, min(1, self._equip_replace_idx))
         self._confirm_idx = max(0, min(2 if self._confirm_has_dont_ask else 1, self._confirm_idx))
         self._board_row = max(0, min(self._board_mapper.rows - 1, self._board_row))
         self._board_col = max(0, min(self._board_mapper.cols - 1, self._board_col))
@@ -606,12 +639,18 @@ class ControlDispatcher:
         self._board_mapper = self._board_mappers[(vs, mirrored)]
 
     def _compute_effective_view_state(self) -> LayoutViewState:
-        """依据当前场景、选取角色状态与商店展开状态推导镜头缩放视图态。"""
+        """依据当前场景、选取角色状态、商店展开状态及 Boss 左侧开店居中态推导镜头缩放视图态。"""
         if self._current_scene not in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT):
             return LayoutViewState.NORMAL
         if self._unit_selected:
             return LayoutViewState.UNIT_SELECTED
+        if self._current_scene == GameScene.BATTLE_COMBAT:
+            return getattr(LayoutViewState, "COMBAT", LayoutViewState.NORMAL)
         if self._current_scene == GameScene.BATTLE_PREP and self._shop_open:
+            if self._boss_shop_centered and not self._board_mirrored:
+                return getattr(
+                    LayoutViewState, "SHOP_OPEN_BOSS", LayoutViewState.SHOP_OPEN
+                )
             return LayoutViewState.SHOP_OPEN
         return LayoutViewState.NORMAL
 
@@ -1300,6 +1339,205 @@ class ControlDispatcher:
         if self._focus_zone == FocusZone.EMOTE_PANEL:
             self._restore_zone_after_emote()
 
+    # ------------------------------------------------------------------
+    # 满装备「销毁并替换」面板几何、视觉防抖同步与操控处理
+    # ------------------------------------------------------------------
+
+    def _equip_replace_click_point(self, idx: int) -> tuple[float, float]:
+        """返回第 idx (0/1) 件已穿戴装备卡底部暗红「销毁并替换」按钮的点击中心。"""
+        clamped = max(0, min(1, int(idx)))
+        resolver = getattr(self.layout, "resolve_equip_replace_click_point", None)
+        if callable(resolver):
+            return resolver(clamped)
+        return (0.67031 if clamped == 0 else 0.87852, 0.82500)
+
+    def _equip_replace_card_polygon(self, idx: int) -> list[tuple[float, float]]:
+        """返回第 idx (0/1) 件已穿戴装备卡的外扩整卡选取框四顶点多边形。"""
+        clamped = max(0, min(1, int(idx)))
+        resolver = getattr(self.layout, "resolve_equip_replace_card_polygon", None)
+        if callable(resolver):
+            return resolver(clamped)
+        cu = 0.67031 if clamped == 0 else 0.87852
+        cv, sw, sh = 0.63681, 0.19141, 0.48333
+        hw, hh = sw * 0.5, sh * 0.5
+        return [
+            (max(0.004, cu - hw), max(0.004, cv - hh)),
+            (min(0.996, cu + hw), max(0.004, cv - hh)),
+            (min(0.996, cu + hw), min(0.996, cv + hh)),
+            (max(0.004, cu - hw), min(0.996, cv + hh)),
+        ]
+
+    def _equip_replace_close_point(self) -> tuple[float, float, str]:
+        """返回满装备替换面板右上角 [×] 关闭按钮坐标与锚点。"""
+        pt = self.layout.buttons.get("equip_replace_close")
+        if pt is not None:
+            return (pt.u, pt.v, pt.anchor)
+        return (0.96133, 0.26181, "center_16_9")
+
+    def _remember_zone_before_equip_replace(self) -> None:
+        """记录进入满装替换面板前的合法焦点区，以便操作完毕安全恢复。"""
+        if self._focus_zone in (
+            FocusZone.EQUIP_REPLACE,
+            FocusZone.EMOTE_PANEL,
+            FocusZone.FREE_CURSOR,
+        ):
+            self._zone_before_equip_replace = (
+                FocusZone.BENCH
+                if self._current_scene == GameScene.BATTLE_PREP
+                else FocusZone.BOARD
+            )
+            return
+        if self._focus_zone == FocusZone.SHOP and not self._shop_open:
+            self._zone_before_equip_replace = FocusZone.BENCH
+            return
+        self._zone_before_equip_replace = self._focus_zone
+
+    def _restore_zone_after_equip_replace(self) -> None:
+        """关闭满装替换面板后将焦点安全恢复至原功能区。"""
+        target = self._zone_before_equip_replace
+        if self._current_scene == GameScene.BATTLE_COMBAT and target in (
+            FocusZone.SHOP,
+            FocusZone.BENCH,
+        ):
+            target = FocusZone.BOARD
+        elif target == FocusZone.SHOP and not self._shop_open:
+            target = FocusZone.BENCH
+        elif target in (
+            FocusZone.EQUIP_REPLACE,
+            FocusZone.EMOTE_PANEL,
+            FocusZone.FREE_CURSOR,
+        ):
+            target = (
+                FocusZone.BENCH
+                if self._current_scene == GameScene.BATTLE_PREP
+                else FocusZone.BOARD
+            )
+        self._focus_zone = target
+
+    def _reset_equip_replace_state(self) -> None:
+        """清零满装替换面板运行态与防抖计数。"""
+        self._equip_replace_open = False
+        self._equip_replace_override_until = 0.0
+        self._equip_replace_false_streak = 0
+        self._last_equip_replace_false_scene = None
+        self._last_equip_replace_false_ts = -1e9
+
+    def _sync_equip_replace_open(
+        self, scene_result: SceneDetectionResult, now: float
+    ) -> None:
+        """同步视觉检测到的满装备「销毁并替换」面板状态，并对关闭路径施加 2 帧防抖。"""
+        detected = bool(getattr(scene_result, "equip_replace_open", False))
+        if now < self._equip_replace_override_until:
+            if detected:
+                self._equip_replace_false_streak = 0
+                self._last_equip_replace_false_scene = None
+            return
+
+        if detected:
+            self._equip_replace_false_streak = 0
+            self._last_equip_replace_false_scene = None
+            if not self._equip_replace_open:
+                self._equip_replace_open = True
+                self._equip_replace_idx = 0
+                if self.deploy_fsm.is_active:
+                    self.deploy_fsm.reset()
+                self._clear_shop_pending_buy()
+                self._emote_panel_open = False
+                self._emote_false_streak = 0
+                self._last_emote_false_scene = None
+                self._remember_zone_before_equip_replace()
+                self._free_cursor_active = False
+                self._focus_zone = FocusZone.EQUIP_REPLACE
+            elif self._focus_zone != FocusZone.EQUIP_REPLACE:
+                self._free_cursor_active = False
+                self._focus_zone = FocusZone.EQUIP_REPLACE
+            return
+
+        if not self._equip_replace_open:
+            self._equip_replace_false_streak = 0
+            self._last_equip_replace_false_scene = None
+            return
+
+        elapsed = now - self._last_equip_replace_false_ts
+        if (
+            scene_result is self._last_equip_replace_false_scene
+            and _EMOTE_SAME_RESULT_SKIP_MIN_SEC <= elapsed < _EMOTE_SAME_RESULT_SKIP_MAX_SEC
+        ):
+            return
+
+        self._last_equip_replace_false_scene = scene_result
+        self._last_equip_replace_false_ts = now
+        self._equip_replace_false_streak += 1
+        if self._equip_replace_false_streak < _EQUIP_REPLACE_CLOSE_DEBOUNCE_FRAMES:
+            return
+
+        self._equip_replace_false_streak = 0
+        self._last_equip_replace_false_scene = None
+        self._last_equip_replace_false_ts = -1e9
+        self._equip_replace_open = False
+        if self._focus_zone == FocusZone.EQUIP_REPLACE:
+            self._restore_zone_after_equip_replace()
+
+    def _handle_equip_replace_button(
+        self,
+        button: GamepadButton,
+        viewport: ViewportRect,
+        *,
+        is_repeat: bool,
+    ) -> None:
+        """处理满装备「销毁并替换」面板内左右选槽、A 销毁替换、B 取消关闭与全键位防逃逸。"""
+        if button in (GamepadButton.DPAD_LEFT, GamepadButton.DPAD_RIGHT):
+            self._equip_replace_idx = 1 - self._equip_replace_idx
+            return
+
+        # 上下键、LB/RB、LS 全部锁在面板内，防止选框逃逸回棋盘或切入自由光标
+        if button in (
+            GamepadButton.DPAD_UP,
+            GamepadButton.DPAD_DOWN,
+            GamepadButton.LB,
+            GamepadButton.RB,
+            GamepadButton.LS,
+        ):
+            return
+
+        if is_repeat:
+            return
+
+        if button == GamepadButton.A:
+            cu, cv = self._equip_replace_click_point(self._equip_replace_idx)
+            self._click_norm(cu, cv, viewport)
+            now = time.monotonic()
+            self._equip_replace_open = False
+            self._equip_replace_false_streak = 0
+            self._last_equip_replace_false_scene = None
+            self._last_equip_replace_false_ts = -1e9
+            self._equip_replace_override_until = now + _EQUIP_REPLACE_ACTION_LOCK_SECONDS
+            self._unit_selected = False
+            self._unit_detail_from_shop = False
+            self._unit_override_until = now + _STATE_SYNC_LOCK_SECONDS
+            self._restore_zone_after_equip_replace()
+            self._refresh_view_state()
+            self._emit_rumble(0.32, 0.45, 55)
+            self._set_toast("已销毁旧装备并替换")
+            return
+
+        if button == GamepadButton.B:
+            cu, cv, anchor = self._equip_replace_close_point()
+            self._click_norm(cu, cv, viewport, anchor=anchor, button="left")
+            now = time.monotonic()
+            self._equip_replace_open = False
+            self._equip_replace_false_streak = 0
+            self._last_equip_replace_false_scene = None
+            self._last_equip_replace_false_ts = -1e9
+            self._equip_replace_override_until = now + _EQUIP_REPLACE_ACTION_LOCK_SECONDS
+            self._unit_selected = False
+            self._unit_detail_from_shop = False
+            self._unit_override_until = now + _STATE_SYNC_LOCK_SECONDS
+            self._restore_zone_after_equip_replace()
+            self._refresh_view_state()
+            self._emit_rumble(0.18, 0.22, 35)
+            self._set_toast("已取消替换装备")
+
     def _sync_shop_closed_fallback(self) -> None:
         """当商店已收起时清理预选购买，并在空闲态将商店残框退回整备区。"""
         if self._shop_open:
@@ -1375,6 +1613,9 @@ class ControlDispatcher:
                 self.set_board_mirrored(
                     bool(getattr(scene_result, "board_mirrored", False))
                 )
+                self._boss_shop_centered = bool(
+                    getattr(scene_result, "boss_shop_centered", False)
+                )
                 if now >= self._shop_override_until:
                     self._shop_open = bool(scene_result.shop_open)
                 if now >= self._unit_override_until:
@@ -1390,7 +1631,9 @@ class ControlDispatcher:
                 ):
                     self._apply_shop_slot_count(detected_slots)
                 self._sync_shop_closed_fallback()
-                self._sync_emote_panel_open(scene_result, now)
+                self._sync_equip_replace_open(scene_result, now)
+                if not self._equip_replace_open:
+                    self._sync_emote_panel_open(scene_result, now)
                 self._refresh_view_state()
             elif (
                 self._current_scene == GameScene.BATTLE_COMBAT
@@ -1402,11 +1645,16 @@ class ControlDispatcher:
                 self.set_board_mirrored(
                     bool(getattr(scene_result, "board_mirrored", False))
                 )
+                self._boss_shop_centered = bool(
+                    getattr(scene_result, "boss_shop_centered", False)
+                )
                 if now >= self._unit_override_until:
                     self._unit_selected = bool(getattr(scene_result, "unit_selected", False))
                     if not self._unit_selected:
                         self._unit_detail_from_shop = False
-                self._sync_emote_panel_open(scene_result, now)
+                self._sync_equip_replace_open(scene_result, now)
+                if not self._equip_replace_open:
+                    self._sync_emote_panel_open(scene_result, now)
                 self._refresh_view_state()
             elif (
                 self._current_scene == GameScene.MODAL_CHOICE
@@ -1442,6 +1690,9 @@ class ControlDispatcher:
             self.set_board_mirrored(
                 bool(getattr(scene_result, "board_mirrored", False))
             )
+            self._boss_shop_centered = bool(
+                getattr(scene_result, "boss_shop_centered", False)
+            )
 
         if now >= self._shop_override_until:
             self._shop_open = bool(scene_result.shop_open)
@@ -1469,7 +1720,9 @@ class ControlDispatcher:
             if self._current_scene == GameScene.BATTLE_PREP:
                 self._sync_shop_closed_fallback()
             if self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT):
-                self._sync_emote_panel_open(scene_result, now)
+                self._sync_equip_replace_open(scene_result, now)
+                if not self._equip_replace_open:
+                    self._sync_emote_panel_open(scene_result, now)
             elif self._current_scene == GameScene.MODAL_CONFIRM:
                 self._apply_confirm_has_dont_ask(detected_confirm_dont_ask)
             self._refresh_view_state()
@@ -1493,7 +1746,9 @@ class ControlDispatcher:
             ),
         )
         if self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT):
-            self._sync_emote_panel_open(scene_result, now)
+            self._sync_equip_replace_open(scene_result, now)
+            if not self._equip_replace_open:
+                self._sync_emote_panel_open(scene_result, now)
 
     def _apply_scene_transition(
         self,
@@ -1523,8 +1778,10 @@ class ControlDispatcher:
             self._last_emote_false_ts = -1e9
             self._covenant_overflow = False
             self._covenant_centers_u = ()
+            self._reset_equip_replace_state()
             self._info_overlay = None
         if target_scene == GameScene.UNKNOWN_FREE_CURSOR:
+            self._boss_shop_centered = False
             self.set_board_mirrored(False)
         if target_scene != GameScene.BATTLE_PREP:
             self._shop_override_until = 0.0
@@ -1591,6 +1848,7 @@ class ControlDispatcher:
             self._last_emote_false_scene = None
             self._last_emote_false_ts = -1e9
             self._emote_override_until = now + _STATE_SYNC_LOCK_SECONDS
+            self._reset_equip_replace_state()
         self._refresh_view_state()
         if announce:
             self._set_toast("已展开商店（缩放补偿已同步）" if self._shop_open else "已收起商店（恢复标准视角）")
@@ -1641,6 +1899,11 @@ class ControlDispatcher:
     def _current_snap_center(self) -> tuple[float, float]:
         """获取当前吸附焦点的归一化中心坐标。"""
         if (
+            (self._equip_replace_open or self._focus_zone == FocusZone.EQUIP_REPLACE)
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+        ):
+            return self._equip_replace_click_point(self._equip_replace_idx)
+        if (
             self._unit_selected
             and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
             and not self.deploy_fsm.is_active
@@ -1690,6 +1953,11 @@ class ControlDispatcher:
             return None
         if self._focus_zone == FocusZone.CHOICE_CARDS and self._choice_eye_hidden:
             return None
+        if (
+            (self._equip_replace_open or self._focus_zone == FocusZone.EQUIP_REPLACE)
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+        ):
+            return self._equip_replace_card_polygon(self._equip_replace_idx)
         if (
             self._unit_selected
             and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
@@ -1762,7 +2030,7 @@ class ControlDispatcher:
                 return
             if (
                 event.button == GamepadButton.LS
-                and self._focus_zone == FocusZone.EMOTE_PANEL
+                and self._focus_zone in (FocusZone.EMOTE_PANEL, FocusZone.EQUIP_REPLACE)
                 and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
                 and not self.deploy_fsm.is_active
             ):
@@ -1862,20 +2130,20 @@ class ControlDispatcher:
         """左摇杆离散四向事件直接等效于十字键，驱动全场景吸附导航。"""
         if event.stick != "left":
             return
-        in_emote_panel = (
-            self._focus_zone == FocusZone.EMOTE_PANEL
+        in_locked_panel = (
+            self._focus_zone in (FocusZone.EMOTE_PANEL, FocusZone.EQUIP_REPLACE)
             and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
             and not self.deploy_fsm.is_active
         )
-        if not in_emote_panel and getattr(self.keymap, "left_stick_mode", "dpad") != "dpad":
+        if not in_locked_panel and getattr(self.keymap, "left_stick_mode", "dpad") != "dpad":
             return
         if self.deploy_fsm.state == DeployState.AIMING_DIRECTION:
             return
-        if not in_emote_panel and (
+        if not in_locked_panel and (
             self._free_cursor_active or self._current_scene == GameScene.UNKNOWN_FREE_CURSOR
         ):
             return
-        if in_emote_panel and self._free_cursor_active:
+        if in_locked_panel and self._free_cursor_active:
             self._free_cursor_active = False
 
         dpad_btn = _DIR_TO_DPAD[event.direction]
@@ -1897,9 +2165,9 @@ class ControlDispatcher:
             return
 
         if event.stick == "left":
-            # 表情面板活跃期间严禁左摇杆连续运动激活自由光标（即便 left_stick_mode="cursor" 也稳锁面板内）
+            # 表情面板 / 满装替换面板活跃期间严禁左摇杆连续运动激活自由光标（即便 left_stick_mode="cursor" 也稳锁面板内）
             if (
-                self._focus_zone == FocusZone.EMOTE_PANEL
+                self._focus_zone in (FocusZone.EMOTE_PANEL, FocusZone.EQUIP_REPLACE)
                 and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
                 and not self.deploy_fsm.is_active
             ):
@@ -2028,6 +2296,7 @@ class ControlDispatcher:
         self._last_emote_false_scene = None
         self._last_emote_false_ts = -1e9
         self._emote_override_until = 0.0
+        self._reset_equip_replace_state()
         self._trigger_action("battle_ready", "battle_ready", "c", viewport)
         self._emit_rumble(0.50, 0.50, 80)
         self._set_toast("准备就绪 · 开始战斗")
@@ -2051,6 +2320,7 @@ class ControlDispatcher:
         if {event.modifier, event.button} == {GamepadButton.LT, GamepadButton.RT}:
             if (
                 self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+                and not self._equip_replace_open
                 and self.deploy_fsm.state
                 not in (
                     DeployState.AIMING_DIRECTION,
@@ -2080,6 +2350,13 @@ class ControlDispatcher:
 
         if self._current_scene == GameScene.MODAL_CONFIRM:
             self._click_confirm_item(1, viewport)
+            return
+
+        if (
+            (self._equip_replace_open or self._focus_zone == FocusZone.EQUIP_REPLACE)
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+        ):
+            self._handle_equip_replace_button(GamepadButton.A, viewport, is_repeat=False)
             return
 
         if (
@@ -2149,6 +2426,8 @@ class ControlDispatcher:
     def _handle_in_battle_lt_chord(
         self, button: GamepadButton, viewport: ViewportRect
     ) -> None:
+        if self._equip_replace_open:
+            return
         if button == GamepadButton.LB and self._current_scene == GameScene.BATTLE_PREP:
             target_open = not self._shop_open
             self._set_shop_open(target_open, viewport, force=True, announce=True)
@@ -2618,6 +2897,10 @@ class ControlDispatcher:
         *,
         is_repeat: bool,
     ) -> None:
+        if self._equip_replace_open or self._focus_zone == FocusZone.EQUIP_REPLACE:
+            self._handle_equip_replace_button(button, viewport, is_repeat=is_repeat)
+            return
+
         if self._unit_selected:
             self._handle_unit_selected_button(button, viewport, is_repeat=is_repeat)
             return
@@ -2733,6 +3016,13 @@ class ControlDispatcher:
             elif button == GamepadButton.B and not is_repeat:
                 self.deploy_fsm.cancel(viewport)
                 self._set_toast("已取消干员落位")
+            return
+
+        # 1a. 满装备「销毁并替换」面板优先拦截（高于 unit_selected，防止被左侧装备详情侧栏劫持）
+        if fsm_state == DeployState.IDLE and (
+            self._equip_replace_open or self._focus_zone == FocusZone.EQUIP_REPLACE
+        ):
+            self._handle_equip_replace_button(button, viewport, is_repeat=is_repeat)
             return
 
         # 1b. 选取角色详情特写态优先拦截（避免特写放大时棋盘框选错位）
@@ -3216,6 +3506,11 @@ class ControlDispatcher:
 
     def _build_base_focus_label(self) -> str:
         if (
+            (self._equip_replace_open or self._focus_zone == FocusZone.EQUIP_REPLACE)
+            and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+        ):
+            return f"替换装备 [{self._equip_replace_idx + 1}/2]"
+        if (
             self._unit_selected
             and self._current_scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
             and not self.deploy_fsm.is_active
@@ -3342,6 +3637,16 @@ class ControlDispatcher:
             if self._selected_choice_idx is not None:
                 items.append(PromptItem("B", "重选"))
             return items
+        # 满装备「销毁并替换」面板专属提示条（优先级高于角色详情）
+        if (
+            (self._equip_replace_open or self._focus_zone == FocusZone.EQUIP_REPLACE)
+            and scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT)
+        ):
+            return [
+                PromptItem("LS/十字键", "选择已穿戴装备"),
+                PromptItem("A", "销毁并替换"),
+                PromptItem("B", "取消关闭"),
+            ]
         # 选取角色特写详情态专属底部提示条
         if (
             self._unit_selected
