@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from arkcontroller.config.loader import ConfigLoader
+from arkcontroller.config.loader import _LAYOUT_TOP_LEVEL_KEYS, ConfigLoader
 from arkcontroller.config.models import (
     REQUIRED_BUTTON_KEYS,
     KeymapConfig,
@@ -591,6 +591,10 @@ class TestConfigSystem:
         raw_layout.pop("emote_bottom_zone", None)
         raw_layout.pop("mirrored_board_quad", None)
         raw_layout.pop("mirrored_equip_zone", None)
+        raw_layout.pop("equip_replace_zone", None)
+        if isinstance(raw_layout.get("view_overrides"), dict):
+            raw_layout["view_overrides"].pop("shop_open_boss", None)
+            raw_layout["view_overrides"].pop("combat", None)
         for new_key in (
             "safe_blank",
             "strategy_avatar",
@@ -601,6 +605,7 @@ class TestConfigSystem:
             "confirm_yes",
             "confirm_dont_ask",
             "emote_panel_center",
+            "equip_replace_close",
         ):
             raw_layout["buttons"].pop(new_key, None)
 
@@ -618,6 +623,18 @@ class TestConfigSystem:
         assert layout.mirrored_equip_zone.name == "equip_mirrored"
         assert layout.mirrored_equip_zone.start_u == pytest.approx(0.22475)
         assert layout.mirrored_equip_zone.end_u == pytest.approx(0.50715)
+        assert layout.equip_replace_zone.name == "equip_replace"
+        assert layout.equip_replace_zone.count == 2
+        assert layout.resolve_equip_replace_click_point(0) == pytest.approx((0.67031, 0.82500))
+        assert layout.resolve_equip_replace_click_point(1) == pytest.approx((0.87852, 0.82500))
+        assert layout.buttons["equip_replace_close"] == NormalizedPoint(
+            0.96133, 0.26181, "center_16_9"
+        )
+        # 旧配置缺少 shop_open_boss / combat view_overrides 时自动命中内置默认视口变换回退
+        assert layout.resolve_board_quad(LayoutViewState.SHOP_OPEN_BOSS) != layout.board_quad
+        assert layout.resolve_board_quad(LayoutViewState.COMBAT) != layout.board_quad
+        assert layout.resolve_bench_zone(LayoutViewState.COMBAT) != layout.bench_zone
+        assert layout.resolve_equip_zone(LayoutViewState.COMBAT) != layout.equip_zone
         assert layout.buttons["safe_blank"] == NormalizedPoint(0.1172, 0.0903, "left_edge")
         assert layout.buttons["emote_panel_center"] == NormalizedPoint(0.1290, 0.7400, "left_edge")
         assert layout.buttons["strategy_avatar"] == NormalizedPoint(0.9605, 0.3243, "right_edge")
@@ -836,6 +853,142 @@ class TestConfigSystem:
         assert layout.resolve_choice_confirm_point(0, 3)[1] * h == pytest.approx(486.0, abs=1.0)
         assert layout.resolve_choice_confirm_point(1, 6)[1] * h == pytest.approx(338.0, abs=1.0)
         assert layout.resolve_choice_confirm_point(4, 6)[1] * h == pytest.approx(635.0, abs=1.0)
+
+    def test_v110_shop_open_boss_combat_and_equip_replace_layout(self, tmp_path: Path) -> None:
+        """v1.1.0：验证 shop_open_boss、combat（含正向/镜像）与满装备替换面板投影精度及旧配置回退。"""
+        loader = ConfigLoader(use_user_override=False)
+        _, layout = loader.load()
+        w, h = 1280.0, 720.0
+
+        assert LayoutViewState.SHOP_OPEN_BOSS.value == "shop_open_boss"
+        assert LayoutViewState.COMBAT.value == "combat"
+        assert "shop_open_boss" in layout.view_overrides
+        assert "combat" in layout.view_overrides
+        assert "equip_replace_zone" in _LAYOUT_TOP_LEVEL_KEYS
+
+        # 1. Boss 战左侧正向开店（shop_open_boss）：水平居中不左移，相对普通 shop_open 整体右移 ~37-39px
+        normal_shop_board = layout.resolve_board_quad(LayoutViewState.SHOP_OPEN)
+        boss_shop_board = layout.resolve_board_quad(LayoutViewState.SHOP_OPEN_BOSS)
+        assert (boss_shop_board.top_left[0] - normal_shop_board.top_left[0]) * w == pytest.approx(
+            40.3, abs=2.0
+        )
+        assert (boss_shop_board.top_right[0] - normal_shop_board.top_right[0]) * w == pytest.approx(
+            35.1, abs=2.0
+        )
+        assert (boss_shop_board.top_left[1] - normal_shop_board.top_left[1]) * h == pytest.approx(
+            3.5, abs=0.5
+        )
+        boss_shop_bench = layout.resolve_bench_zone(LayoutViewState.SHOP_OPEN_BOSS)
+        normal_shop_bench = layout.resolve_bench_zone(LayoutViewState.SHOP_OPEN)
+        assert boss_shop_bench.slot_center(0)[0] * w > normal_shop_bench.slot_center(0)[0] * w + 35.0
+        assert boss_shop_bench.slot_center(9)[0] * w > normal_shop_bench.slot_center(9)[0] * w + 30.0
+        boss_shop_equip = layout.resolve_equip_zone(LayoutViewState.SHOP_OPEN_BOSS)
+        normal_shop_equip = layout.resolve_equip_zone(LayoutViewState.SHOP_OPEN)
+        assert boss_shop_equip.slot_center(2)[0] * w > normal_shop_equip.slot_center(2)[0] * w + 35.0
+
+        # 2. 作战期（combat）推近 ~1.15x + 右下平移：同时验证正向棋盘/整备/装备与 Boss 镜像棋盘/装备
+        combat_board = layout.resolve_board_quad(LayoutViewState.COMBAT, mirrored=False)
+        combat_bench = layout.resolve_bench_zone(LayoutViewState.COMBAT, mirrored=False)
+        combat_equip = layout.resolve_equip_zone(LayoutViewState.COMBAT, mirrored=False)
+        assert combat_board.top_left[0] * w == pytest.approx(
+            (0.5 + (0.34531 - 0.5) * 1.15250 + 0.03450) * w, abs=0.2
+        )
+        assert combat_board.top_left[1] * h == pytest.approx(
+            (0.5 + (0.27870 - 0.5) * 1.15000 + 0.02550) * h, abs=0.2
+        )
+        # 作战期整备区向右下外扩，且保持 10 槽不镜像
+        assert combat_bench == layout.resolve_bench_zone(LayoutViewState.COMBAT, mirrored=True)
+        assert (combat_bench.end_u - combat_bench.start_u) > (
+            layout.bench_zone.end_u - layout.bench_zone.start_u
+        )
+        # 作战期装备区采用独立精校 transform (scale_x=1.15396, offset_u=0.03686, offset_v=0.02750)
+        assert combat_equip.start_u == pytest.approx(
+            0.5 + (layout.equip_zone.start_u - 0.5) * 1.15396 + 0.03686, abs=1e-5
+        )
+        assert combat_equip.start_v == pytest.approx(
+            0.5 + (layout.equip_zone.start_v - 0.5) * 1.15000 + 0.02750, abs=1e-5
+        )
+        # Boss 右侧镜像棋盘与镜像装备台在 combat 态下自动复用 combat transform 且落点合理不越界
+        combat_m_board = layout.resolve_board_quad(LayoutViewState.COMBAT, mirrored=True)
+        combat_m_equip = layout.resolve_equip_zone(LayoutViewState.COMBAT, mirrored=True)
+        assert 130.0 <= combat_m_board.bottom_left[0] * w <= 150.0
+        assert 835.0 <= combat_m_board.bottom_right[0] * w <= 865.0
+        assert 190.0 <= combat_m_board.top_right[1] * h <= 205.0
+        assert 505.0 <= combat_m_board.bottom_left[1] * h <= 530.0
+        assert 270.0 <= combat_m_equip.start_u * w <= 290.0
+        assert 685.0 <= combat_m_equip.end_u * w <= 705.0
+        assert 550.0 <= combat_m_equip.start_v * h <= 566.0
+
+        # 3. 精简 LayoutProfile(view_overrides={}) 自动回退内置默认，且显式覆写优先生效
+        minimal_layout = LayoutProfile(
+            shop_zone=layout.shop_zone,
+            bench_zone=layout.bench_zone,
+            equip_zone=layout.equip_zone,
+            choice_zone=layout.choice_zone,
+            board_quad=layout.board_quad,
+            buttons={k: layout.buttons[k] for k in REQUIRED_BUTTON_KEYS},
+        )
+        assert minimal_layout.resolve_board_quad(LayoutViewState.SHOP_OPEN_BOSS) == boss_shop_board
+        assert minimal_layout.resolve_board_quad(LayoutViewState.COMBAT) == combat_board
+        assert minimal_layout.resolve_equip_zone(LayoutViewState.COMBAT) == combat_equip
+
+        custom_combat_tf = ViewportTransform(scale_x=1.05, scale_y=1.05, offset_u=0.01, offset_v=0.01)
+        minimal_layout.view_overrides["combat"] = ViewLayoutOverride(board_transform=custom_combat_tf)
+        assert minimal_layout.resolve_board_quad(LayoutViewState.COMBAT) == custom_combat_tf.apply_quad(
+            minimal_layout.board_quad
+        )
+
+        # 4. 满装备「销毁并替换」面板（equip_replace_zone + equip_replace_close）与序列化往返
+        dumped = layout.to_dict()
+        assert "equip_replace_zone" in dumped
+        restored = LayoutProfile.from_dict(dumped)
+        assert restored.equip_replace_zone == layout.equip_replace_zone
+
+        click0 = layout.resolve_equip_replace_click_point(0)
+        click1 = layout.resolve_equip_replace_click_point(1)
+        assert click0[0] * w == pytest.approx(858.0, abs=0.5)
+        assert click0[1] * h == pytest.approx(594.0, abs=0.5)
+        assert click1[0] * w == pytest.approx(1124.5, abs=0.5)
+        assert click1[1] * h == pytest.approx(594.0, abs=0.5)
+        close_btn = layout.buttons["equip_replace_close"]
+        assert close_btn.u * w == pytest.approx(1230.5, abs=0.5)
+        assert close_btn.v * h == pytest.approx(188.5, abs=0.5)
+
+        poly0 = layout.resolve_equip_replace_card_polygon(0)
+        poly1 = layout.resolve_equip_replace_card_polygon(1)
+        for poly, click, raw_box in (
+            (poly0, click0, (742.0, 291.0, 974.0, 626.0)),
+            (poly1, click1, (1009.0, 291.0, 1240.0, 626.0)),
+        ):
+            for pu, pv in poly:
+                assert 0.004 <= pu <= 0.996
+                assert 0.004 <= pv <= 0.996
+            x0, y0 = poly[0][0] * w, poly[0][1] * h
+            x1, y1 = poly[2][0] * w, poly[2][1] * h
+            # 外扩包裹原始卡片边框（约 ±6px）且点击中心位于选框内
+            assert x0 < raw_box[0] and x1 > raw_box[2]
+            assert y0 < raw_box[1] and y1 > raw_box[3]
+            assert raw_box[0] - x0 == pytest.approx(6.5, abs=1.5)
+            assert x1 - raw_box[2] == pytest.approx(6.5, abs=1.5)
+            assert x0 < click[0] * w < x1
+            assert y0 < click[1] * h < y1
+        # 左右两张外扩选框之间留出清晰净空不打架
+        assert (poly1[0][0] - poly0[2][0]) * w >= 18.0
+
+        # 5. 验证扁平覆盖键写入 equip_replace_zone
+        repo_configs = Path(__file__).resolve().parents[1] / "configs"
+        (tmp_path / "default_bindings.json").write_text(
+            (repo_configs / "default_bindings.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (tmp_path / "stronghold_layout_16_9.json").write_text(
+            (repo_configs / "stronghold_layout_16_9.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        tmp_loader = ConfigLoader(config_dir=tmp_path)
+        tmp_loader.save_user_override({"equip_replace_zone": {"start_u": 0.68}})
+        _, tmp_layout = tmp_loader.reload()
+        assert tmp_layout.equip_replace_zone.start_u == pytest.approx(0.68)
 
     def test_save_user_override_merge_and_reload(self, tmp_path: Path) -> None:
         repo_configs = Path(__file__).resolve().parents[1] / "configs"
