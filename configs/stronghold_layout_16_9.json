@@ -124,6 +124,16 @@
     "slot_w": 0.068,
     "slot_h": 0.088
   },
+  "equip_replace_zone": {
+    "name": "equip_replace",
+    "count": 2,
+    "start_u": 0.67031,
+    "start_v": 0.63681,
+    "end_u": 0.87852,
+    "end_v": 0.63681,
+    "slot_w": 0.19141,
+    "slot_h": 0.48333
+  },
   "buttons": {
     "back": { "u": 0.046, "v": 0.062, "anchor": "left_edge" },
     "shop_toggle": { "u": 0.930, "v": 0.935, "anchor": "right_edge" },
@@ -155,7 +165,8 @@
     "teammate_1": { "u": 0.0414, "v": 0.2681, "anchor": "left_edge" },
     "teammate_2": { "u": 0.0410, "v": 0.3729, "anchor": "left_edge" },
     "teammate_3": { "u": 0.0410, "v": 0.4778, "anchor": "left_edge" },
-    "teammate_4": { "u": 0.0410, "v": 0.5833, "anchor": "left_edge" }
+    "teammate_4": { "u": 0.0410, "v": 0.5833, "anchor": "left_edge" },
+    "equip_replace_close": { "u": 0.96133, "v": 0.26181, "anchor": "center_16_9" }
   },
   "view_overrides": {
     "shop_open": {
@@ -180,6 +191,58 @@
         "scale_y": 0.79099,
         "offset_u": -0.02889,
         "offset_v": -0.09946,
+        "pivot_u": 0.5,
+        "pivot_v": 0.5
+      }
+    },
+    "shop_open_boss": {
+      "board_transform": {
+        "scale_x": 0.81800,
+        "scale_y": 0.79099,
+        "offset_u": 0.00110,
+        "offset_v": -0.09460,
+        "pivot_u": 0.5,
+        "pivot_v": 0.5
+      },
+      "bench_transform": {
+        "scale_x": 0.81496,
+        "scale_y": 0.79099,
+        "offset_u": 0.00092,
+        "offset_v": -0.09460,
+        "pivot_u": 0.5,
+        "pivot_v": 0.5
+      },
+      "equip_transform": {
+        "scale_x": 0.82724,
+        "scale_y": 0.79099,
+        "offset_u": 0.00087,
+        "offset_v": -0.09460,
+        "pivot_u": 0.5,
+        "pivot_v": 0.5
+      }
+    },
+    "combat": {
+      "board_transform": {
+        "scale_x": 1.15250,
+        "scale_y": 1.15000,
+        "offset_u": 0.03450,
+        "offset_v": 0.02550,
+        "pivot_u": 0.5,
+        "pivot_v": 0.5
+      },
+      "bench_transform": {
+        "scale_x": 1.15250,
+        "scale_y": 1.15000,
+        "offset_u": 0.03450,
+        "offset_v": 0.02550,
+        "pivot_u": 0.5,
+        "pivot_v": 0.5
+      },
+      "equip_transform": {
+        "scale_x": 1.15396,
+        "scale_y": 1.15000,
+        "offset_u": 0.03686,
+        "offset_v": 0.02750,
         "pivot_u": 0.5,
         "pivot_v": 0.5
       }

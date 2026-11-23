@@ -90,7 +90,9 @@ PAGE_TITLES: tuple[tuple[str, str, str], ...] = (
 VIEW_STATE_LABELS: dict[str, str] = {
     LayoutViewState.NORMAL.value: "默认态",
     LayoutViewState.SHOP_OPEN.value: "商店展开态",
+    "shop_open_boss": "Boss 开店居中态",
     LayoutViewState.UNIT_SELECTED.value: "角色特写态",
+    "combat": "作战推近态",
 }
 
 
@@ -1016,6 +1018,7 @@ KEYMAP_BRIEFS: tuple[tuple[str, str, str, tuple[tuple[str, str], ...]], ...] = (
         ("LS/D-PAD", "选择四向朝向"),
         ("双击A", "同格回环拖拽，原地转向"),
         ("X", "快速出售（官方 X 键）"),
+        ("LS/十字键", "满装替换：选旧装备 · A 销毁并替换 · B 取消"),
         ("B", "取消抓取 / 取消定朝向"),
     )),
     ("STRATEGY", "右侧策略头像", "FocusZone.STRATEGY", (

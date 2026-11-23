@@ -198,6 +198,8 @@ def test_enum_and_result_contract() -> None:
     assert res.confirm_has_dont_ask is True
     assert res.board_mirrored is False
     assert res.covenant_centers_u == ()
+    assert res.boss_shop_centered is False
+    assert res.equip_replace_open is False
     with pytest.raises(FrozenInstanceError):
         res.confidence = 0.5  # type: ignore[misc]
 
@@ -1302,6 +1304,7 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
         r"C:\Users\MUXI\.gemini\antigravity\brain\26ef9845-6d52-4d6e-925c-cbef8d7a9ccc\scratch"
     )
 
+    a7_sc = a7_dir / "scratch"
     cases: list[
         tuple[
             Path,
@@ -1316,6 +1319,10 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
             bool | None,
         ]
     ] = [
+        # v1.1.0 新增 3 张实机截图（Boss 左侧开店居中、满装备销毁并替换、作战期独立镜头）
+        (a7_up / "media_1795408257092_49a0c5bb.jpg", GameScene.BATTLE_PREP, True, 6, None, None, False, None, 7, True),
+        (a7_up / "media_1795410403826_d9897b6b.jpg", GameScene.BATTLE_PREP, False, None, None, None, False, None, 7, False),
+        (a7_up / "media_1795410431525_705cc3b4.jpg", GameScene.BATTLE_COMBAT, False, None, None, None, False, None, 7, False),
         # v0.3.1 / v0.3.2 / v0.3.3 新增多主题、双灰商店、Boss 战镜像、多盟约与作战期实机截图
         (a7_up / "media_1795325671726_73b3d7cb.jpg", GameScene.BATTLE_PREP, True, 4, None, None, False, None, 3, False),
         (a7_up / "media_1795325671732_1bc865a7.jpg", GameScene.BATTLE_PREP, True, 5, None, None, False, None, 4, False),
@@ -1324,7 +1331,7 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
         (a7_up / "media_1795328987598_9f30b6b8.jpg", GameScene.BATTLE_COMBAT, False, None, None, None, False, None, 0, False),
         (a7_up / "media_1795332461252_fe50bbf2.jpg", GameScene.BATTLE_PREP, True, 5, None, None, False, None, 6, False),
         (a7_up / "media_1795334505233_979719ff.jpg", GameScene.BATTLE_PREP, True, 6, None, None, False, None, 7, True),
-        # 历史核心实机截图回归
+        # 历史全量实机截图回归（共 46 张实机全覆盖）
         (a7_up / "media_1795266584081_fc922d8f.jpg", GameScene.MODAL_CHOICE, False, None, 6, None, False, None, None, False),
         (a7_up / "media_1795266595030_fc375d1b.jpg", GameScene.MODAL_CONFIRM, False, None, None, None, False, False, None, False),
         (a7_up / "media_1795267445949_6c2d7322.jpg", GameScene.BATTLE_PREP, False, None, None, None, True, None, 0, False),
@@ -1334,13 +1341,33 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
         (a7_up / "media_1795249195269_5c024fc5.jpg", GameScene.MODAL_CHOICE, False, None, 3, 0, False, None, None, False),
         (a7_up / "media_1795250588564_ad5eab9e.jpg", GameScene.MODAL_CHOICE, False, None, 6, 4, False, None, None, False),
         (a7_up / "media_1795263414030_b12d9638.jpg", GameScene.MODAL_CHOICE, False, None, 2, 1, False, None, None, False),
+        (old_sc / "ark_grab.png", GameScene.UNKNOWN_FREE_CURSOR, False, None, None, None, False, None, None, False),
+        (a7_sc / "media0_ark_crop.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "shop_4slot_verify.png", GameScene.BATTLE_PREP, True, 4, None, None, False, None, 0, False),
+        (old_sc / "shop_5slot_verify.png", GameScene.BATTLE_PREP, True, 5, None, None, False, None, 0, False),
+        (old_sc / "shop_6slot_verify.png", GameScene.BATTLE_PREP, True, 6, None, None, False, None, 0, False),
+        (old_sc / "e2e_3_shop_frozen.png", GameScene.BATTLE_PREP, True, 4, None, None, False, None, 0, False),
         (old_sc / "state1_normal.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
         (old_sc / "state2_shop_open.png", GameScene.BATTLE_PREP, True, 4, None, None, False, None, 0, False),
+        (old_sc / "state3_unit_selected.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state3b_after_rclick.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state3c_after_lclick.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state4_drag_to_board.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state4b_mid_drag.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state4c_deployed.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state5_click_green_tile.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state6_after_mcp_drag.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state7a_bench_mid.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state7b_bench_end.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state8a_mid.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state8b_end.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
+        (old_sc / "state9_on_board.png", GameScene.UNKNOWN_FREE_CURSOR, False, None, None, None, False, None, None, False),
         (old_sc / "state10_aim_done.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 1, False),
         (old_sc / "state11_board_unit_selected.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 1, False),
         (old_sc / "state12_after_q_retreat.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 1, False),
+        (old_sc / "state13_left_magnifier.png", GameScene.UNKNOWN_FREE_CURSOR, False, None, None, None, False, None, None, False),
         (old_sc / "state14_key_w.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
-        (a7_dir / "shop_6slot_verify.png", GameScene.BATTLE_PREP, True, 6, None, None, False, None, 0, False),
+        (old_sc / "state15_restored.png", GameScene.BATTLE_PREP, False, None, None, None, False, None, 0, False),
     ]
 
     available = [c for c in cases if c[0].exists()]
@@ -1398,6 +1425,14 @@ def test_optional_real_screenshots_regression(tmp_path: Path) -> None:
         exp_mirrored = img_path.name == "media_1795334505233_979719ff.jpg"
         assert res.board_mirrored is exp_mirrored, (
             f"{img_path.name}: board_mirrored mismatch {res}"
+        )
+        exp_boss_shop = img_path.name == "media_1795408257092_49a0c5bb.jpg"
+        assert res.boss_shop_centered is exp_boss_shop, (
+            f"{img_path.name}: boss_shop_centered mismatch {res}"
+        )
+        exp_equip_replace = img_path.name == "media_1795410403826_d9897b6b.jpg"
+        assert res.equip_replace_open is exp_equip_replace, (
+            f"{img_path.name}: equip_replace_open mismatch {res}"
         )
         if img_path.name == "media_1795328987598_9f30b6b8.jpg":
             assert res.has_teammates is True, f"{img_path.name}: expected has_teammates=True, got {res}"
@@ -2439,6 +2474,224 @@ def test_v033_in_game_chrome_resists_wda_none_white_hud_and_toast_occlusion(
         assert r_occ.board_mirrored is True
         assert r_occ.covenant_count == 7
         assert r_occ.covenant_overflow is True
+
+
+# =====================================================================
+# 11. v1.1.0 专项：Boss 战左侧开店居中锁存与满装备「销毁并替换」面板抗污染检测
+# =====================================================================
+
+
+def _draw_left_cyan_defense_box(frame: np.ndarray, *, x0: int, y0: int = 290, size: int = 92) -> None:
+    """在左侧 3D 防御箱 ROI (x=280..500, y=260..405) 绘制青蓝发光防御箱大连通框。"""
+    # 青蓝发光框（BGR (225, 200, 70) -> H≈95, S≈175, V=225），7x7 膨胀后尺寸约 size+6 ∈ [65..135]
+    cv2.rectangle(frame, (x0, y0), (x0 + size, y0 + size), (225, 200, 70), 8)
+
+
+def _draw_equip_replace_panel(frame: np.ndarray) -> None:
+    """在右侧半屏绘制满装备「销毁并替换」双槽面板（双暗红按钮 + 暗缝 + 右上 [×] + 底部暗条）。"""
+    # 整体右侧深黑半透明面板底（V=26 <= 50）
+    cv2.rectangle(frame, (686, 145), (1275, 670), (24, 26, 28), -1)
+    # 两张已穿戴装备卡主卡面（保留中间 x=978..1005 垂直暗缝）
+    cv2.rectangle(frame, (742, 291), (974, 560), (88, 92, 98), -1)
+    cv2.rectangle(frame, (1009, 291), (1240, 560), (88, 92, 98), -1)
+    # 底部两枚暗红「销毁并替换」实心按钮（BGR (42, 40, 150) -> H≈1, S≈187, V=150）
+    cv2.rectangle(frame, (742, 562), (974, 626), (42, 40, 150), -1)
+    cv2.rectangle(frame, (1009, 562), (1240, 626), (42, 40, 150), -1)
+    # 按钮中央少量白色图标/文字线条
+    cv2.rectangle(frame, (812, 586), (904, 602), (235, 235, 235), -1)
+    cv2.rectangle(frame, (1079, 586), (1171, 602), (235, 235, 235), -1)
+    # 右上灰白实心 [×] 关闭按钮 [1204..1257, 162..215] + 粗深灰斜叉（S=0, V=82 ∈ [40..125]）
+    cv2.rectangle(frame, (1204, 162), (1257, 215), (185, 185, 185), -1)
+    cv2.line(frame, (1214, 172), (1247, 205), (82, 82, 82), 8)
+    cv2.line(frame, (1247, 172), (1214, 205), (82, 82, 82), 8)
+
+
+def test_v110_boss_shop_centered_detection_and_latch_lifecycle(tmp_path: Path) -> None:
+    """验证 Boss 战左侧开店居中检测（x0>=344 & cx>=390）、全遮挡锁存保持及镜像/出局清零生命周期。"""
+    # 1. 单帧区分：常规左移开店 (x0=320, cx=369) vs Boss 战左侧居中开店 (x0=364, cx=413)
+    f_norm_shop = _make_base_shop_frame()
+    _draw_left_cyan_defense_box(f_norm_shop, x0=320, y0=290, size=92)
+    hsv_norm = cv2.cvtColor(f_norm_shop, cv2.COLOR_BGR2HSV)
+    assert SceneDetector._observe_boss_shop_centered_heuristic(hsv_norm, shop_open=True) is False
+    assert SceneDetector._detect_boss_shop_centered_heuristic(hsv_norm, shop_open=True) is False
+
+    f_boss_shop = _make_base_shop_frame()
+    _draw_left_cyan_defense_box(f_boss_shop, x0=364, y0=290, size=92)
+    hsv_boss = cv2.cvtColor(f_boss_shop, cv2.COLOR_BGR2HSV)
+    assert SceneDetector._observe_boss_shop_centered_heuristic(hsv_boss, shop_open=True) is True
+    assert SceneDetector._detect_boss_shop_centered_heuristic(hsv_boss, shop_open=True) is True
+
+    # 遮挡/关店/镜像/角色详情/满装替换门禁均安全返回 None
+    assert SceneDetector._observe_boss_shop_centered_heuristic(hsv_boss, shop_open=False) is None
+    assert SceneDetector._observe_boss_shop_centered_heuristic(hsv_boss, shop_open=True, board_mirrored=True) is None
+    assert SceneDetector._observe_boss_shop_centered_heuristic(hsv_boss, shop_open=True, unit_selected=True) is None
+    assert SceneDetector._observe_boss_shop_centered_heuristic(hsv_boss, shop_open=True, equip_replace_open=True) is None
+
+    # 2. 完整锁存状态机生命周期（debounce_frames=2）
+    det = SceneDetector(templates_dir=tmp_path, debounce_frames=2)
+
+    # 2a. 连续 2 帧 Boss 左侧开店 -> 锁存 boss_shop_centered=True
+    det.detect(f_boss_shop)
+    r_enter = det.detect(f_boss_shop)
+    assert r_enter.scene == GameScene.BATTLE_PREP
+    assert r_enter.shop_open is True
+    assert r_enter.board_mirrored is False
+    assert r_enter.boss_shop_centered is True
+
+    # 2b. 瞬态 1 帧纯黑过场 -> 防抖抑制且维持锁存 True
+    black = np.zeros((STANDARD_HEIGHT, STANDARD_WIDTH, 3), dtype=np.uint8)
+    r_blink = det.detect(black)
+    assert r_blink.scene == GameScene.BATTLE_PREP
+    assert r_blink.boss_shop_centered is True
+
+    # 2c. 关店（shop_open=False）与打开角色详情（unit_selected=True）均维持锁存 True
+    f_closed = _make_theme3_rhodes_shop_frame(shop_open=False)
+    r_closed = det.detect(f_closed)
+    assert r_closed.scene == GameScene.BATTLE_PREP
+    assert r_closed.shop_open is False
+    assert r_closed.boss_shop_centered is True
+
+    f_equip_rep = f_closed.copy()
+    _draw_equip_replace_panel(f_equip_rep)
+    r_er = det.detect(f_equip_rep)
+    assert r_er.equip_replace_open is True
+    assert r_er.boss_shop_centered is True
+
+    # 2d. 局内三选一弹窗与作战期均维持锁存 True
+    f_modal = _make_real_style_modal_frame(choice_count=3)
+    det.detect(f_modal)
+    r_modal = det.detect(f_modal)
+    assert r_modal.scene == GameScene.MODAL_CHOICE
+    assert r_modal.boss_shop_centered is True
+
+    f_combat = _make_battle_prep_frame(shop_open=False)
+    cv2.rectangle(f_combat, (1035, 555), (1279, 710), (45, 165, 220), -1)
+    _draw_combat_cost_bar(f_combat, with_progress_bar=True)
+    det.detect(f_combat)
+    r_combat = det.detect(f_combat)
+    assert r_combat.scene == GameScene.BATTLE_COMBAT
+    assert r_combat.boss_shop_centered is True
+
+    # 2e. 切回常规左移开店 -> 立刻更新锁存为 False
+    det.detect(f_norm_shop)
+    r_norm = det.detect(f_norm_shop)
+    assert r_norm.scene == GameScene.BATTLE_PREP
+    assert r_norm.boss_shop_centered is False
+
+    # 2f. 再次锁存 True 后切入右侧镜像战场（board_mirrored=True）-> 强制清零 boss_shop_centered=False
+    assert det.detect(f_boss_shop).boss_shop_centered is True
+    f_mirr_boss = _make_base_shop_frame()
+    _draw_stage_landmarks(f_mirr_boss, mirrored=True, shop_open=True, mode="both")
+    r_mirr = det.detect(f_mirr_boss)
+    assert r_mirr.board_mirrored is True
+    assert r_mirr.boss_shop_centered is False
+
+    # 2g. 再次锁存 True 后连续 2 帧出局（UNKNOWN_FREE_CURSOR）-> 彻底清零
+    det.reset()
+    det.detect(f_boss_shop)
+    assert det.detect(f_boss_shop).boss_shop_centered is True
+    det.detect(black)
+    r_exit = det.detect(black)
+    assert r_exit.scene == GameScene.UNKNOWN_FREE_CURSOR
+    assert r_exit.boss_shop_centered is False
+
+    # 3. 可选实机串行验证：49a0(Boss左开店 True) -> d989(满装替换维持 True) -> 705c(作战维持 True) -> 9797(右镜像清零 False)
+    a7_up = Path(
+        r"C:\Users\MUXI\.gemini\antigravity\brain\a7e72e90-d260-48de-94e8-debc493ed124\.user_uploaded"
+    )
+    p49 = a7_up / "media_1795408257092_49a0c5bb.jpg"
+    pd9 = a7_up / "media_1795410403826_d9897b6b.jpg"
+    p70 = a7_up / "media_1795410431525_705cc3b4.jpg"
+    p97 = a7_up / "media_1795334505233_979719ff.jpg"
+    if p49.exists() and pd9.exists() and p70.exists() and p97.exists():
+        det_r = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+        im49 = cv2.imdecode(np.fromfile(str(p49), dtype=np.uint8), cv2.IMREAD_COLOR)
+        imd9 = cv2.imdecode(np.fromfile(str(pd9), dtype=np.uint8), cv2.IMREAD_COLOR)
+        im70 = cv2.imdecode(np.fromfile(str(p70), dtype=np.uint8), cv2.IMREAD_COLOR)
+        im97 = cv2.imdecode(np.fromfile(str(p97), dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert im49 is not None and imd9 is not None and im70 is not None and im97 is not None
+        r49 = det_r.detect(im49)
+        assert r49.scene == GameScene.BATTLE_PREP and r49.boss_shop_centered is True
+        rd9 = det_r.detect(imd9)
+        assert rd9.equip_replace_open is True and rd9.boss_shop_centered is True
+        r70 = det_r.detect(im70)
+        assert r70.scene == GameScene.BATTLE_COMBAT and r70.boss_shop_centered is True
+        r97 = det_r.detect(im97)
+        assert r97.board_mirrored is True and r97.boss_shop_centered is False
+
+
+def test_v110_equip_replace_panel_detection_and_wda_none_immunity(tmp_path: Path) -> None:
+    """验证满装备「销毁并替换」双槽面板正负例识别与 WDA_NONE S3 选框叠画 100% 抗自污染。"""
+    detector = SceneDetector(templates_dir=tmp_path, debounce_frames=1)
+
+    # 1. 合成正例：休整期右侧弹出「销毁并替换」双槽面板 -> equip_replace_open=True 且压制表情面板
+    base = _make_theme3_rhodes_shop_frame(shop_open=False)
+    _draw_equip_replace_panel(base)
+    res_pos = detector.detect(base)
+    assert res_pos.scene == GameScene.BATTLE_PREP
+    assert res_pos.shop_open is False
+    assert res_pos.equip_replace_open is True
+    assert res_pos.emote_panel_open is False
+
+    # 2. 负例逐项消融：破坏任一关键结构均必须返回 equip_replace_open=False
+    # 2a. 抹除右侧暗红按钮
+    f_no_btn1 = base.copy()
+    cv2.rectangle(f_no_btn1, (1009, 562), (1240, 626), (48, 50, 52), -1)
+    assert detector.detect(f_no_btn1).equip_replace_open is False
+
+    # 2b. 打通两枚暗红按钮间暗缝（整条暗红栏，模拟非双槽红条）
+    f_no_gap = base.copy()
+    cv2.rectangle(f_no_gap, (974, 562), (1009, 626), (42, 40, 150), -1)
+    assert detector.detect(f_no_gap).equip_replace_open is False
+
+    # 2c. 右上 [×] 改为无深灰斜叉的纯白方块
+    f_no_cross = base.copy()
+    cv2.rectangle(f_no_cross, (1204, 162), (1257, 215), (225, 225, 225), -1)
+    assert detector.detect(f_no_cross).equip_replace_open is False
+
+    # 2d. 破坏面板双卡间垂直暗缝
+    f_no_mid_seam = base.copy()
+    cv2.rectangle(f_no_mid_seam, (978, 295), (1005, 555), (160, 160, 160), -1)
+    assert detector.detect(f_no_mid_seam).equip_replace_open is False
+
+    # 2e. 破坏底部暗条
+    f_no_bot_strip = base.copy()
+    cv2.rectangle(f_no_bot_strip, (730, 634), (1150, 664), (150, 150, 150), -1)
+    assert detector.detect(f_no_bot_strip).equip_replace_open is False
+
+    # 3. WDA_NONE S3 白+琥珀双描边选框叠画自污染压测（合成帧 + 可选实机 d9897b6b.jpg）
+    s3_rects = (
+        (731, 280, 985, 637),   # 左卡外扩选框
+        (998, 280, 1251, 637),  # 右卡外扩选框
+        (1198, 156, 1263, 221), # 右上 [×] 外扩选框
+        (742, 562, 974, 626),   # 左替换按钮紧贴框
+    )
+    for x0, y0, x1, y1 in s3_rects:
+        sim = base.copy()
+        cv2.rectangle(sim, (x0, y0), (x1, y1), (255, 255, 255), 3)
+        cv2.rectangle(sim, (x0 - 4, y0 - 4), (x1 + 4, y1 + 4), (0, 179, 255), 2)
+        assert detector.detect(sim).equip_replace_open is True
+
+    pd9 = Path(
+        r"C:\Users\MUXI\.gemini\antigravity\brain\a7e72e90-d260-48de-94e8-debc493ed124\.user_uploaded\media_1795410403826_d9897b6b.jpg"
+    )
+    if pd9.exists():
+        raw = cv2.imdecode(np.fromfile(str(pd9), dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert raw is not None
+        im_d9 = (
+            cv2.resize(raw, (STANDARD_WIDTH, STANDARD_HEIGHT), interpolation=cv2.INTER_AREA)
+            if raw.shape[:2] != (STANDARD_HEIGHT, STANDARD_WIDTH)
+            else raw
+        )
+        for x0, y0, x1, y1 in s3_rects:
+            sim_real = im_d9.copy()
+            cv2.rectangle(sim_real, (x0, y0), (x1, y1), (255, 255, 255), 3)
+            cv2.rectangle(sim_real, (x0 - 4, y0 - 4), (x1 + 4, y1 + 4), (0, 179, 255), 2)
+            detector.reset()
+            r_real = detector.detect(sim_real)
+            assert r_real.scene == GameScene.BATTLE_PREP
+            assert r_real.equip_replace_open is True
+
 
 
 

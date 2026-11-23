@@ -95,6 +95,8 @@ class SceneDetectionResult:
     confirm_has_dont_ask: bool = True
     board_mirrored: bool = False
     covenant_centers_u: tuple[float, ...] = ()
+    boss_shop_centered: bool = False
+    equip_replace_open: bool = False
 
 
 @dataclass(frozen=True)
@@ -253,6 +255,7 @@ class SceneDetector:
         self._pending_scene: GameScene | None = None
         self._pending_count: int = 0
         self._latched_board_mirrored: bool = False
+        self._latched_boss_shop_centered: bool = False
 
         self.reload_templates()
 
@@ -263,7 +266,7 @@ class SceneDetector:
             return len(self._scene_templates)
 
     def reset(self) -> None:
-        """重置防抖状态与镜像锁存至初始未知自由光标状态。"""
+        """重置防抖状态与镜像/Boss开店锁存至初始未知自由光标状态。"""
         with self._lock:
             self._stable_result = SceneDetectionResult(
                 scene=GameScene.UNKNOWN_FREE_CURSOR,
@@ -274,6 +277,7 @@ class SceneDetector:
             self._pending_scene = None
             self._pending_count = 0
             self._latched_board_mirrored = False
+            self._latched_boss_shop_centered = False
 
     def reload_templates(self) -> None:
         """扫描并重新加载 ``templates_dir`` 下的所有本地模板与 ROI 元数据。"""
@@ -405,8 +409,10 @@ class SceneDetector:
                     choice_count=3,
                 )
 
-            raw_result, mirror_obs = self._classify_single_frame_with_mirror_obs(normalized)
-            return self._apply_debounce(raw_result, mirror_obs=mirror_obs)
+            raw_result, mirror_obs, boss_obs = self._classify_single_frame_with_obs(normalized)
+            return self._apply_debounce(
+                raw_result, mirror_obs=mirror_obs, boss_obs=boss_obs
+            )
         except Exception:
             logger.exception("场景识别发生未预期异常，安全回退为 UNKNOWN_FREE_CURSOR")
             return SceneDetectionResult(
@@ -418,13 +424,20 @@ class SceneDetector:
 
     def _classify_single_frame(self, frame: np.ndarray) -> SceneDetectionResult:
         """对单帧执行“模板优先 + 启发式回退”分类（不更新防抖与锁存状态）。"""
-        result, _ = self._classify_single_frame_with_mirror_obs(frame)
+        result, _, _ = self._classify_single_frame_with_obs(frame)
         return result
 
     def _classify_single_frame_with_mirror_obs(
         self, frame: np.ndarray
     ) -> tuple[SceneDetectionResult, bool | None]:
-        """对单帧执行分类，同时返回 3D 战场镜像观测值（``True``/``False``/``None``）。"""
+        """向后兼容封装：返回单帧结果与镜像观测值。"""
+        result, mirror_obs, _ = self._classify_single_frame_with_obs(frame)
+        return (result, mirror_obs)
+
+    def _classify_single_frame_with_obs(
+        self, frame: np.ndarray
+    ) -> tuple[SceneDetectionResult, bool | None, bool | None]:
+        """对单帧执行分类，同时返回 3D 战场镜像观测值与 Boss 左侧开店居中观测值。"""
         with self._lock:
             templates = list(self._scene_templates)
             shop_template = self._shop_open_template
@@ -452,7 +465,9 @@ class SceneDetector:
             has_teammates = False
             emote_panel_open = False
             confirm_has_dont_ask = True
+            equip_replace_open = False
             mirror_obs: bool | None = None
+            boss_obs: bool | None = None
             gray_lazy: np.ndarray | None = None
             hsv_lazy: np.ndarray | None = None
 
@@ -465,6 +480,9 @@ class SceneDetector:
                     )
                 gray_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 hsv_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                equip_replace_open = self._detect_equip_replace_open_heuristic(
+                    gray_lazy, hsv_lazy
+                )
                 (
                     covenant_count,
                     covenant_overflow,
@@ -473,12 +491,19 @@ class SceneDetector:
                 has_teammates = self._detect_teammates_heuristic(
                     gray_lazy, unit_selected=unit_selected
                 )
-                if not shop_open and not unit_selected:
+                if not shop_open and not unit_selected and not equip_replace_open:
                     emote_panel_open = self._detect_emote_panel_open_heuristic(
                         gray_lazy, hsv_lazy
                     )
                 mirror_obs = self._observe_board_mirrored_heuristic(
                     hsv_lazy, shop_open=shop_open, unit_selected=unit_selected
+                )
+                boss_obs = self._observe_boss_shop_centered_heuristic(
+                    hsv_lazy,
+                    shop_open=shop_open,
+                    board_mirrored=(mirror_obs is True),
+                    unit_selected=unit_selected,
+                    equip_replace_open=equip_replace_open,
                 )
             elif best_scene == GameScene.MODAL_CHOICE:
                 shop_open = False
@@ -497,6 +522,9 @@ class SceneDetector:
                 unit_selected = self._detect_unit_selected(frame, unit_template)
                 gray_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 hsv_lazy = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                equip_replace_open = self._detect_equip_replace_open_heuristic(
+                    gray_lazy, hsv_lazy
+                )
                 (
                     covenant_count,
                     covenant_overflow,
@@ -505,7 +533,7 @@ class SceneDetector:
                 has_teammates = self._detect_teammates_heuristic(
                     gray_lazy, unit_selected=unit_selected
                 )
-                if not unit_selected:
+                if not unit_selected and not equip_replace_open:
                     emote_panel_open = self._detect_emote_panel_open_heuristic(
                         gray_lazy, hsv_lazy
                     )
@@ -528,12 +556,15 @@ class SceneDetector:
                     confirm_has_dont_ask=confirm_has_dont_ask,
                     board_mirrored=bool(mirror_obs) if mirror_obs is not None else False,
                     covenant_centers_u=covenant_centers_u,
+                    boss_shop_centered=bool(boss_obs) if boss_obs is not None else False,
+                    equip_replace_open=equip_replace_open,
                 ),
                 mirror_obs,
+                boss_obs,
             )
 
         # (b) 第二层：启发式视觉特征回退
-        return self._detect_heuristic_with_mirror_obs(frame, shop_template, unit_template)
+        return self._detect_heuristic_with_obs(frame, shop_template, unit_template)
 
     @staticmethod
     def _match_template(frame: np.ndarray, tpl: _SceneTemplate) -> float:
@@ -1337,6 +1368,134 @@ class SceneDetector:
         )
 
     @staticmethod
+    def _observe_boss_shop_centered_heuristic(
+        hsv: np.ndarray,
+        *,
+        shop_open: bool,
+        board_mirrored: bool = False,
+        unit_selected: bool = False,
+        equip_replace_open: bool = False,
+    ) -> bool | None:
+        """三态观测开店时左侧青蓝防御箱位置，区分 Boss 战左侧居中开店与常规左移开店。
+
+        仅在 ``shop_open=True`` 且非镜像、非角色特写、非满装替换面板时扫描 ``hsv[260:405, 280:500]``：
+        - ``x0 >= 344 and cx >= 390.0`` -> ``True``（Boss 战左侧居中不左移，右移 +39px）；
+        - ``x0 <= 336 and cx <= 382.0`` -> ``False``（常规关卡左移避让冻结/刷新按钮）；
+        - 其余遮挡或过渡态 -> ``None``（维持上一稳定锁存值）。
+        """
+        if not shop_open or board_mirrored or unit_selected or equip_replace_open:
+            return None
+
+        roi = hsv[260:405, 280:500]
+        if roi.size == 0:
+            return None
+        mask = (
+            (roi[:, :, 0] >= 85)
+            & (roi[:, :, 0] <= 106)
+            & (roi[:, :, 1] >= 75)
+            & (roi[:, :, 2] >= 165)
+        ).astype(np.uint8)
+        dil = cv2.dilate(mask, np.ones((7, 7), np.uint8), iterations=1)
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
+
+        best: tuple[int, float, int] | None = None
+        for lbl in range(1, num):
+            w_c = int(stats[lbl, cv2.CC_STAT_WIDTH])
+            h_c = int(stats[lbl, cv2.CC_STAT_HEIGHT])
+            area_c = int(stats[lbl, cv2.CC_STAT_AREA])
+            if not (65 <= w_c <= 135 and 65 <= h_c <= 135 and area_c >= 1500):
+                continue
+            raw_px = int(mask[labels == lbl].sum())
+            if raw_px < 450:
+                continue
+            if best is None or raw_px > best[2]:
+                x0 = 280 + int(stats[lbl, cv2.CC_STAT_LEFT])
+                cx = x0 + 0.5 * w_c
+                best = (x0, cx, raw_px)
+
+        if best is None:
+            return None
+        x0, cx, _ = best
+        if x0 >= 344 and cx >= 390.0:
+            return True
+        if x0 <= 336 and cx <= 382.0:
+            return False
+        return None
+
+    @classmethod
+    def _detect_boss_shop_centered_heuristic(
+        cls,
+        hsv: np.ndarray,
+        *,
+        shop_open: bool,
+        board_mirrored: bool = False,
+        unit_selected: bool = False,
+        equip_replace_open: bool = False,
+    ) -> bool:
+        """单帧判断当前画面是否处于 Boss 战左侧正向居中开店镜头。"""
+        return (
+            cls._observe_boss_shop_centered_heuristic(
+                hsv,
+                shop_open=shop_open,
+                board_mirrored=board_mirrored,
+                unit_selected=unit_selected,
+                equip_replace_open=equip_replace_open,
+            )
+            is True
+        )
+
+    @staticmethod
+    def _detect_equip_replace_open_heuristic(
+        gray: np.ndarray, hsv: np.ndarray
+    ) -> bool:
+        """检测满装备拖拽时弹出的右侧双槽「销毁并替换」面板（跨三主题且抗 WDA_NONE S3 选框）。
+
+        联合校验：
+        1. 左右两枚底部暗红替换按钮内框 ``hsv[568:620, 748:968]`` 与 ``[1015:1234]`` 红占比均 >= 0.45；
+        2. 两钮间暗缝 ``hsv[568:620, 978:1005]`` 红占比 <= 0.08 且暗占比 ``V <= 50`` >= 0.65；
+        3. 右上 ``[×]`` 按钮 ``hsv[164:213, 1206:1255]`` 亮灰 >= 0.30、深灰斜叉 >= 0.18，
+           且其紧邻左侧面板暗底 ``hsv[164:213, 1145:1195, 2] <= 55`` >= 0.65；
+        4. 面板双卡间垂直暗缝 ``gray[295:555, 978:1005] <= 52`` >= 0.65
+           且底部暗条 ``gray[634:664, 730:1150] <= 52`` >= 0.65。
+        """
+
+        def _red_btn_ratio(roi: np.ndarray) -> float:
+            mask = (
+                ((roi[:, :, 0] <= 12) | (roi[:, :, 0] >= 168))
+                & (roi[:, :, 1] >= 90)
+                & (roi[:, :, 2] >= 55)
+                & (roi[:, :, 2] <= 215)
+            )
+            return float(mask.mean())
+
+        if _red_btn_ratio(hsv[568:620, 748:968]) < 0.45:
+            return False
+        if _red_btn_ratio(hsv[568:620, 1015:1234]) < 0.45:
+            return False
+
+        gap_roi = hsv[568:620, 978:1005]
+        if _red_btn_ratio(gap_roi) > 0.08 or float((gap_roi[:, :, 2] <= 50).mean()) < 0.65:
+            return False
+
+        x_btn = hsv[164:213, 1206:1255]
+        x_light = float(((x_btn[:, :, 1] <= 35) & (x_btn[:, :, 2] >= 135)).mean())
+        x_cross = float(
+            (
+                (x_btn[:, :, 1] <= 35)
+                & (x_btn[:, :, 2] >= 40)
+                & (x_btn[:, :, 2] <= 125)
+            ).mean()
+        )
+        if x_light < 0.30 or x_cross < 0.18:
+            return False
+        if float((hsv[164:213, 1145:1195, 2] <= 55).mean()) < 0.65:
+            return False
+
+        if float((gray[295:555, 978:1005] <= 52).mean()) < 0.65:
+            return False
+        return float((gray[634:664, 730:1150] <= 52).mean()) >= 0.65
+
+    @staticmethod
     def _detect_confirm_has_dont_ask_heuristic(gray: np.ndarray) -> bool:
         """判断确认弹窗中央偏下区域是否存在「☐ 本局不再提示」勾选行。"""
         return float((gray[388:418, 545:735] >= 100).mean()) >= 0.05
@@ -1415,7 +1574,7 @@ class SceneDetector:
         unit_template: _SceneTemplate | None = None,
     ) -> SceneDetectionResult:
         """基于 1280x720 画面亮度/边缘/色块特征的保守启发式回退判别器。"""
-        result, _ = self._detect_heuristic_with_mirror_obs(
+        result, _, _ = self._detect_heuristic_with_obs(
             frame, shop_template, unit_template
         )
         return result
@@ -1426,7 +1585,19 @@ class SceneDetector:
         shop_template: _SceneTemplate | None,
         unit_template: _SceneTemplate | None = None,
     ) -> tuple[SceneDetectionResult, bool | None]:
-        """启发式判别器主流程，同时返回 3D 战场镜像三态观测值供锁存器使用。"""
+        """向后兼容封装：返回启发式识别结果与镜像观测值。"""
+        result, mirror_obs, _ = self._detect_heuristic_with_obs(
+            frame, shop_template, unit_template
+        )
+        return (result, mirror_obs)
+
+    def _detect_heuristic_with_obs(
+        self,
+        frame: np.ndarray,
+        shop_template: _SceneTemplate | None,
+        unit_template: _SceneTemplate | None = None,
+    ) -> tuple[SceneDetectionResult, bool | None, bool | None]:
+        """启发式判别器主流程，同时返回镜像与 Boss 左侧开店三态观测值供锁存器使用。"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if float(gray.std()) < 8.0:
             return (
@@ -1437,6 +1608,7 @@ class SceneDetector:
                     choice_count=3,
                 ),
                 None,
+                None,
             )
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -1444,12 +1616,12 @@ class SceneDetector:
         # 0. 优先检测回合结束/ESC 退出确认弹窗（须位于粉红准备按钮检测之前，避免模糊背景误判）
         confirm_result = self._detect_modal_confirm_heuristic(gray, hsv)
         if confirm_result is not None:
-            return (confirm_result, None)
+            return (confirm_result, None, None)
 
         # 1. 检测二选一/三选一/多人六选一策略与悬赏决策弹窗（优先实机暗底亮框检测，再兼容亮底合成卡片）
         modal_result = self._detect_modal_choice_heuristic(gray, hsv)
         if modal_result is not None:
-            return (modal_result, None)
+            return (modal_result, None, None)
 
         # 局内身份门禁：2a 与 2b 均强制共现卫戍协议局内双锚点，局外界面严守 UNKNOWN_FREE_CURSOR
         in_game_chrome = self._has_stronghold_in_game_chrome(hsv)
@@ -1459,6 +1631,7 @@ class SceneDetector:
         if in_game_chrome and prep_hit:
             shop_open = self._detect_shop_open(frame, shop_template)
             unit_selected = self._detect_unit_selected(frame, unit_template)
+            equip_replace_open = self._detect_equip_replace_open_heuristic(gray, hsv)
             shop_slot_count = (
                 self._detect_shop_slot_count_heuristic(frame, shop_open=True)
                 if shop_open
@@ -1474,11 +1647,18 @@ class SceneDetector:
             )
             emote_panel_open = (
                 self._detect_emote_panel_open_heuristic(gray, hsv)
-                if (not shop_open and not unit_selected)
+                if (not shop_open and not unit_selected and not equip_replace_open)
                 else False
             )
             mirror_obs = self._observe_board_mirrored_heuristic(
                 hsv, shop_open=shop_open, unit_selected=unit_selected
+            )
+            boss_obs = self._observe_boss_shop_centered_heuristic(
+                hsv,
+                shop_open=shop_open,
+                board_mirrored=(mirror_obs is True),
+                unit_selected=unit_selected,
+                equip_replace_open=equip_replace_open,
             )
             return (
                 SceneDetectionResult(
@@ -1494,13 +1674,17 @@ class SceneDetector:
                     emote_panel_open=emote_panel_open,
                     board_mirrored=bool(mirror_obs) if mirror_obs is not None else False,
                     covenant_centers_u=covenant_centers_u,
+                    boss_shop_centered=bool(boss_obs) if boss_obs is not None else False,
+                    equip_replace_open=equip_replace_open,
                 ),
                 mirror_obs,
+                boss_obs,
             )
 
         # 2a.5. 实机作战期右下费用栏「◆ C <费用>」直判（置于 2b 之前，根除右下地形/队友抽屉误判为休整期）
         if in_game_chrome and self._has_real_pc_combat_cost_bar(gray, hsv):
             unit_selected = self._detect_unit_selected(frame, unit_template)
+            equip_replace_open = self._detect_equip_replace_open_heuristic(gray, hsv)
             (
                 covenant_count,
                 covenant_overflow,
@@ -1511,7 +1695,7 @@ class SceneDetector:
             )
             emote_panel_open = (
                 self._detect_emote_panel_open_heuristic(gray, hsv)
-                if not unit_selected
+                if (not unit_selected and not equip_replace_open)
                 else False
             )
             mirror_obs = self._observe_board_mirrored_heuristic(
@@ -1530,8 +1714,10 @@ class SceneDetector:
                     emote_panel_open=emote_panel_open,
                     board_mirrored=bool(mirror_obs) if mirror_obs is not None else False,
                     covenant_centers_u=covenant_centers_u,
+                    equip_replace_open=equip_replace_open,
                 ),
                 mirror_obs,
+                None,
             )
 
         # 2b. 通用底部整备槽位条纹特征（需先通过局内身份门禁，彻底免疫战前编队/干员列表/基建误判）
@@ -1547,6 +1733,9 @@ class SceneDetector:
                     )
                     shop_open = self._detect_shop_open(frame, shop_template)
                     unit_selected = self._detect_unit_selected(frame, unit_template)
+                    equip_replace_open = self._detect_equip_replace_open_heuristic(
+                        gray, hsv
+                    )
                     (
                         covenant_count,
                         covenant_overflow,
@@ -1557,11 +1746,18 @@ class SceneDetector:
                     )
                     emote_panel_open = (
                         self._detect_emote_panel_open_heuristic(gray, hsv)
-                        if (not shop_open and not unit_selected)
+                        if (not shop_open and not unit_selected and not equip_replace_open)
                         else False
                     )
                     mirror_obs = self._observe_board_mirrored_heuristic(
                         hsv, shop_open=shop_open, unit_selected=unit_selected
+                    )
+                    boss_obs = self._observe_boss_shop_centered_heuristic(
+                        hsv,
+                        shop_open=shop_open,
+                        board_mirrored=(mirror_obs is True),
+                        unit_selected=unit_selected,
+                        equip_replace_open=equip_replace_open,
                     )
                     return (
                         SceneDetectionResult(
@@ -1578,8 +1774,13 @@ class SceneDetector:
                             if mirror_obs is not None
                             else False,
                             covenant_centers_u=covenant_centers_u,
+                            boss_shop_centered=bool(boss_obs)
+                            if boss_obs is not None
+                            else False,
+                            equip_replace_open=equip_replace_open,
                         ),
                         mirror_obs,
+                        boss_obs,
                     )
 
                 # 右下角无准备按钮高亮块，且顶部中央存在作战波次 HUD 面板 -> 作战期
@@ -1587,6 +1788,9 @@ class SceneDetector:
                 if ready_vivid_ratio < 0.08 and combat_hud_score >= 0.60:
                     confidence = min(0.76, 0.62 + 0.08 * bench_score + 0.08 * combat_hud_score)
                     unit_selected = self._detect_unit_selected(frame, unit_template)
+                    equip_replace_open = self._detect_equip_replace_open_heuristic(
+                        gray, hsv
+                    )
                     (
                         covenant_count,
                         covenant_overflow,
@@ -1597,7 +1801,7 @@ class SceneDetector:
                     )
                     emote_panel_open = (
                         self._detect_emote_panel_open_heuristic(gray, hsv)
-                        if not unit_selected
+                        if (not unit_selected and not equip_replace_open)
                         else False
                     )
                     mirror_obs = self._observe_board_mirrored_heuristic(
@@ -1618,8 +1822,10 @@ class SceneDetector:
                             if mirror_obs is not None
                             else False,
                             covenant_centers_u=covenant_centers_u,
+                            equip_replace_open=equip_replace_open,
                         ),
                         mirror_obs,
+                        None,
                     )
 
         # 置信度不足时一律安全返回未知自由光标模式
@@ -1630,6 +1836,7 @@ class SceneDetector:
                 shop_open=False,
                 choice_count=3,
             ),
+            None,
             None,
         )
 
@@ -2633,25 +2840,40 @@ class SceneDetector:
         return float(np.clip(0.5 + min(std_val / 80.0, 0.3) + min(vivid_ratio, 0.2), 0.0, 1.0))
 
     def _apply_board_mirrored_latch(
-        self, result: SceneDetectionResult, mirror_obs: bool | None
+        self,
+        result: SceneDetectionResult,
+        mirror_obs: bool | None,
+        boss_obs: bool | None = None,
     ) -> SceneDetectionResult:
-        """结合当前帧镜像三态观测值更新并返回锁存后的 ``board_mirrored`` 结果。"""
+        """结合当前帧三态观测值更新并返回锁存后的 ``board_mirrored`` 与 ``boss_shop_centered`` 结果。"""
         if result.scene == GameScene.UNKNOWN_FREE_CURSOR:
             self._latched_board_mirrored = False
-            if result.board_mirrored:
-                return replace(result, board_mirrored=False)
+            self._latched_boss_shop_centered = False
+            if result.board_mirrored or result.boss_shop_centered:
+                return replace(
+                    result, board_mirrored=False, boss_shop_centered=False
+                )
             return result
 
         if result.scene in (GameScene.BATTLE_PREP, GameScene.BATTLE_COMBAT):
             if mirror_obs is not None:
                 self._latched_board_mirrored = mirror_obs
-            if result.board_mirrored != self._latched_board_mirrored:
-                return replace(result, board_mirrored=self._latched_board_mirrored)
-            return result
+            if self._latched_board_mirrored:
+                # 一旦确认右侧镜像战场，清零左侧 Boss 开店居中锁存
+                self._latched_boss_shop_centered = False
+            elif result.scene == GameScene.BATTLE_PREP and boss_obs is not None:
+                self._latched_boss_shop_centered = boss_obs
 
-        # 局内遮挡弹窗（MODAL_CHOICE / MODAL_CONFIRM）透出并保持当前锁存值
-        if result.board_mirrored != self._latched_board_mirrored:
-            return replace(result, board_mirrored=self._latched_board_mirrored)
+        # 局内非遮挡及遮挡弹窗（MODAL_CHOICE / MODAL_CONFIRM）统一透出当前锁存状态
+        if (
+            result.board_mirrored != self._latched_board_mirrored
+            or result.boss_shop_centered != self._latched_boss_shop_centered
+        ):
+            return replace(
+                result,
+                board_mirrored=self._latched_board_mirrored,
+                boss_shop_centered=self._latched_boss_shop_centered,
+            )
         return result
 
     def _apply_debounce(
@@ -2659,12 +2881,13 @@ class SceneDetector:
         raw_result: SceneDetectionResult,
         *,
         mirror_obs: bool | None = None,
+        boss_obs: bool | None = None,
     ) -> SceneDetectionResult:
-        """应用连续帧防抖滤波并维护 3D 战场镜像锁存状态。"""
+        """应用连续帧防抖滤波并维护 3D 战场镜像与 Boss 左侧开店锁存状态。"""
         with self._lock:
             if raw_result.scene == self._stable_result.scene:
                 self._stable_result = self._apply_board_mirrored_latch(
-                    raw_result, mirror_obs
+                    raw_result, mirror_obs, boss_obs
                 )
                 self._pending_scene = None
                 self._pending_count = 0
@@ -2678,7 +2901,7 @@ class SceneDetector:
 
             if self._pending_count >= self.debounce_frames:
                 self._stable_result = self._apply_board_mirrored_latch(
-                    raw_result, mirror_obs
+                    raw_result, mirror_obs, boss_obs
                 )
                 self._pending_scene = None
                 self._pending_count = 0

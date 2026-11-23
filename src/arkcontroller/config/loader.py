@@ -31,6 +31,7 @@ _LAYOUT_TOP_LEVEL_KEYS = frozenset(
         "board_quad",
         "mirrored_board_quad",
         "mirrored_equip_zone",
+        "equip_replace_zone",
         "buttons",
         "view_overrides",
     }

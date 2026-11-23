@@ -76,7 +76,9 @@ CALIBRATABLE_SCENES: tuple[GameScene, ...] = (
 VIEW_STATE_DISPLAY_NAMES: dict[LayoutViewState, str] = {
     LayoutViewState.NORMAL: "默认态（商店收起 / 未选角色）",
     LayoutViewState.SHOP_OPEN: "商店展开缩放态 (shop_open)",
+    LayoutViewState.SHOP_OPEN_BOSS: "Boss 商店展开态 (shop_open_boss)",
     LayoutViewState.UNIT_SELECTED: "选取角色缩放态 (unit_selected)",
+    LayoutViewState.COMBAT: "作战交战态 (combat)",
 }
 
 
@@ -221,7 +223,7 @@ class _CalibrationCanvas(QWidget):
             "bench_zone": bench.to_dict(),
             "equip_zone": equip.to_dict(),
         }
-        if self._view_state == LayoutViewState.SHOP_OPEN:
+        if self._view_state in (LayoutViewState.SHOP_OPEN, LayoutViewState.SHOP_OPEN_BOSS):
             state_payload["shop_zone"] = shop.to_dict()
 
         return {
@@ -640,7 +642,7 @@ class CalibrationDialog(QDialog):
 
         self._view_state_combo = QComboBox()
         for vs in LayoutViewState:
-            self._view_state_combo.addItem(VIEW_STATE_DISPLAY_NAMES[vs], userData=vs)
+            self._view_state_combo.addItem(VIEW_STATE_DISPLAY_NAMES.get(vs, vs.value), userData=vs)
         self._view_state_combo.currentIndexChanged.connect(self._on_view_state_changed)
         vbox.addWidget(self._view_state_combo)
 
@@ -792,7 +794,7 @@ class CalibrationDialog(QDialog):
         self._spin_rows.blockSignals(False)
         self._spin_cols.blockSignals(False)
         self._canvas.reset_from_layout(self._layout, view_state=vs)
-        self._set_status(f"已切换校准视图态：{VIEW_STATE_DISPLAY_NAMES[vs]}", "#1A1A1A")
+        self._set_status(f"已切换校准视图态：{VIEW_STATE_DISPLAY_NAMES.get(vs, vs.value)}", "#1A1A1A")
 
     def _on_board_dim_changed(self) -> None:
         self._canvas.set_board_dimensions(self._spin_rows.value(), self._spin_cols.value())

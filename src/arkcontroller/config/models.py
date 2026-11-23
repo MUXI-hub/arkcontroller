@@ -23,7 +23,9 @@ class LayoutViewState(str, Enum):
 
     NORMAL = "normal"
     SHOP_OPEN = "shop_open"
+    SHOP_OPEN_BOSS = "shop_open_boss"
     UNIT_SELECTED = "unit_selected"
+    COMBAT = "combat"
 
 REQUIRED_BUTTON_KEYS: tuple[str, ...] = (
     "back",
@@ -578,8 +580,22 @@ def _default_mirrored_equip_zone() -> LinearZone:
     )
 
 
+def _default_equip_replace_zone() -> LinearZone:
+    """返回干员满装备弹出「销毁并替换」面板的 2 槽外扩（±6px）装备卡区域。"""
+    return LinearZone(
+        name="equip_replace",
+        count=2,
+        start_u=0.67031,
+        start_v=0.63681,
+        end_u=0.87852,
+        end_v=0.63681,
+        slot_w=0.19141,
+        slot_h=0.48333,
+    )
+
+
 def _default_fallback_buttons() -> dict[str, NormalizedPoint]:
-    """返回回合确认弹窗、安全空白区、策略头像与交流面板的默认实测按钮锚点（兼容精简配置字典）。"""
+    """返回回合确认弹窗、安全空白区、策略头像、交流与满装备替换面板的默认实测按钮锚点（兼容精简配置字典）。"""
     return {
         "safe_blank": NormalizedPoint(u=0.1172, v=0.0903, anchor="left_edge"),
         "strategy_avatar": NormalizedPoint(u=0.9605, v=0.3243, anchor="right_edge"),
@@ -590,6 +606,7 @@ def _default_fallback_buttons() -> dict[str, NormalizedPoint]:
         "confirm_yes": NormalizedPoint(u=0.7496, v=0.6729, anchor="center_16_9"),
         "confirm_dont_ask": NormalizedPoint(u=0.4992, v=0.5597, anchor="center_16_9"),
         "emote_panel_center": NormalizedPoint(u=0.1290, v=0.7400, anchor="left_edge"),
+        "equip_replace_close": NormalizedPoint(u=0.96133, v=0.26181, anchor="center_16_9"),
     }
 
 
@@ -756,6 +773,67 @@ def _parse_view_overrides(raw: Any) -> dict[str, ViewLayoutOverride]:
     return parsed
 
 
+def _default_builtin_view_overrides() -> dict[str, ViewLayoutOverride]:
+    """返回 Boss 战左侧开店居中态与作战期镜头推近态的内置默认视口覆盖（兼容旧 JSON 与精简测试对象）。"""
+    return {
+        LayoutViewState.SHOP_OPEN_BOSS.value: ViewLayoutOverride(
+            board_transform=ViewportTransform(
+                scale_x=0.81800,
+                scale_y=0.79099,
+                offset_u=0.00110,
+                offset_v=-0.09460,
+                pivot_u=0.5,
+                pivot_v=0.5,
+            ),
+            bench_transform=ViewportTransform(
+                scale_x=0.81496,
+                scale_y=0.79099,
+                offset_u=0.00092,
+                offset_v=-0.09460,
+                pivot_u=0.5,
+                pivot_v=0.5,
+            ),
+            equip_transform=ViewportTransform(
+                scale_x=0.82724,
+                scale_y=0.79099,
+                offset_u=0.00087,
+                offset_v=-0.09460,
+                pivot_u=0.5,
+                pivot_v=0.5,
+            ),
+        ),
+        LayoutViewState.COMBAT.value: ViewLayoutOverride(
+            board_transform=ViewportTransform(
+                scale_x=1.15250,
+                scale_y=1.15000,
+                offset_u=0.03450,
+                offset_v=0.02550,
+                pivot_u=0.5,
+                pivot_v=0.5,
+            ),
+            bench_transform=ViewportTransform(
+                scale_x=1.15250,
+                scale_y=1.15000,
+                offset_u=0.03450,
+                offset_v=0.02550,
+                pivot_u=0.5,
+                pivot_v=0.5,
+            ),
+            equip_transform=ViewportTransform(
+                scale_x=1.15396,
+                scale_y=1.15000,
+                offset_u=0.03686,
+                offset_v=0.02750,
+                pivot_u=0.5,
+                pivot_v=0.5,
+            ),
+        ),
+    }
+
+
+_DEFAULT_BUILTIN_VIEW_OVERRIDES: dict[str, ViewLayoutOverride] = _default_builtin_view_overrides()
+
+
 @dataclass
 class LayoutProfile:
     """卫戍协议局内 16:9 归一化布局配置集。"""
@@ -775,6 +853,7 @@ class LayoutProfile:
     covenant_zone: SymmetricCovenantZone = field(default_factory=SymmetricCovenantZone)
     mirrored_board_quad: PerspectiveQuad = field(default_factory=_default_mirrored_board_quad)
     mirrored_equip_zone: LinearZone = field(default_factory=_default_mirrored_equip_zone)
+    equip_replace_zone: LinearZone = field(default_factory=_default_equip_replace_zone)
 
     def __post_init__(self) -> None:
         missing = [key for key in REQUIRED_BUTTON_KEYS if key not in self.buttons]
@@ -787,7 +866,10 @@ class LayoutProfile:
         key = view_state.value if isinstance(view_state, LayoutViewState) else str(view_state)
         if key == LayoutViewState.NORMAL.value:
             return None
-        return self.view_overrides.get(key)
+        override = self.view_overrides.get(key)
+        if override is not None:
+            return override
+        return _DEFAULT_BUILTIN_VIEW_OVERRIDES.get(key)
 
     def resolve_board_quad(
         self,
@@ -1052,6 +1134,29 @@ class LayoutProfile:
             (max(0.0, cu - hw), min(1.0, cv + hh)),
         ]
 
+    def resolve_equip_replace_click_point(self, index: int) -> tuple[float, float]:
+        """解析满装备「销毁并替换」面板第 index (0..1) 张装备卡底部暗红替换按钮的点击中心坐标。"""
+        count = max(1, int(self.equip_replace_zone.count))
+        cu, _ = self._linear_slot_center(self.equip_replace_zone, index, count)
+        return (float(cu), 0.82500)
+
+    def resolve_equip_replace_card_polygon(self, index: int) -> list[tuple[float, float]]:
+        """返回满装备「销毁并替换」面板第 index (0..1) 张装备卡外扩选框的顺时针 4 顶点归一化矩形。"""
+        count = max(1, int(self.equip_replace_zone.count))
+        cu, cv = self._linear_slot_center(self.equip_replace_zone, index, count)
+        hw = self.equip_replace_zone.slot_w * 0.5
+        hh = self.equip_replace_zone.slot_h * 0.5
+        left_u = max(0.004, min(0.996, cu - hw))
+        right_u = max(0.004, min(0.996, cu + hw))
+        top_v = max(0.004, min(0.996, cv - hh))
+        bot_v = max(0.004, min(0.996, cv + hh))
+        return [
+            (left_u, top_v),
+            (right_u, top_v),
+            (right_u, bot_v),
+            (left_u, bot_v),
+        ]
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为完整 JSON 字典。"""
         data: dict[str, Any] = {
@@ -1068,6 +1173,7 @@ class LayoutProfile:
             "board_quad": self.board_quad.to_dict(),
             "mirrored_board_quad": self.mirrored_board_quad.to_dict(),
             "mirrored_equip_zone": self.mirrored_equip_zone.to_dict(),
+            "equip_replace_zone": self.equip_replace_zone.to_dict(),
             "buttons": {k: v.to_dict() for k, v in self.buttons.items()},
         }
         if self.view_overrides:
@@ -1078,7 +1184,7 @@ class LayoutProfile:
     def from_dict(cls, data: Mapping[str, Any]) -> LayoutProfile:
         """从合并后的字典反序列化 LayoutProfile 并校验完整性。
 
-        自动静默忽略旧版残留的局外节点字段，并为新增的策略头像、镜像棋盘/装备区与回合确认按钮提供默认坐标兜底。
+        自动静默忽略旧版残留的局外节点字段，并为新增的策略头像、镜像棋盘/装备区、满装备替换面板与回合确认按钮提供默认坐标兜底。
         """
         buttons_raw = data.get("buttons", {})
         buttons: dict[str, NormalizedPoint] = {
@@ -1095,6 +1201,7 @@ class LayoutProfile:
         raw_cov = data.get("covenant_zone")
         raw_m_board = data.get("mirrored_board_quad")
         raw_m_equip = data.get("mirrored_equip_zone")
+        raw_eq_rep = data.get("equip_replace_zone")
         return cls(
             shop_zone=(
                 data["shop_zone"]
@@ -1193,6 +1300,15 @@ class LayoutProfile:
                     LinearZone.from_dict(raw_m_equip)
                     if isinstance(raw_m_equip, Mapping)
                     else _default_mirrored_equip_zone()
+                )
+            ),
+            equip_replace_zone=(
+                raw_eq_rep
+                if isinstance(raw_eq_rep, LinearZone)
+                else (
+                    LinearZone.from_dict(raw_eq_rep)
+                    if isinstance(raw_eq_rep, Mapping)
+                    else _default_equip_replace_zone()
                 )
             ),
         )

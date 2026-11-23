@@ -2,6 +2,22 @@
 
 本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 变更日志规范，并采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-11-23
+
+### 新增与优化 (Added & Fixed)
+- **Boss 战左侧正向开店居中态视口自适应 (`LayoutViewState.SHOP_OPEN_BOSS`) (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 实机测绘定位到 Boss 战左侧正向关卡关闭商店（`NORMAL`）与普通关卡坐标完全一致，而展开商店时镜头为保留右侧 Boss 视野采取水平居中（`offset_u ≈ +0.001`，相对普通开店 `offset_u = -0.02889` 整体右移 `+39px`）；
+  - `LayoutViewState` 新增 `SHOP_OPEN_BOSS = "shop_open_boss"`，`stronghold_layout_16_9.json` 与 `models.py` 内置默认回退写入棋盘 / 10 槽整备 / 5 槽装备独立精校缩放平移参数（实测整备 `max_err=1.52px`、装备 `max_err=0.55px`）；
+  - `SceneDetector` 新增 `SceneDetectionResult.boss_shop_centered` 与防抖锁存 `_latched_boss_shop_centered`（基于左侧青蓝防御箱水平位移 `x0>=344 & cx>=390` 自动区分普通开店与 Boss 左侧开店，46 张实机全样本 0 误报/0 漏报，遮挡帧保持锁存，镜像互斥及出局清零）；
+  - `ControlDispatcher` 自动在 `BATTLE_PREP + shop_open + boss_shop_centered` 下切换至 `SHOP_OPEN_BOSS`，HUD 顶签保持简洁显示 `商店展开`，校准面板与主控台同步支持 `Boss 开店居中态` 展示与导出。
+- **干员满装备「销毁并替换」弹窗全闭环手柄操控 (`FocusZone.EQUIP_REPLACE`) (`arkcontroller.config` & `arkcontroller.vision` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - `LayoutProfile` 新增 `equip_replace_zone`（2 槽外扩 `±6px` 装备卡选区，支持序列化与扁平覆写）、`equip_replace_close`（右上 `[×]` `(0.96133, 0.26181)`）及 `resolve_equip_replace_click_point`（底部暗红「销毁并替换」按钮中心 `v=0.82500`）/ `resolve_equip_replace_card_polygon`；
+  - `SceneDetector` 新增跨三主题且抗 `WDA_NONE` S3 选框自污染的 `_detect_equip_replace_open_heuristic`（双暗红替换钮 + 暗缝 + 右上 `[×]` 灰/深灰叉 + 面板暗底联合判定，46/46 唯一命中）并输出 `SceneDetectionResult.equip_replace_open`；
+  - `ControlDispatcher` 新增 `FocusZone.EQUIP_REPLACE`：视觉检测到面板立即重置抓取态并锁焦（优先级高于左侧装备详情 `unit_selected`，屏蔽上下键、`LB`/`RB`、`LS` 及 `LT` 组合键防逃逸入棋盘）；支持 `LS`/方向键左右在 2 件已穿戴装备间切换，按 **`A`** 点击底部暗红「销毁并替换」按钮、按 **`B`** 点击右上 `[×]` 取消关闭（附 `0.65s` 保护窗与 2 帧防抖）；HUD 顶签自动屏蔽冗余 `角色详情缩放` 后缀，主控台键位页同步补齐操作提示。
+- **自动作战期（`BATTLE_COMBAT`）推近镜头独立视口补偿 (`LayoutViewState.COMBAT`) (`arkcontroller.config` & `arkcontroller.control` & `arkcontroller.overlay`)**：
+  - 针对作战期镜头相对 `NORMAL` 推近约 `1.15x` 并向右下平移的实机特性，新增 `LayoutViewState.COMBAT = "combat"` 与 `view_overrides["combat"]`（含棋盘/整备与装备独立精校值，实测 10 槽整备 `mean_err=1.25px`、5 槽装备 `max_err=0.70px`，同步兼容 Boss 右侧镜像作战）；
+  - `ControlDispatcher` 进入 `BATTLE_COMBAT` 且非 `unit_selected` 时自动切换至 `LayoutViewState.COMBAT`，使作战期在棋盘、整备区与装备栏查看干员时 S3 选框与点击落点严丝合缝。
+
 ## [1.0.0] - 2026-11-22
 
 > **正式版里程碑基线（General Availability）**：完成从 `v0.2.2` 以来涵盖纯白极简 PRTS 桌面主控台、H1/H2/S3 鼠标穿透悬浮窗、三套卫戍主题全置灰鲁棒识别、Boss 战镜像战场、`>7` 盟约任意相位吸附与 Windows 独立单文件 `.exe` 打包的完整闭环，建立 `v1.0.0` 正式发版基线。
