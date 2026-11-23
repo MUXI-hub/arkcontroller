@@ -402,11 +402,12 @@ def test_dashboard_keymap_manual_covers_v022_mappings(dashboard) -> None:
     all_keys = [k for k, _ in all_rows]
     all_text = " ".join(desc for _, desc in all_rows)
     for keyword in ("双击 A 买牌", "查看商店干员详情", "升本", "刷新商店", "冻结", "原地转向",
-                    "白条", "不再提示", "表情", "撤退", "队友", "本局策略"):
+                    "白条", "不再提示", "表情", "撤退", "队友", "本局策略", "销毁并替换"):
         assert keyword in all_text, keyword
     assert "赠予" not in all_text
     assert "LT + RT" in all_keys
     assert ("LT + RT", "无需移焦点，一键点击右侧本局策略") in all_rows
+    assert ("LS/十字键", "满装替换：选旧装备 · A 销毁并替换 · B 取消") in all_rows
 
 
 def test_dashboard_pages_render_offscreen(qapp, dashboard) -> None:
@@ -880,3 +881,69 @@ def test_hud_s3_board_compact_corners_shorter_than_choice_box(qapp) -> None:
     finally:
         painter.end()
     assert _non_transparent_pixels(compat_img, step=2) > 200
+
+
+# ----------------------------------------------------------------------
+# v1.1.0：Boss 开店居中视图态与满装备替换状态签文案
+# ----------------------------------------------------------------------
+def test_hud_status_text_boss_shop_and_equip_replace_suppression(qapp) -> None:
+    # 1. shop_open_boss 与 shop_open 同样显示「商店展开」
+    snap_boss_shop = _snapshot(
+        scene=GameScene.BATTLE_PREP,
+        focus_label="棋盘 [2,4]",
+        view_state="shop_open_boss",
+    )
+    text_boss = HUDWindow._format_top_status_text(snap_boss_shop)
+    assert "商店展开" in text_boss
+    assert text_boss == "PRTS // 休整运营  ·  棋盘 [2,4]  ·  商店展开"
+
+    # 2. 替换装备焦点下不追加冗余的「角色详情缩放」后缀
+    snap_replace = _snapshot(
+        scene=GameScene.BATTLE_PREP,
+        focus_label="替换装备 [1/2]",
+        view_state="unit_selected",
+    )
+    text_replace = HUDWindow._format_top_status_text(snap_replace)
+    assert text_replace == "PRTS // 休整运营  ·  替换装备 [1/2]"
+    assert "角色详情缩放" not in text_replace
+
+    # 3. 常规角色详情仍保留「角色详情缩放」后缀
+    snap_detail = _snapshot(
+        scene=GameScene.BATTLE_PREP,
+        focus_label="角色详情 · 信息",
+        view_state="unit_selected",
+    )
+    assert "角色详情缩放" in HUDWindow._format_top_status_text(snap_detail)
+
+    # 4. 作战期 combat 视图态状态签清爽无多余后缀
+    snap_combat = _snapshot(
+        scene=GameScene.BATTLE_COMBAT,
+        focus_label="棋盘 [2,4]",
+        view_state="combat",
+    )
+    assert HUDWindow._format_top_status_text(snap_combat) == "PRTS // 作战中  ·  棋盘 [2,4]"
+
+    # 5. 离屏渲染满装替换与 Boss 开店态零报错
+    hud = HUDWindow()
+    for snap in (snap_boss_shop, snap_replace, snap_combat):
+        img = _render(hud, snap)
+        assert _non_transparent_pixels(img) > 120
+
+
+def test_dashboard_view_state_labels_cover_v110_states(qapp) -> None:
+    from arkcontroller.config.loader import ConfigLoader
+    from arkcontroller.config.models import LayoutViewState
+    from arkcontroller.overlay.calibration_ui import VIEW_STATE_DISPLAY_NAMES, CalibrationDialog
+    from arkcontroller.overlay.dashboard_window import VIEW_STATE_LABELS
+
+    for vs in LayoutViewState:
+        assert vs.value in VIEW_STATE_LABELS
+        assert vs in VIEW_STATE_DISPLAY_NAMES
+
+    loader = ConfigLoader(config_dir=REPO_CONFIGS)
+    _km, layout = loader.load()
+    dlg = CalibrationDialog(layout=layout, viewport=None, config_loader=loader)
+    assert dlg._view_state_combo.count() == len(LayoutViewState)
+    for idx in range(dlg._view_state_combo.count()):
+        dlg._view_state_combo.setCurrentIndex(idx)
+    dlg.close()

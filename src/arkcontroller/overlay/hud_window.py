@@ -1063,9 +1063,9 @@ class HUDWindow(QWidget):
             ):
                 segments.append(focus_label)
             view_state = getattr(snapshot, "view_state", "normal")
-            if view_state == "shop_open":
+            if view_state in ("shop_open", "shop_open_boss"):
                 segments.append("商店展开")
-            elif view_state == "unit_selected":
+            elif view_state == "unit_selected" and not focus_label.startswith("替换装备"):
                 segments.append("角色详情缩放")
             if snapshot.free_cursor_active:
                 segments.append("自由光标")
