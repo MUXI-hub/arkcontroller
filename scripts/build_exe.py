@@ -370,9 +370,9 @@ def write_entry_wrapper(target_path: Path) -> Path:
     return target_path
 
 
-def sync_clean_dist_configs() -> Path:
-    """将干净的默认 JSON 配置文件同步至 dist/configs/（严禁复制 user_override.json）。"""
-    dist_configs = DIST_DIR / "configs"
+def sync_clean_dist_configs(dist_dir: Path = DIST_DIR) -> Path:
+    """将干净的默认 JSON 配置文件同步至 <dist_dir>/configs/（严禁复制 user_override.json）。"""
+    dist_configs = dist_dir / "configs"
     dist_configs.mkdir(parents=True, exist_ok=True)
 
     # 若历史构建残留 user_override.json 则移除，保证分发目录纯净
@@ -388,13 +388,14 @@ def sync_clean_dist_configs() -> Path:
     return dist_configs
 
 
-def build_executable(*, regen_icon: bool = False) -> Path:
+def build_executable(*, regen_icon: bool = False, dist_dir: Path = DIST_DIR) -> Path:
     """执行 PyInstaller 单文件无控制台 GUI 打包并同步干净默认配置目录。"""
     version_str = read_app_version()
     if regen_icon or not ICON_PATH.is_file():
         print(f"[build] 正在生成多尺寸应用图标: {ICON_PATH}")
         generate_app_icon(ICON_PATH)
 
+    dist_dir = Path(dist_dir).resolve()
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     version_file = write_version_info_file(version_str, BUILD_DIR / "version_info.txt")
     entry_script = write_entry_wrapper(BUILD_DIR / "entry_main.py")
@@ -420,7 +421,7 @@ def build_executable(*, regen_icon: bool = False) -> Path:
         "--workpath",
         str(work_dir),
         "--distpath",
-        str(DIST_DIR),
+        str(dist_dir),
         "--paths",
         str(SRC_DIR),
         "--add-data",
@@ -450,14 +451,14 @@ def build_executable(*, regen_icon: bool = False) -> Path:
         cmd.extend(["--exclude-module", mod])
     cmd.append(str(entry_script))
 
-    print(f"[build] 开始构建 ArkController v{version_str} -> {DIST_DIR / 'ArkController.exe'}")
+    print(f"[build] 开始构建 ArkController v{version_str} -> {dist_dir / 'ArkController.exe'}")
     subprocess.run(cmd, cwd=str(REPO_ROOT), check=True)
 
-    exe_path = DIST_DIR / "ArkController.exe"
+    exe_path = dist_dir / "ArkController.exe"
     if not exe_path.is_file():
         raise FileNotFoundError(f"PyInstaller 构建完成但未找到目标产物: {exe_path}")
 
-    dist_configs = sync_clean_dist_configs()
+    dist_configs = sync_clean_dist_configs(dist_dir)
     size_mb = exe_path.stat().st_size / (1024 * 1024)
     print(f"[build] 构建成功: {exe_path} ({size_mb:.2f} MB)")
     print(f"[build] 已同步干净默认配置至: {dist_configs}")
@@ -476,6 +477,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="打包前强制重新生成 assets/arkcontroller.ico",
     )
+    parser.add_argument(
+        "--dist-dir",
+        type=Path,
+        default=DIST_DIR,
+        help="自定义输出目录（默认 dist/；当旧 dist/ArkController.exe 正在运行时可指定子目录避免文件锁冲突）",
+    )
     args = parser.parse_args(argv)
 
     if args.icon_only:
@@ -483,7 +490,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[build] 多尺寸图标已生成: {icon_file} ({icon_file.stat().st_size} bytes)")
         return 0
 
-    build_executable(regen_icon=args.regen_icon)
+    build_executable(regen_icon=args.regen_icon, dist_dir=args.dist_dir)
     return 0
 
 

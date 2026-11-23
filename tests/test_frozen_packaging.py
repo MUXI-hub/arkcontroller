@@ -231,8 +231,10 @@ class TestFrozenUACAndMainEntry:
         assert isinstance(qt_app, QApplication)
         assert not qt_app.windowIcon().isNull()
 
-    def test_packaged_ico_contains_standard_multi_sizes_and_version_is_100(self) -> None:
-        assert APP_VERSION == "1.0.0"
+    def test_packaged_ico_contains_standard_multi_sizes_and_version_matches_pyproject(self) -> None:
+        pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        assert f'version = "{APP_VERSION}"' in pyproject_text
+        assert APP_VERSION == "1.1.0"
         assert REPO_ICON.is_file()
         raw = REPO_ICON.read_bytes()
         reserved, icon_type, count = struct.unpack("<HHH", raw[:6])
